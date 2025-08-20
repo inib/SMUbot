@@ -1,0 +1,36 @@
+services:
+  api:
+    build: .
+    container_name: twitch-song-backend
+    environment:
+      - ADMIN_TOKEN=${ADMIN_TOKEN}
+      - DB_URL=sqlite:////data/db.sqlite
+      - RESET_DB="0"   # remove after the first successful start
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/data
+  bot:
+    build:
+      context: .
+      dockerfile: bot/Dockerfile
+    environment:
+      BACKEND_BASE_URL: http://api:8000
+      BACKEND_ADMIN_TOKEN: ${ADMIN_TOKEN}
+      TWITCH_BOT_TOKEN: ${TWITCH_OAUTH_TOKEN}
+      BOT_NICK: ${BOT_NICK}
+      CHANNELS: ${TWITCH_CHANNELS}         # comma-separated
+      COMMANDS_FILE: /bot/commands.txt
+    depends_on:
+      - api
+    restart: unless-stopped
+    volumes:
+      - ./bot/commands.txt:/bot/commands.txt:ro
+  web:
+    build:
+      context: .
+      dockerfile: web/Dockerfile
+    container_name: songqueue-web
+    ports:
+      - "8080:80"
+    restart: unless-stopped

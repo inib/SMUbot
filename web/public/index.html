@@ -1,0 +1,59 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Twitch Song Queue</title>
+  <link rel="stylesheet" href="style.css"/>
+</head>
+<body>
+<div class="wrap">
+  <div class="header">
+    <div class="brand">Song Queue</div>
+    <span id="ch-badge" class="badge">channel: ?</span>
+    <span id="stat-badge" class="badge">status: idle</span>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <div class="tabs">
+        <button id="tab-current" class="tab active">Current</button>
+        <button id="tab-archive" class="tab">Archive</button>
+      </div>
+
+      <div id="current-view">
+        <h2>Queue</h2>
+        <div id="queue" class="queue"></div>
+        <div class="sep"></div>
+        <h2>Played</h2>
+        <div id="played" class="queue"></div>
+        <div class="footer" id="footer-note"></div>
+      </div>
+
+      <div id="archive-view" style="display:none">
+        <h2>Archive</h2>
+        <div class="streams" id="streams"></div>
+        <div class="sep"></div>
+        <h2>Stream Queue</h2>
+        <div id="arch-queue" class="queue"></div>
+        <div class="sep"></div>
+        <h2>Played</h2>
+        <div id="arch-played" class="queue"></div>
+      </div>
+    </div>
+
+    <div class="card info">
+      <h2>How to request and bump</h2>
+      <p>Request a song in chat: <code>!request Artist - Title</code> or paste a YouTube link.</p>
+      <p>To bump a song use: <code>!prio</code> after requesting.</p>
+      <p>Subs get one free bump per stream. Followers, raids, and gifted subs grant priority points.</p>
+      <div class="sep"></div>
+      <p>This page updates live. Prioritized songs are highlighted.</p>
+      <p>Tip: Click a title to open its YouTube link.</p>
+    </div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

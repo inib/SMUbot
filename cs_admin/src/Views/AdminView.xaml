@@ -1,0 +1,39 @@
+<UserControl x:Class="TwitchSongAdmin.Views.AdminView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="clr-namespace:TwitchSongAdmin.ViewModels">
+  <Grid Margin="10">
+    <Grid.ColumnDefinitions>
+      <ColumnDefinition Width="2*"/>
+      <ColumnDefinition Width="3*"/>
+    </Grid.ColumnDefinitions>
+
+    <StackPanel>
+      <TextBlock Text="API URL"/>
+      <TextBox Text="{Binding ApiBaseUrl}" Width="300"/>
+      <TextBlock Text="Admin Token"/>
+      <PasswordBox x:Name="TokenBox" Width="300"/>
+      <Button Content="Save Token" Click="SaveToken_Click" Width="120"/>
+
+      <TextBlock Text="Channel" Margin="0,10,0,0"/>
+      <ComboBox ItemsSource="{Binding Channels}" SelectedItem="{Binding SelectedChannel}" DisplayMemberPath="Name" Width="300"/>
+
+      <TextBlock Text="Queue Settings" Margin="0,10,0,0"/>
+      <StackPanel Orientation="Horizontal">
+        <TextBlock Text="Max entries:" VerticalAlignment="Center"/>
+        <TextBox Text="{Binding MaxEntries}" Width="60"/>
+        <TextBlock Text="Per user:" Margin="10,0,0,0" VerticalAlignment="Center"/>
+        <TextBox Text="{Binding MaxPerUser}" Width="60"/>
+        <CheckBox Content="Prio-only" IsChecked="{Binding PrioOnly}" Margin="10,0,0,0"/>
+      </StackPanel>
+      <Button Content="Apply Settings" Command="{Binding ApplySettingsCommand}" Width="160"/>
+
+      <TextBlock Text="Download script path" Margin="0,10,0,0"/>
+      <TextBox Text="{Binding DownloadScriptPath}" Width="400"/>
+    </StackPanel>
+
+    <Border Grid.Column="1" Background="{StaticResource BrushPanel}" Padding="10" CornerRadius="8">
+      <TextBlock Text="Admin actions log will appear here."/>
+    </Border>
+  </Grid>
+</UserControl>
