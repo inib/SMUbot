@@ -1,0 +1,16 @@
+prefix: '!'
+request:
+  - request
+  - req
+  - r
+prioritize:
+  - prioritize
+  - prio
+  - bump
+points:
+  - points
+  - pp
+remove:
+  - remove
+  - undo
+  - del
