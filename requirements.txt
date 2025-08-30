@@ -4,3 +4,4 @@ SQLAlchemy==2.0.32
 pydantic==2.8.2
 python-dotenv==1.0.1
 sse-starlette==2.0.0
+PyYAML==6.0.2
