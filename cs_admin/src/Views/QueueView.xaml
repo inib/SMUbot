@@ -15,6 +15,7 @@
             <Button Content="Close Queue" Command="{Binding CloseQueueCommand}"/>
             <TextBox Width="200" x:Name="SongText" Text=""/>
             <Button Content="Add as Streamer" Command="{Binding AddStreamerSongCommand}"/>
+            <Button Content="Unzip Downloads" Command="{Binding UnzipDownloadsCommand}" />
         </StackPanel>
 
         <ListBox Grid.Row="1" ItemsSource="{Binding Items}" SelectedItem="{Binding Selected}">

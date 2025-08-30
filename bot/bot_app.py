@@ -1,6 +1,7 @@
 from __future__ import annotations
-import os, re, asyncio, json
+import os, re, asyncio, json, yaml
 from typing import Optional, Dict, List, Tuple
+from pathlib import Path
 
 import aiohttp
 from twitchio.ext import commands
@@ -11,6 +12,7 @@ ADMIN_TOKEN = os.getenv('BACKEND_ADMIN_TOKEN', 'change-me')
 CHANNELS = [c.strip() for c in os.getenv('CHANNELS', '').split(',') if c.strip()]
 BOT_TOKEN = os.getenv('TWITCH_BOT_TOKEN')  # token without 'oauth:'
 BOT_NICK = os.getenv('BOT_NICK')
+MESSAGES_PATH = Path(os.getenv("BOT_MESSAGES_PATH", "/bot/messages.yml"))
 
 COMMANDS_FILE = os.getenv('COMMANDS_FILE', '/bot/commands.txt')
 DEFAULT_COMMANDS = {

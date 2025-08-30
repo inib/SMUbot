@@ -1,7 +1,7 @@
 services:
   api:
     build: .
-    container_name: twitch-song-backend
+    container_name: twitch-q-backend
     environment:
       - ADMIN_TOKEN=${ADMIN_TOKEN}
       - DB_URL=sqlite:////data/db.sqlite

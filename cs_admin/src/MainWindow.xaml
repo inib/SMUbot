@@ -14,6 +14,9 @@
             <TabItem Header="Library">
                 <views:LibraryView DataContext="{Binding Library}"/>
             </TabItem>
+            <TabItem Header="Users">
+                <views:UsersView DataContext="{Binding Users}"/>
+            </TabItem>
         </TabControl>
     </Grid>
 </Window>

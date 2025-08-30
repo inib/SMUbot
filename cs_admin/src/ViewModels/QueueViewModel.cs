@@ -42,6 +42,8 @@ public class QueueViewModel : INotifyPropertyChanged
         }
     }
 
+    public string UnzipToolPath { get; set; } = ""; // bound from Admin settings later
+
     public string Status
     {
         get => _status;
@@ -56,6 +58,7 @@ public class QueueViewModel : INotifyPropertyChanged
     public ICommand MarkPlayedCommand { get; }
     public ICommand YtdlCommand { get; }
     public ICommand LoadAbletonCommand { get; }
+    public ICommand UnzipDownloadsCommand { get; }
 
     public QueueViewModel(ApiClient api)
     {
@@ -73,6 +76,7 @@ public class QueueViewModel : INotifyPropertyChanged
         MarkPlayedCommand = new RelayCommand(async o => await MarkPlayedAsync(o as QueueItem));
         YtdlCommand = new RelayCommand(o => StartYtdl(o as QueueItem));
         LoadAbletonCommand = new RelayCommand(o => StartAbleton(o as QueueItem));
+        UnzipDownloadsCommand = new RelayCommand(_ => RunUnzipTool());
     }
 
     private async void OnSseMessage(string evt, string data)
@@ -179,6 +183,25 @@ public class QueueViewModel : INotifyPropertyChanged
         if (it is null) return;
         // TODO: locate and launch Ableton project; for now just stub
         Status = $"Load Ableton for {it.DisplayLine1}";
+    }
+
+    private void RunUnzipTool()
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(UnzipToolPath))
+            { Status = "Unzip tool not configured"; return; }
+
+            var psi = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = UnzipToolPath,
+                UseShellExecute = true, // allow .bat/.cmd
+                WorkingDirectory = System.IO.Path.GetDirectoryName(UnzipToolPath) ?? ""
+            };
+            System.Diagnostics.Process.Start(psi);
+            Status = "Unzip started";
+        }
+        catch (Exception ex) { Status = $"Unzip error: {ex.Message}"; }
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;

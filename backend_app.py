@@ -508,6 +508,20 @@ def get_user_stream_state(channel_pk: int, user_id: int, db: Session = Depends(g
     )
     return {"stream_id": sid, "sub_free_used": int(st.sub_free_used)}
 
+@app.get("/channels/{channel_pk}/users", dependencies=[Depends(require_token)])
+def list_users(channel_pk: int, db: Session = Depends(get_db)):
+    return db.query(User).filter(User.channel_id==channel_pk).all()
+
+@app.put("/channels/{channel_pk}/users/{user_id}/points", dependencies=[Depends(require_token)])
+def set_points(channel_pk: int, user_id: int, payload: dict, db: Session = Depends(get_db)):
+    u = db.get(User, user_id)
+    if not u or u.channel_id != channel_pk: raise HTTPException(404)
+    u.prio_points = int(payload.get("prio_points", 0))
+    db.commit()
+    try: _broker(channel_pk).put_nowait("changed")
+    except: pass
+    return {"success": True}
+
 # =====================================
 # Routes: Queue
 # =====================================

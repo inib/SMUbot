@@ -41,7 +41,7 @@ public class ApiClient
     // ---- DTOs matching backend ----
     public record QueueDto(int id, int song_id, int user_id, int is_priority, int played);
     public record SongDto(int id, string? artist, string? title, string? youtube_link);
-    public record UserDto(int id, string username, string twitch_id);
+    public record UserDto(int id, string username, string twitch_id, int prio_points);
 
     public async Task<List<QueueDto>> GetQueueRawAsync(int channelId)
     {
@@ -63,7 +63,7 @@ public class ApiClient
         var tasks = pending.Select(async q =>
         {
             var song = await GetSongAsync(channelId, q.song_id) ?? new SongDto(q.song_id, "", "", null);
-            var user = await GetUserAsync(channelId, q.user_id) ?? new UserDto(q.user_id, "", "");
+            var user = await GetUserAsync(channelId, q.user_id) ?? new UserDto(q.user_id, "", "", 0);
             return new QueueItem
             {
                 Id = q.id,
@@ -104,5 +104,19 @@ public class ApiClient
         // Example: POST /channels/{id}/queue/{req}/played
         var resp = await _http.PostAsync(U($"/channels/{channelId}/queue/{requestId}/played"), null);
         return resp.IsSuccessStatusCode;
+    }
+
+    public async Task<List<User>> GetUsersAsync(int channelId)
+    {
+        var uri = U($"/channels/{channelId}/users");
+        var rows = await _http.GetFromJsonAsync<List<UserDto>>(uri) ?? new();
+        return rows.Select(r => new User { Id = r.id, Username = r.username, TwitchId = r.twitch_id, PrioPoints = r.prio_points }).ToList();
+    }
+
+    public async Task UpdateUserPointsAsync(int channelId, int userId, int points)
+    {
+        var uri = U($"/channels/{channelId}/users/{userId}/points");
+        var resp = await _http.PutAsJsonAsync(uri, new { prio_points = points });
+        resp.EnsureSuccessStatusCode();
     }
 }

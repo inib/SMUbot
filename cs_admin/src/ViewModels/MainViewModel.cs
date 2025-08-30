@@ -1,3 +1,4 @@
+using TwitchSongAdmin.Models;
 using TwitchSongAdmin.Services;
 
 namespace TwitchSongAdmin.ViewModels;
@@ -9,6 +10,7 @@ public class MainViewModel
     public QueueViewModel Queue { get; }
     public AdminViewModel Admin { get; }
     public LibraryViewModel Library { get; }
+    public UsersViewModel Users { get; }
 
     public MainViewModel()
     {
@@ -18,5 +20,6 @@ public class MainViewModel
         Queue = new QueueViewModel(Api) { ChannelId = 1 };
         Admin = new AdminViewModel(Api, Queue);
         Library = new LibraryViewModel();
+        Users = new UsersViewModel(Api) { ChannelId = 1 };
     }
 }

@@ -30,7 +30,16 @@
 
       <TextBlock Text="Download script path" Margin="0,10,0,0"/>
       <TextBox Text="{Binding DownloadScriptPath}" Width="400"/>
-    </StackPanel>
+      <StackPanel Orientation="Horizontal" Margin="0 5">
+        <TextBlock Text="Unzip Tool Path:" Width="150"/>
+        <TextBox Width="400" Text="{Binding UnzipToolPath}"/>
+        <Button Content="Browse" Margin="6,0,0,0" Click="BrowseUnzip_Click"/>
+      </StackPanel>
+      <StackPanel Orientation="Horizontal" Margin="0 10">
+        <Button Content="Load Settings" Command="{Binding LoadSettingsCommand}" />
+        <Button Content="Save Settings" Margin="8,0,0,0" Command="{Binding SaveSettingsCommand}" />
+      </StackPanel>
+     </StackPanel>      
 
     <Border Grid.Column="1" Background="{StaticResource BrushPanel}" Padding="10" CornerRadius="8">
       <TextBlock Text="Admin actions log will appear here."/>
