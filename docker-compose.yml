@@ -20,12 +20,15 @@ services:
       TWITCH_BOT_TOKEN: ${TWITCH_OAUTH_TOKEN}
       BOT_NICK: ${BOT_NICK}
       CHANNELS: ${TWITCH_CHANNELS}         # comma-separated
-      COMMANDS_FILE: /bot/commands.txt
+      COMMANDS_FILE: /bot/commands.yml
+      BOT_MESSAGES_PATH: /bot/messages.yml
     depends_on:
       - api
     restart: unless-stopped
+
     volumes:
-      - ./bot/commands.txt:/bot/commands.txt:ro
+      - ./bot/commands.yml:/bot/commands.yml:ro
+      - ./bot/messages.yml:/bot/messages.yml:ro
   web:
     build:
       context: .

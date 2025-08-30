@@ -14,13 +14,25 @@ BOT_TOKEN = os.getenv('TWITCH_BOT_TOKEN')  # token without 'oauth:'
 BOT_NICK = os.getenv('BOT_NICK')
 MESSAGES_PATH = Path(os.getenv("BOT_MESSAGES_PATH", "/bot/messages.yml"))
 
-COMMANDS_FILE = os.getenv('COMMANDS_FILE', '/bot/commands.txt')
+COMMANDS_FILE = os.getenv('COMMANDS_FILE', '/bot/commands.yml')
 DEFAULT_COMMANDS = {
     'prefix': '!',
-    'request': 'request,req,r',
-    'prioritize': 'prioritize,prio,bump',
-    'points': 'points,pp',
-    'remove': 'remove,undo,del'
+    'request': ['request', 'req', 'r'],
+    'prioritize': ['prioritize', 'prio', 'bump'],
+    'points': ['points', 'pp'],
+    'remove': ['remove', 'undo', 'del'],
+}
+
+DEFAULT_MESSAGES = {
+    'channel_not_registered': 'Channel not registered in backend',
+    'request_added': 'Added: {artist} - {title}',
+    'prioritize_limit': 'Limit reached: 3 prioritized songs per stream',
+    'prioritize_no_target': 'No eligible request to prioritize',
+    'prioritize_success': 'Prioritized request #{request_id}',
+    'points': '{username}, points: {points}',
+    'remove_no_pending': 'You have no pending requests',
+    'remove_success': 'Removed your latest request #{request_id}',
+    'failed': 'Failed: {error}',
 }
 
 YOUTUBE_PATTERNS = [
@@ -134,17 +146,22 @@ def load_commands(path: str) -> Dict[str, List[str]]:
     cfg = DEFAULT_COMMANDS.copy()
     try:
         with open(path, 'r', encoding='utf-8') as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith('#'):
-                    continue
-                if '=' in line:
-                    k, v = line.split('=', 1)
-                    cfg[k.strip()] = v.strip()
+            data = yaml.safe_load(f) or {}
+            cfg.update(data)
     except FileNotFoundError:
         pass
-    mapped = { k: [x.strip() for x in v.split(',')] if k != 'prefix' else [v] for k, v in cfg.items() }
-    return mapped
+    return {k: v if isinstance(v, list) else [v] for k, v in cfg.items()}
+
+
+def load_messages(path: Path) -> Dict[str, str]:
+    cfg: Dict[str, str] = DEFAULT_MESSAGES.copy()
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            data = yaml.safe_load(f) or {}
+            cfg.update(data)
+    except FileNotFoundError:
+        pass
+    return cfg
 
 # ---- bot ----
 class SongBot(commands.Bot):
@@ -152,9 +169,10 @@ class SongBot(commands.Bot):
         if not BOT_TOKEN or not BOT_NICK:
             raise RuntimeError('TWITCH_BOT_TOKEN and BOT_NICK required')
         self.commands_map = load_commands(COMMANDS_FILE)
+        self.messages = load_messages(MESSAGES_PATH)
         prefix = self.commands_map['prefix'][0]
         super().__init__(token=f"oauth:{BOT_TOKEN}", prefix=prefix, initial_channels=CHANNELS or [])
-        self.channel_map = {}
+        self.channel_map: Dict[str, Dict] = {}
         self.ready_event = asyncio.Event()
 
     async def event_ready(self):
@@ -185,7 +203,7 @@ class SongBot(commands.Bot):
         ch_name = msg.channel.name.lower()
         ch_row = self.channel_map.get(ch_name)
         if not ch_row:
-            await msg.channel.send('Channel not registered in backend')
+            await msg.channel.send(self.messages['channel_not_registered'])
             return
         channel_pk = ch_row['id']
         user_id = await backend.find_or_create_user(channel_pk, str(msg.author.id), msg.author.name)
@@ -213,17 +231,29 @@ class SongBot(commands.Bot):
 
         try:
             # initial requests are non-priority
-            await backend.add_request(channel_pk, song['id'], user_id, want_priority=False, prefer_sub_free=True, is_subscriber=msg.author.is_subscriber)
-            await msg.channel.send(f"Added: {song.get('artist','')} - {song.get('title','')}")
+            await backend.add_request(
+                channel_pk,
+                song['id'],
+                user_id,
+                want_priority=False,
+                prefer_sub_free=True,
+                is_subscriber=msg.author.is_subscriber,
+            )
+            await msg.channel.send(
+                self.messages['request_added'].format(
+                    artist=song.get('artist', ''),
+                    title=song.get('title', ''),
+                )
+            )
         except Exception as e:
-            await msg.channel.send(f"Failed: {e}")
+            await msg.channel.send(self.messages['failed'].format(error=e))
 
     async def handle_prioritize(self, msg, arg: str):
         # user can prioritize up to 3 songs per stream
         ch_name = msg.channel.name.lower()
         ch_row = self.channel_map.get(ch_name)
         if not ch_row:
-            await msg.channel.send('Channel not registered in backend')
+            await msg.channel.send(self.messages['channel_not_registered'])
             return
         channel_pk = ch_row['id']
         user_id = await backend.find_or_create_user(channel_pk, str(msg.author.id), msg.author.name)
@@ -231,7 +261,7 @@ class SongBot(commands.Bot):
         queue = await backend.get_queue(channel_pk)
         my_prio = [q for q in queue if q['user_id'] == user_id and q['is_priority'] == 1]
         if len(my_prio) >= 3:
-            await msg.channel.send('Limit reached: 3 prioritized songs per stream')
+            await msg.channel.send(self.messages['prioritize_limit'])
             return
 
         # choose target: numeric id if given, else latest non-priority pending
@@ -243,47 +273,63 @@ class SongBot(commands.Bot):
             mine = [q for q in queue if q['user_id'] == user_id and q['played'] == 0 and q['is_priority'] == 0]
             target = mine[-1] if mine else None
         if not target:
-            await msg.channel.send('No eligible request to prioritize')
+            await msg.channel.send(self.messages['prioritize_no_target'])
             return
 
         try:
             # re-add as priority, then delete old
-            await backend.add_request(channel_pk, target['song_id'], user_id, want_priority=True, prefer_sub_free=True, is_subscriber=msg.author.is_subscriber)
+            await backend.add_request(
+                channel_pk,
+                target['song_id'],
+                user_id,
+                want_priority=True,
+                prefer_sub_free=True,
+                is_subscriber=msg.author.is_subscriber,
+            )
             await backend.delete_request(channel_pk, target['id'])
-            await msg.channel.send(f"Prioritized request #{target['id']}")
+            await msg.channel.send(
+                self.messages['prioritize_success'].format(request_id=target['id'])
+            )
         except Exception as e:
-            await msg.channel.send(f"Failed: {e}")
+            await msg.channel.send(self.messages['failed'].format(error=e))
 
     async def handle_points(self, msg):
         ch_name = msg.channel.name.lower()
         ch_row = self.channel_map.get(ch_name)
         if not ch_row:
-            await msg.channel.send('Channel not registered in backend')
+            await msg.channel.send(self.messages['channel_not_registered'])
             return
         channel_pk = ch_row['id']
         user_id = await backend.find_or_create_user(channel_pk, str(msg.author.id), msg.author.name)
         u = await backend.get_user(channel_pk, user_id)
-        await msg.channel.send(f"{msg.author.name}, points: {u.get('prio_points', 0)}")
+        await msg.channel.send(
+            self.messages['points'].format(
+                username=msg.author.name,
+                points=u.get('prio_points', 0),
+            )
+        )
 
     async def handle_remove(self, msg):
         ch_name = msg.channel.name.lower()
         ch_row = self.channel_map.get(ch_name)
         if not ch_row:
-            await msg.channel.send('Channel not registered in backend')
+            await msg.channel.send(self.messages['channel_not_registered'])
             return
         channel_pk = ch_row['id']
         user_id = await backend.find_or_create_user(channel_pk, str(msg.author.id), msg.author.name)
         queue = await backend.get_queue(channel_pk)
         mine = [q for q in queue if q['user_id'] == user_id and q['played'] == 0]
         if not mine:
-            await msg.channel.send('You have no pending requests')
+            await msg.channel.send(self.messages['remove_no_pending'])
             return
         latest = mine[-1]
         try:
             await backend.delete_request(channel_pk, latest['id'])
-            await msg.channel.send(f"Removed your latest request #{latest['id']}")
+            await msg.channel.send(
+                self.messages['remove_success'].format(request_id=latest['id'])
+            )
         except Exception as e:
-            await msg.channel.send(f"Failed: {e}")
+            await msg.channel.send(self.messages['failed'].format(error=e))
 
 # ---- entry ----
 async def main():
