@@ -20,11 +20,15 @@
 const params = new URLSearchParams(location.search);
 const BACKEND = (params.get('backend') || 'http://localhost:8000').replace(/\/$/, '');
 const CHANNEL = params.get('channel') || '1';
+const STREAM  = params.get('stream');
 
 async function api(p){ const r = await fetch(`${BACKEND}${p}`); return r.json(); }
 
 async function refresh(){
-  const queue = await api(`/channels/${CHANNEL}/queue`);
+  const endpoint = STREAM
+    ? `/channels/${CHANNEL}/streams/${STREAM}/queue`
+    : `/channels/${CHANNEL}/queue`;
+  const queue = await api(endpoint);
   const pending = queue.filter(q=>q.played===0);
   const prio = pending.filter(q=>q.is_priority===1);
   const non  = pending.filter(q=>q.is_priority===0);
@@ -45,9 +49,11 @@ async function refresh(){
 
 // initial render
 refresh();
-// live updates
-const es = new EventSource(`${BACKEND}/channels/${CHANNEL}/queue/stream`);
-es.addEventListener('queue', ()=> refresh());
+// live updates for current stream only
+if(!STREAM){
+  const es = new EventSource(`${BACKEND}/channels/${CHANNEL}/queue/stream`);
+  es.addEventListener('queue', ()=> refresh());
+}
 </script>
 </body>
 </html>

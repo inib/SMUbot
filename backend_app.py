@@ -229,6 +229,14 @@ class EventOut(BaseModel):
     class Config:
         from_attributes = True
 
+class StreamOut(BaseModel):
+    id: int
+    started_at: datetime
+    ended_at: Optional[datetime]
+
+    class Config:
+        from_attributes = True
+
 # =====================================
 # FastAPI app and deps
 # =====================================
@@ -848,6 +856,15 @@ def list_events(channel_pk: int, type: Optional[str] = None, since: Optional[str
 # =====================================
 # Routes: Streams
 # =====================================
+@app.get("/channels/{channel_pk}/streams", response_model=List[StreamOut])
+def list_streams(channel_pk: int, db: Session = Depends(get_db)):
+    return (
+        db.query(StreamSession)
+        .filter(StreamSession.channel_id == channel_pk)
+        .order_by(StreamSession.started_at.asc())
+        .all()
+    )
+
 @app.post("/channels/{channel_pk}/streams/start", response_model=dict, dependencies=[Depends(require_token)])
 def start_stream(channel_pk: int, db: Session = Depends(get_db)):
     sid = current_stream(db, channel_pk)

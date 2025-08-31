@@ -112,7 +112,10 @@ function sse(){
     const es = new EventSource(`${BACKEND}/channels/${CHANNEL}/queue/stream`);
     es.onopen = ()=> statBadge.textContent = 'status: live';
     es.onerror = ()=> statBadge.textContent = 'status: reconnecting';
-    es.addEventListener('queue', ()=> refreshCurrent());
+    es.addEventListener('queue', ()=>{
+      refreshCurrent();
+      if(tabArc.classList.contains('active')) loadStreams();
+    });
   }catch(e){ console.error(e); }
 }
 
