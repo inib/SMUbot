@@ -793,7 +793,8 @@ def mark_played(channel_pk: int, request_id: int, db: Session = Depends(get_db))
 # =====================================
 @app.post("/channels/{channel_pk}/events", response_model=dict, dependencies=[Depends(require_token)])
 def log_event(channel_pk: int, payload: EventIn, db: Session = Depends(get_db)):
-    meta_str = json.dumps(payload.meta or {})
+    meta = payload.meta or {}
+    meta_str = json.dumps(meta)
     ev = Event(channel_id=channel_pk, event_type=payload.type, user_id=payload.user_id, meta=meta_str)
     db.add(ev)
     db.commit()
@@ -803,11 +804,15 @@ def log_event(channel_pk: int, payload: EventIn, db: Session = Depends(get_db)):
         if payload.user_id:
             award_prio_points(db, channel_pk, payload.user_id, 1)
     elif payload.type == "gift_sub":
-        # meta expects {"count": N}
-        count = int((payload.meta or {}).get("count", 1))
+        # metadata expects {"count": N}
+        count = int(meta.get("count", 1))
         points = count // 5
         if payload.user_id and points > 0:  # gifter
-            award_prio_points(db, channel_pk, payload.user_id, points)
+            award_prio_points(db, channel_pk, payload.user_id, count)
+    elif payload.type == "bits":
+        amount = int(meta.get("amount", 0))
+        if payload.user_id and amount >= 200:
+            award_prio_points(db, channel_pk, payload.user_id, 1)
     elif payload.type == "sub":
         # no automatic points; handled via free-per-stream when requesting
         pass
