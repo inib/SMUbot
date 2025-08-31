@@ -2,6 +2,7 @@ from __future__ import annotations
 import os, re, asyncio, json, yaml
 from typing import Optional, Dict, List, Tuple
 from pathlib import Path
+from datetime import datetime
 
 import aiohttp
 from twitchio.ext import commands
@@ -24,15 +25,24 @@ DEFAULT_COMMANDS = {
 }
 
 DEFAULT_MESSAGES = {
+    'currency_singular': 'point',
+    'currency_plural': 'points',
     'channel_not_registered': 'Channel not registered in backend',
     'request_added': 'Added: {artist} - {title}',
     'prioritize_limit': 'Limit reached: 3 prioritized songs per stream',
     'prioritize_no_target': 'No eligible request to prioritize',
     'prioritize_success': 'Prioritized request #{request_id}',
-    'points': '{username}, points: {points}',
+    'points': '{username}, {points} {currency_plural}',
     'remove_no_pending': 'You have no pending requests',
     'remove_success': 'Removed your latest request #{request_id}',
     'failed': 'Failed: {error}',
+    'played_next': 'This was {artist} - {title} requested by {user}. Next up {next_artist} - {next_title} requested by {next_user}',
+    'played_last': 'This was {artist} - {title} requested by {user}. @{channel} no more bumped songs',
+    'bump_free': '{artist} - {title} got a free bump, congrats {user}',
+    'award_follow': 'Thx for following {username}, take {word} - you have now {points} {currency_plural}',
+    'award_raid': 'Thx for raiding {username}, take {word} - you have now {points} {currency_plural}',
+    'award_gift_sub': 'Thx for gifting {count} subs {username}, take {word} - you have now {points} {currency_plural}',
+    'award_bits': 'Thx for cheering {amount} bits {username}, take {word} - you have now {points} {currency_plural}',
 }
 
 YOUTUBE_PATTERNS = [
@@ -105,14 +115,26 @@ class Backend:
             'is_subscriber': is_subscriber,
         })
 
-    async def get_queue(self, channel_pk: int):
-        return await self._req('GET', f"/channels/{channel_pk}/queue")
+    async def get_queue(self, channel_pk: int, include_played: bool = False):
+        path = f"/channels/{channel_pk}/queue"
+        if include_played:
+            path += "?include_played=1"
+        return await self._req('GET', path)
 
     async def delete_request(self, channel_pk: int, request_id: int):
         return await self._req('DELETE', f"/channels/{channel_pk}/queue/{request_id}")
 
     async def get_user(self, channel_pk: int, user_id: int):
         return await self._req('GET', f"/channels/{channel_pk}/users/{user_id}")
+
+    async def get_song(self, channel_pk: int, song_id: int):
+        return await self._req('GET', f"/channels/{channel_pk}/songs/{song_id}")
+
+    async def get_events(self, channel_pk: int, since: Optional[str] = None):
+        path = f"/channels/{channel_pk}/events"
+        if since:
+            path += f"?since={since}"
+        return await self._req('GET', path)
 
 backend = Backend(BACKEND_URL, ADMIN_TOKEN)
 
@@ -170,14 +192,25 @@ class SongBot(commands.Bot):
             raise RuntimeError('TWITCH_BOT_TOKEN and BOT_NICK required')
         self.commands_map = load_commands(COMMANDS_FILE)
         self.messages = load_messages(MESSAGES_PATH)
+        self.currency_singular = self.messages.get('currency_singular', 'point')
+        self.currency_plural = self.messages.get('currency_plural', 'points')
         prefix = self.commands_map['prefix'][0]
         super().__init__(token=f"oauth:{BOT_TOKEN}", prefix=prefix, initial_channels=CHANNELS or [])
         self.channel_map: Dict[str, Dict] = {}
         self.ready_event = asyncio.Event()
+        self.state: Dict[int, Dict] = {}
 
     async def event_ready(self):
         rows = await backend.get_channels()
         self.channel_map = { r['channel_name'].lower(): r for r in rows }
+        for _, row in self.channel_map.items():
+            pk = row['id']
+            initial_queue = await backend.get_queue(pk, include_played=True)
+            self.state[pk] = {
+                'queue': initial_queue,
+                'last_event': datetime.utcnow().isoformat(),
+            }
+            asyncio.create_task(self.listen_backend(row['channel_name'], pk))
         self.ready_event.set()
 
     async def event_message(self, message):
@@ -306,6 +339,7 @@ class SongBot(commands.Bot):
             self.messages['points'].format(
                 username=msg.author.name,
                 points=u.get('prio_points', 0),
+                currency_plural=self.currency_plural,
             )
         )
 
@@ -330,6 +364,130 @@ class SongBot(commands.Bot):
             )
         except Exception as e:
             await msg.channel.send(self.messages['failed'].format(error=e))
+
+    async def listen_backend(self, ch_name: str, channel_pk: int):
+        url = f"{backend.base}/channels/{channel_pk}/queue/stream"
+        while True:
+            try:
+                if backend.session is None:
+                    await backend.start()
+                async with backend.session.get(url) as resp:
+                    async for line in resp.content:
+                        line = line.decode().strip()
+                        if line.startswith("data:"):
+                            await self.process_backend_update(ch_name, channel_pk)
+            except Exception:
+                await asyncio.sleep(5)
+
+    async def process_backend_update(self, ch_name: str, channel_pk: int):
+        state = self.state.get(channel_pk, {})
+        prev_queue = state.get('queue', [])
+        last_event = state.get('last_event')
+        new_queue = await backend.get_queue(channel_pk, include_played=True)
+
+        await self.check_played(ch_name, channel_pk, prev_queue, new_queue)
+        await self.check_bumps(ch_name, channel_pk, prev_queue, new_queue)
+
+        events = await backend.get_events(channel_pk, since=last_event) if last_event else await backend.get_events(channel_pk)
+        if events:
+            for ev in reversed(events):
+                ev_time = ev['event_time']
+                if last_event and ev_time <= last_event:
+                    continue
+                await self.announce_event(ch_name, channel_pk, ev)
+            state['last_event'] = max(ev['event_time'] for ev in events)
+        state['queue'] = new_queue
+
+    async def check_played(self, ch_name: str, channel_pk: int, prev_queue: List[dict], new_queue: List[dict]):
+        prev_map = {q['id']: q for q in prev_queue}
+        chan = self.get_channel(ch_name.lower())
+        if not chan:
+            return
+        for req in new_queue:
+            old = prev_map.get(req['id'])
+            if old and old['played'] == 0 and req['played'] == 1:
+                song = await backend.get_song(channel_pk, req['song_id'])
+                user = await backend.get_user(channel_pk, req['user_id'])
+                pending_prio = [q for q in new_queue if q['played'] == 0 and q['is_priority'] == 1]
+                if pending_prio:
+                    next_req = pending_prio[0]
+                    next_song = await backend.get_song(channel_pk, next_req['song_id'])
+                    next_user = await backend.get_user(channel_pk, next_req['user_id'])
+                    msg = self.messages['played_next'].format(
+                        artist=song.get('artist', '?'),
+                        title=song.get('title', '?'),
+                        user=user.get('username', '?'),
+                        next_artist=next_song.get('artist', '?'),
+                        next_title=next_song.get('title', '?'),
+                        next_user=next_user.get('username', '?'),
+                    )
+                else:
+                    msg = self.messages['played_last'].format(
+                        artist=song.get('artist', '?'),
+                        title=song.get('title', '?'),
+                        user=user.get('username', '?'),
+                        channel=ch_name,
+                    )
+                await chan.send(msg)
+
+    async def check_bumps(self, ch_name: str, channel_pk: int, prev_queue: List[dict], new_queue: List[dict]):
+        prev_map = {q['id']: q for q in prev_queue}
+        chan = self.get_channel(ch_name.lower())
+        if not chan:
+            return
+        for req in new_queue:
+            old = prev_map.get(req['id'])
+            new_prio = req['is_priority'] == 1 and req.get('priority_source') == 'admin'
+            was_prio = old and old['is_priority'] == 1 if old else False
+            if new_prio and not was_prio:
+                song = await backend.get_song(channel_pk, req['song_id'])
+                user = await backend.get_user(channel_pk, req['user_id'])
+                await chan.send(
+                    self.messages['bump_free'].format(
+                        artist=song.get('artist', '?'),
+                        title=song.get('title', '?'),
+                        user=user.get('username', '?'),
+                    )
+                )
+
+    async def announce_event(self, ch_name: str, channel_pk: int, ev: dict):
+        chan = self.get_channel(ch_name.lower())
+        if not chan:
+            return
+        user = None
+        if ev.get('user_id'):
+            user = await backend.get_user(channel_pk, ev['user_id'])
+        if not user:
+            return
+        meta = json.loads(ev.get('meta') or '{}')
+        etype = ev['type']
+        delta = 1
+        extra: Dict[str, int] = {}
+        if etype == 'gift_sub':
+            count = int(meta.get('count', 1))
+            delta = count
+            extra['count'] = count
+        elif etype == 'bits':
+            amount = int(meta.get('amount', 0))
+            extra['amount'] = amount
+        elif etype not in ('follow', 'raid'):
+            return
+        word = (
+            f"this {self.currency_singular}"
+            if delta == 1
+            else f"these {delta} {self.currency_plural}"
+        )
+        template = self.messages.get(f"award_{etype}")
+        if template:
+            await chan.send(
+                template.format(
+                    username=user.get('username', ''),
+                    word=word,
+                    points=user.get('prio_points', 0),
+                    currency_plural=self.currency_plural,
+                    **extra,
+                )
+            )
 
 # ---- entry ----
 async def main():
