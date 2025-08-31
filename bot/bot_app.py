@@ -22,6 +22,7 @@ DEFAULT_COMMANDS = {
     'prioritize': ['prioritize', 'prio', 'bump'],
     'points': ['points', 'pp'],
     'remove': ['remove', 'undo', 'del'],
+    'archive': ['archive'],
 }
 
 DEFAULT_MESSAGES = {
@@ -36,6 +37,8 @@ DEFAULT_MESSAGES = {
     'remove_no_pending': 'You have no pending requests',
     'remove_success': 'Removed your latest request #{request_id}',
     'failed': 'Failed: {error}',
+    'archive_success': 'Archived current queue and started new stream',
+    'archive_denied': 'Only channel owner or moderators can archive the queue',
     'played_next': 'This was {artist} - {title} requested by {user}. Next up {next_artist} - {next_title} requested by {next_user}',
     'played_last': 'This was {artist} - {title} requested by {user}. @{channel} no more bumped songs',
     'bump_free': '{artist} - {title} got a free bump, congrats {user}',
@@ -123,6 +126,9 @@ class Backend:
 
     async def delete_request(self, channel_pk: int, request_id: int):
         return await self._req('DELETE', f"/channels/{channel_pk}/queue/{request_id}")
+
+    async def archive_stream(self, channel_pk: int):
+        return await self._req('POST', f"/channels/{channel_pk}/streams/archive")
 
     async def get_user(self, channel_pk: int, user_id: int):
         return await self._req('GET', f"/channels/{channel_pk}/users/{user_id}")
@@ -231,6 +237,8 @@ class SongBot(commands.Bot):
             await self.handle_points(message)
         elif cmd_lower in self.commands_map['remove']:
             await self.handle_remove(message)
+        elif cmd_lower in self.commands_map['archive']:
+            await self.handle_archive(message)
 
     async def handle_request(self, msg, arg: str):
         ch_name = msg.channel.name.lower()
@@ -362,6 +370,23 @@ class SongBot(commands.Bot):
             await msg.channel.send(
                 self.messages['remove_success'].format(request_id=latest['id'])
             )
+        except Exception as e:
+            await msg.channel.send(self.messages['failed'].format(error=e))
+
+    async def handle_archive(self, msg):
+        if not (msg.author.is_mod or msg.author.is_broadcaster):
+            await msg.channel.send(self.messages['archive_denied'])
+            return
+        ch_name = msg.channel.name.lower()
+        ch_row = self.channel_map.get(ch_name)
+        if not ch_row:
+            await msg.channel.send(self.messages['channel_not_registered'])
+            return
+        channel_pk = ch_row['id']
+        try:
+            await backend.archive_stream(channel_pk)
+            await self.process_backend_update(ch_name, channel_pk)
+            await msg.channel.send(self.messages['archive_success'])
         except Exception as e:
             await msg.channel.send(self.messages['failed'].format(error=e))
 
