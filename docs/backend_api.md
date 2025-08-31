@@ -55,8 +55,13 @@ This document summarizes the REST endpoints exposed by `backend_app.py`.
 ## Events
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/channels/{channel_pk}/events` | Log a channel event such as follows or subscriptions (admin). |
+| POST | `/channels/{channel_pk}/events` | Log a channel event such as follows, subscriptions, or bits (admin). |
 | GET | `/channels/{channel_pk}/events` | Retrieve logged events with optional filtering by type and time. |
+
+Certain events award priority points:
+
+- `bits` events grant 1 point for any cheer of at least 200 bits.
+- Gifted subs (`gift_sub` events) grant 1 point for every 5 subscriptions gifted.
 
 ## Streams
 | Method | Path | Description |
