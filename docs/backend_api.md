@@ -66,6 +66,7 @@ Certain events award priority points:
 ## Streams
 | Method | Path | Description |
 |--------|------|-------------|
+| GET | `/channels/{channel_pk}/streams` | List stream sessions for a channel. |
 | POST | `/channels/{channel_pk}/streams/start` | Ensure a stream session exists and return its ID (admin). |
 | POST | `/channels/{channel_pk}/streams/archive` | Close the current stream and start a new session (admin). |
 

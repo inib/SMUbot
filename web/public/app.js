@@ -88,15 +88,18 @@ async function refreshCurrent(){
 
 async function loadStreams(){
   streamsEl.innerHTML = '';
-  const rows = await api(`/channels/${CHANNEL}/streams`).catch(()=>[]);
+  const rows = await api(`/channels/${CHANNEL}/streams`).catch(err=>{console.error(err);return [];});
   rows.sort((a,b)=> new Date(b.started_at) - new Date(a.started_at));
+  let first = null;
   rows.forEach(s=>{
     const div = document.createElement('div');
     div.className = 'stream';
     div.textContent = `${new Date(s.started_at).toLocaleString()} ${s.ended_at ? '— ended' : ''}`;
     div.onclick = ()=> selectStream(s.id, div);
     streamsEl.appendChild(div);
+    if(!first) first = { id: s.id, node: div };
   });
+  if(first) selectStream(first.id, first.node);
 }
 async function selectStream(streamId, node){
   [...streamsEl.children].forEach(x=>x.classList.remove('active'));
@@ -112,7 +115,10 @@ function sse(){
     const es = new EventSource(`${BACKEND}/channels/${CHANNEL}/queue/stream`);
     es.onopen = ()=> statBadge.textContent = 'status: live';
     es.onerror = ()=> statBadge.textContent = 'status: reconnecting';
-    es.addEventListener('queue', ()=> refreshCurrent());
+    es.addEventListener('queue', ()=>{
+      refreshCurrent();
+      if(tabArc.classList.contains('active')) loadStreams();
+    });
   }catch(e){ console.error(e); }
 }
 
