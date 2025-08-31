@@ -819,7 +819,8 @@ def log_event(channel_pk: int, payload: EventIn, db: Session = Depends(get_db)):
     elif payload.type == "gift_sub":
         # metadata expects {"count": N}
         count = int(meta.get("count", 1))
-        if payload.user_id:  # gifter
+        points = count // 5
+        if payload.user_id and points > 0:  # gifter
             award_prio_points(db, channel_pk, payload.user_id, count)
     elif payload.type == "bits":
         amount = int(meta.get("amount", 0))
