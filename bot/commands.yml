@@ -14,3 +14,5 @@ remove:
   - remove
   - undo
   - del
+archive:
+  - archive
