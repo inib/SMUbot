@@ -576,6 +576,19 @@ def add_request(channel_pk: int, payload: RequestCreate, db: Session = Depends(g
     enforce_queue_limits(db, channel_pk, payload.user_id, payload.want_priority)
     sid = current_stream(db, channel_pk)
 
+    # If subscriber's first request this stream, award a prio point
+    existing_req = (
+        db.query(Request.id)
+        .filter(
+            Request.channel_id == channel_pk,
+            Request.stream_id == sid,
+            Request.user_id == payload.user_id,
+        )
+        .first()
+    )
+    if not existing_req and payload.is_subscriber:
+        award_prio_points(db, channel_pk, payload.user_id, 1)
+
     max_pos = db.query(func.coalesce(func.max(Request.position), 0))\
         .filter(Request.channel_id == channel_pk,
                 Request.stream_id == sid,
