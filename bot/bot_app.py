@@ -84,6 +84,13 @@ class Backend:
     async def get_channels(self):
         return await self._req('GET', "/channels")
 
+    async def add_channel(self, channel_name: str, channel_id: str, join_active: int = 1):
+        return await self._req('POST', "/channels", {
+            'channel_name': channel_name,
+            'channel_id': channel_id,
+            'join_active': join_active,
+        })
+
     async def find_or_create_user(self, channel_pk: int, twitch_id: str, username: str) -> int:
         users = await self._req('GET', f"/channels/{channel_pk}/users?search={username}")
         for u in users:
@@ -208,7 +215,15 @@ class SongBot(commands.Bot):
 
     async def event_ready(self):
         rows = await backend.get_channels()
-        self.channel_map = { r['channel_name'].lower(): r for r in rows }
+        existing = { r['channel_name'].lower(): r for r in rows }
+        for ch in CHANNELS:
+            name = ch.strip()
+            key = name.lower()
+            if key and key not in existing:
+                new_row = await backend.add_channel(name, name)
+                rows.append(new_row)
+                existing[key] = new_row
+        self.channel_map = existing
         for _, row in self.channel_map.items():
             pk = row['id']
             initial_queue = await backend.get_queue(pk, include_played=True)
