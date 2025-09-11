@@ -18,5 +18,4 @@ backend_app.Base.metadata.create_all(bind=backend_app.engine)
 print("DB ready at", os.getenv("DB_URL"))
 PY
 
-
-uvicorn backend_app:app --host 0.0.0.0 --port 8000
+uvicorn backend_app:app --host 0.0.0.0 --port "${API_PORT:-8000}"
