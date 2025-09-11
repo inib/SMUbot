@@ -19,7 +19,7 @@ Additional directories include:
    ```bash
    docker-compose up --build
    ```
-   This launches the API on port 8000, the bot, and the web UI on port 8080.
+   This launches the API on port 8000 (set with `API_PORT`), the bot, and the web UI on port 8080 (set with `WEB_PORT`).
 
 ## Backend Highlights
 - Uses SQLite by default (`DB_URL` configurable) and defines models for channels, songs, users, stream sessions, and requests.

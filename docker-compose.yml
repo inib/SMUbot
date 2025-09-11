@@ -6,8 +6,9 @@ services:
       - ADMIN_TOKEN=${ADMIN_TOKEN}
       - DB_URL=sqlite:////data/db.sqlite
       - RESET_DB="1"   # remove after the first successful start
+      - API_PORT=${API_PORT:-8000}
     ports:
-      - "8000:8000"
+      - "${API_PORT:-8000}:${API_PORT:-8000}"
     volumes:
       - ./data:/data
   bot:
@@ -15,7 +16,7 @@ services:
       context: .
       dockerfile: bot/Dockerfile
     environment:
-      BACKEND_BASE_URL: http://api:8000
+      BACKEND_BASE_URL: http://api:${API_PORT:-8000}
       BACKEND_ADMIN_TOKEN: ${ADMIN_TOKEN}
       TWITCH_BOT_TOKEN: ${TWITCH_OAUTH_TOKEN}
       BOT_NICK: ${BOT_NICK}
@@ -35,5 +36,5 @@ services:
       dockerfile: web/Dockerfile
     container_name: songqueue-web
     ports:
-      - "8080:80"
+      - "${WEB_PORT:-8080}:80"
     restart: unless-stopped
