@@ -8,7 +8,7 @@ services:
       - RESET_DB="0"
       - API_PORT=${API_PORT:-7070}
     env_file:
-      - stack.env      
+      - stack.env
     ports:
       - "${API_PORT:-7070}:${API_PORT:-7070}"
     volumes:
