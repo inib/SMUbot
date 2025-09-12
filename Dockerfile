@@ -1,8 +1,6 @@
 FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 \
-    ADMIN_TOKEN=change-me \
-    DB_URL=sqlite:////data/db.sqlite
 
 WORKDIR /app
 COPY requirements.txt ./

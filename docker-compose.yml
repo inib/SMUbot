@@ -5,9 +5,11 @@ services:
     environment:
       - ADMIN_TOKEN=${ADMIN_TOKEN}
       - DB_URL=sqlite:////data/db.sqlite
-      - RESET_DB="1"   # remove after the first successful start
+      - RESET_DB="1"
+    env_file:
+      - stack.env
     ports:
-      - "8000:8000"
+      - "7070:7070"
     volumes:
       - ./data:/data
   bot:
@@ -15,13 +17,15 @@ services:
       context: .
       dockerfile: bot/Dockerfile
     environment:
-      BACKEND_BASE_URL: http://api:8000
+      BACKEND_BASE_URL: http://api:7070
       BACKEND_ADMIN_TOKEN: ${ADMIN_TOKEN}
       TWITCH_BOT_TOKEN: ${TWITCH_OAUTH_TOKEN}
       BOT_NICK: ${BOT_NICK}
       CHANNELS: ${TWITCH_CHANNELS}         # comma-separated
       COMMANDS_FILE: /bot/commands.yml
       BOT_MESSAGES_PATH: /bot/messages.yml
+    env_file:
+      - stack.env
     depends_on:
       - api
     restart: unless-stopped
@@ -34,6 +38,8 @@ services:
       context: .
       dockerfile: web/Dockerfile
     container_name: songqueue-web
+    env_file:
+      - stack.env
     ports:
-      - "8080:80"
+      - "7000:7000"
     restart: unless-stopped
