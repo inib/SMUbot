@@ -32,8 +32,8 @@ services:
     restart: unless-stopped
 
     volumes:
-      - /bot/commands.yml:/bot/commands.yml:ro
-      - /bot/messages.yml:/bot/messages.yml:ro
+      - ./bot/commands.yml:/bot/commands.yml:ro
+      - ./bot/messages.yml:/bot/messages.yml:ro
   web:
     build:
       context: .
@@ -44,3 +44,5 @@ services:
     ports:
       - "${WEB_PORT:-7000}:80"
     restart: unless-stopped
+    volumes:
+      - ./web:/web
