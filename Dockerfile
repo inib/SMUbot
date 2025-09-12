@@ -9,5 +9,5 @@ COPY backend_app.py ./backend_app.py
 COPY run.sh ./run.sh
 RUN chmod +x run.sh
 VOLUME ["/data"]
-EXPOSE 8000
-CMD ["uvicorn", "backend_app:app", "--host", "0.0.0.0", "--port", "8000"]
+EXPOSE ${API_PORT}
+CMD ["sh", "-c", "uvicorn backend_app:app --host 0.0.0.0 --port ${API_PORT}"]
