@@ -258,7 +258,7 @@ app.add_middleware(
 _brokers: dict[int, asyncio.Queue[str]] = {}
 
 def _broker(channel_pk: int) -> asyncio.Queue[str]:
-    return _brokers.setdefault(channel_pk, asyncio.Queue(maxsize=100))
+    return _brokers.setdefault(channel_pk, asyncio.Queue(maxsize=1000))
 
 def get_db() -> Session:
     db = SessionLocal()
@@ -563,10 +563,10 @@ async def stream_queue(channel_pk: int):
     q = _broker(channel_pk)
     async def gen():
         # initial tick so clients render immediately
-        yield {"event": "queue", "data": "init"}
+        yield "event: queue\ndata: init\n\n"
         while True:
             msg = await q.get()
-            yield {"event": "queue", "data": msg}
+            yield f"event: queue\ndata: {msg}\n\n"
     return EventSourceResponse(
     gen(),
     headers={
