@@ -8,9 +8,10 @@ import aiohttp
 from twitchio.ext import commands
 
 # ---- Env ----
-API_PORT = os.getenv('API_PORT', '8000')
-BACKEND_URL = os.getenv('BACKEND_BASE_URL', f'http://api:{API_PORT}')
-ADMIN_TOKEN = os.getenv('BACKEND_ADMIN_TOKEN', 'change-me')
+# Full URL of the backend API, defaulting to the docker-compose service name.
+BACKEND_URL = os.getenv('BACKEND_URL', 'http://api:7070')
+# Token used for privileged requests to the backend.
+ADMIN_TOKEN = os.getenv('ADMIN_TOKEN', 'change-me')
 CHANNELS = [c.strip() for c in os.getenv('CHANNELS', '').split(',') if c.strip()]
 BOT_TOKEN = os.getenv('TWITCH_BOT_TOKEN')  # token without 'oauth:'
 BOT_NICK = os.getenv('BOT_NICK')

@@ -18,8 +18,13 @@ from sqlalchemy.orm import declarative_base, relationship, sessionmaker, Session
 # =====================================
 # Config
 # =====================================
-DB_URL = os.getenv("DB_URL", "sqlite:///./db.sqlite")
-ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "defaultpw")
+# SQLite database lives in the container's /data directory; the path is
+# fixed so the stack does not require an environment variable for it.
+DB_URL = "sqlite:////data/db.sqlite"
+
+# Authentication token for admin endpoints; can still be overridden via
+# environment variable when the backend starts.
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "change-me")
 
 engine = create_engine(DB_URL, connect_args={"check_same_thread": False} if DB_URL.startswith("sqlite") else {})
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
