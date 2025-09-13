@@ -567,7 +567,13 @@ async def stream_queue(channel_pk: int):
         while True:
             msg = await q.get()
             yield {"event": "queue", "data": msg}
-    return EventSourceResponse(gen())
+    return EventSourceResponse(
+    gen(),
+    headers={
+        "Cache-Control": "no-cache, no-transform",
+        "X-Accel-Buffering": "no",
+    }
+)
 
 @app.get("/channels/{channel_pk}/queue", response_model=List[RequestOut])
 def get_queue(channel_pk: int, db: Session = Depends(get_db)):
