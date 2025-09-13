@@ -14,15 +14,19 @@ Additional directories include:
 - **data/** – persistent SQLite database storage.
 
 ## Running with Docker
-1. Set environment variables such as `ADMIN_TOKEN`, `TWITCH_OAUTH_TOKEN`, `BOT_NICK`, and `TWITCH_CHANNELS`.
+1. Copy `example.env` to `stack.env` and adjust values such as `ADMIN_TOKEN`,
+   `TWITCH_OAUTH_TOKEN`, `BOT_NICK`, and `TWITCH_CHANNELS`. When exposing the
+   stack outside of Docker, set `BACKEND_URL` to the public URL of the API so
+   the bot and web UI can reach it.
 2. Start the stack:
    ```bash
-   docker-compose up --build
+   docker-compose --env-file stack.env up --build
    ```
-   This launches the API on port 8000 (set with `API_PORT`), the bot, and the web UI on port 8080 (set with `WEB_PORT`).
+   This launches the API on port 7070, the bot, and the web UI on port 7000
+   (overridden with `WEB_PORT`).
 
 ## Backend Highlights
-- Uses SQLite by default (`DB_URL` configurable) and defines models for channels, songs, users, stream sessions, and requests.
+- Uses a SQLite database stored at `/data/db.sqlite` and defines models for channels, songs, users, stream sessions, and requests.
 - Exposes REST endpoints for managing songs and queue entries, plus an SSE stream for real‑time events.
 - `run.sh` initializes the database and starts the server with Uvicorn.
 

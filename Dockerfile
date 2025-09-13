@@ -9,5 +9,6 @@ COPY backend_app.py ./backend_app.py
 COPY run.sh ./run.sh
 RUN chmod +x run.sh
 VOLUME ["/data"]
-EXPOSE ${API_PORT}
-CMD ["sh", "-c", "uvicorn backend_app:app --host 0.0.0.0 --port ${API_PORT}"]
+# The API always listens on port 7070 inside the container.
+EXPOSE 7070
+CMD ["sh", "-c", "uvicorn backend_app:app --host 0.0.0.0 --port 7070"]

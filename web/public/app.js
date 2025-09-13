@@ -1,6 +1,8 @@
-// Config via query string: ?backend=http://localhost:8000&channel=1
+// Configuration is primarily driven by environment variables exposed via
+// `config.js`. Query parameters still allow overrides for debugging:
+// ?backend=http://localhost:7070&channel=1
 const qs = new URLSearchParams(location.search);
-const BACKEND = (qs.get('backend') || 'http://localhost:8000').replace(/\/$/, '');
+const BACKEND = (qs.get('backend') || window.BACKEND_URL || 'http://localhost:7070').replace(/\/$/, '');
 const CHANNEL = qs.get('channel') || '1';
 
 const el = (sel) => document.querySelector(sel);
