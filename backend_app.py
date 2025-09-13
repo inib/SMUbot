@@ -297,6 +297,8 @@ def current_stream(db: Session, channel_pk: int) -> int:
     s = StreamSession(channel_id=channel_pk)
     db.add(s)
     db.commit()
+    try: _broker(channel_pk).put_nowait("changed")
+    except: pass
     return s.id
 
 
@@ -383,6 +385,8 @@ def add_channel(payload: ChannelIn, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(ch)
     get_or_create_settings(db, ch.id)
+    try: _broker(channel_pk).put_nowait("changed")
+    except: pass
     return ch
 
 @app.put("/channels/{channel_pk}", dependencies=[Depends(require_token)])
@@ -392,6 +396,8 @@ def update_channel_status(channel_pk: int, join_active: int, db: Session = Depen
         raise HTTPException(404, "channel not found")
     ch.join_active = join_active
     db.commit()
+    try: _broker(channel_pk).put_nowait("changed")
+    except: pass
     return {"success": True}
 
 @app.get("/channels/{channel_pk}/settings", response_model=ChannelSettingsOut)
@@ -417,6 +423,8 @@ def set_channel_settings(channel_pk: int, payload: ChannelSettingsIn, db: Sessio
     st.other_flags = payload.other_flags
     st.max_prio_points = payload.max_prio_points
     db.commit()
+    try: _broker(channel_pk).put_nowait("changed")
+    except: pass
     return {"success": True}
 
 # =====================================
@@ -435,6 +443,8 @@ def add_song(channel_pk: int, payload: SongIn, db: Session = Depends(get_db)):
     song = Song(channel_id=channel_pk, **payload.model_dump())
     db.add(song)
     db.commit()
+    try: _broker(channel_pk).put_nowait("changed")
+    except: pass
     return {"id": song.id}
 
 @app.get("/channels/{channel_pk}/songs/{song_id}", response_model=SongOut)
@@ -452,6 +462,8 @@ def update_song(channel_pk: int, song_id: int, payload: SongIn, db: Session = De
     for k, v in payload.model_dump().items():
         setattr(song, k, v)
     db.commit()
+    try: _broker(channel_pk).put_nowait("changed")
+    except: pass
     return {"success": True}
 
 @app.delete("/channels/{channel_pk}/songs/{song_id}", dependencies=[Depends(require_token)])
@@ -461,6 +473,8 @@ def delete_song(channel_pk: int, song_id: int, db: Session = Depends(get_db)):
         raise HTTPException(404, "song not found")
     db.delete(song)
     db.commit()
+    try: _broker(channel_pk).put_nowait("changed")
+    except: pass
     return {"success": True}
 
 # =====================================
@@ -484,10 +498,14 @@ def get_or_create_user(channel_pk: int, payload: UserIn, db: Session = Depends(g
     if u:
         u.username = payload.username  # update latest name
         db.commit()
+        try: _broker(channel_pk).put_nowait("changed")
+        except: pass
         return {"id": u.id}
     u = User(channel_id=channel_pk, twitch_id=payload.twitch_id, username=payload.username)
     db.add(u)
     db.commit()
+    try: _broker(channel_pk).put_nowait("changed")
+    except: pass
     return {"id": u.id}
 
 @app.get("/channels/{channel_pk}/users/{user_id}", response_model=UserOut)
@@ -508,6 +526,8 @@ def update_user(channel_pk: int, user_id: int, prio_points: Optional[int] = None
     if amount_requested is not None:
         u.amount_requested = max(0, amount_requested)
     db.commit()
+    try: _broker(channel_pk).put_nowait("changed")
+    except: pass
     return {"success": True}
 
 @app.get("/channels/{channel_pk}/users/{user_id}/stream_state")
@@ -626,6 +646,8 @@ def add_request(channel_pk: int, payload: RequestCreate, db: Session = Depends(g
                 is_priority = 1
                 priority_source = 'points'
                 db.commit()
+                try: _broker(channel_pk).put_nowait("changed")
+                except: pass
             else:
                 raise HTTPException(409, detail="No priority available")
 
@@ -737,6 +759,10 @@ def bump_admin(channel_pk: int, request_id: int, db: Session = Depends(get_db)):
     r.is_priority = 1
     r.priority_source = 'admin'
     db.commit()
+    try:
+        _broker(channel_pk).put_nowait("changed")
+    except asyncio.QueueFull:
+        pass
     return {"success": True}
 
 def _get_req(db, channel_pk: int, request_id: int):
@@ -842,7 +868,8 @@ def log_event(channel_pk: int, payload: EventIn, db: Session = Depends(get_db)):
     elif payload.type == "sub":
         # no automatic points; handled via free-per-stream when requesting
         pass
-
+    try: _broker(channel_pk).put_nowait("changed")
+    except: pass    
     return {"event_id": ev.id}
 
 @app.get("/channels/{channel_pk}/events", response_model=List[EventOut])
