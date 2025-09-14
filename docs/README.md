@@ -15,7 +15,8 @@ Additional directories include:
 
 ## Running with Docker
 1. Copy `example.env` to `stack.env` and adjust values such as `ADMIN_TOKEN`,
-   `TWITCH_OAUTH_TOKEN`, `BOT_NICK`, and `TWITCH_CHANNELS`. When exposing the
+   `TWITCH_OAUTH_TOKEN`, `BOT_NICK`, `TWITCH_CLIENT_ID`, `TWITCH_CLIENT_SECRET`,
+   and `TWITCH_CHANNELS`. When exposing the
    stack outside of Docker, set `BACKEND_URL` to the public URL of the API so
    the bot and web UI can reach it.
 2. Start the stack:
@@ -41,6 +42,16 @@ Additional directories include:
 
 ## Web Interface
 The web container hosts files in `web/public/`, including a simple `index.html`, `app.js`, and `style.css` for viewing the queue.
+
+## Authentication & Channel Access
+Songbot now integrates with Twitch OAuth. Channel owners must authenticate via the
+`/auth/login` endpoint to grant the bot the required scopes (including `channel:bot`).
+Once authenticated, the bot is allowed to join the channel and an EventSub
+subscription for `channel.chat.message` is created using an App Access Token.
+This registration is required for Twitch to recognize the bot as a verified chat bot.
+Owners can invite other moderators by registering their Twitch accounts, and
+authenticated users who manage multiple channels can switch between them using
+`/me/channels`.
 
 ## Development Tips
 - Install Python dependencies from `requirements.txt` for local development.

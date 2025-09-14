@@ -2,12 +2,16 @@ from __future__ import annotations
 from typing import Optional, List, Any
 import os
 import json
+import time
+import hmac
+import hashlib
 from datetime import datetime
 import asyncio
+import requests
 from sse_starlette.sse import EventSourceResponse
 from fastapi.middleware.cors import CORSMiddleware
 
-from fastapi import FastAPI, HTTPException, Depends, Header, Query, APIRouter
+from fastapi import FastAPI, HTTPException, Depends, Header, Query, APIRouter, Request, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import (
     create_engine, Column, Integer, String, Text, DateTime, Boolean,
@@ -26,10 +30,86 @@ DB_URL = "sqlite:////data/db.sqlite"
 # environment variable when the backend starts.
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "change-me")
 
+TWITCH_CLIENT_ID = os.getenv("TWITCH_CLIENT_ID")
+TWITCH_CLIENT_SECRET = os.getenv("TWITCH_CLIENT_SECRET")
+TWITCH_REDIRECT_URI = os.getenv("TWITCH_REDIRECT_URI", "http://localhost:8000/auth/callback")
+TWITCH_SCOPES = os.getenv("TWITCH_SCOPES", "chat:read chat:edit channel:bot").split()
+TWITCH_EVENTSUB_CALLBACK = os.getenv("TWITCH_EVENTSUB_CALLBACK", "http://localhost:8000/eventsub/callback")
+TWITCH_EVENTSUB_SECRET = os.getenv("TWITCH_EVENTSUB_SECRET", "change-me")
+BOT_NICK = os.getenv("BOT_NICK")
+
+APP_ACCESS_TOKEN: Optional[str] = None
+APP_TOKEN_EXPIRES = 0
+BOT_USER_ID: Optional[str] = None
+
 engine = create_engine(DB_URL, connect_args={"check_same_thread": False} if DB_URL.startswith("sqlite") else {})
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 Base = declarative_base()
 
+
+def get_app_access_token() -> str:
+    global APP_ACCESS_TOKEN, APP_TOKEN_EXPIRES
+    if not APP_ACCESS_TOKEN or time.time() > APP_TOKEN_EXPIRES:
+        resp = requests.post(
+            "https://id.twitch.tv/oauth2/token",
+            data={
+                "client_id": TWITCH_CLIENT_ID,
+                "client_secret": TWITCH_CLIENT_SECRET,
+                "grant_type": "client_credentials",
+            },
+        ).json()
+        APP_ACCESS_TOKEN = resp["access_token"]
+        APP_TOKEN_EXPIRES = time.time() + resp.get("expires_in", 3600) - 60
+    return APP_ACCESS_TOKEN
+
+
+def get_bot_user_id() -> Optional[str]:
+    global BOT_USER_ID
+    if BOT_USER_ID:
+        return BOT_USER_ID
+    if not BOT_NICK:
+        return None
+    token = get_app_access_token()
+    headers = {"Authorization": f"Bearer {token}", "Client-Id": TWITCH_CLIENT_ID}
+    resp = requests.get(
+        "https://api.twitch.tv/helix/users",
+        params={"login": BOT_NICK},
+        headers=headers,
+    ).json()
+    data = resp.get("data", [])
+    if data:
+        BOT_USER_ID = data[0]["id"]
+    return BOT_USER_ID
+
+
+def subscribe_chat_eventsub(broadcaster_id: str) -> None:
+    token = get_app_access_token()
+    bot_id = get_bot_user_id()
+    if not bot_id:
+        return
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Client-Id": TWITCH_CLIENT_ID,
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "type": "channel.chat.message",
+        "version": "1",
+        "condition": {
+            "broadcaster_user_id": broadcaster_id,
+            "user_id": bot_id,
+        },
+        "transport": {
+            "method": "webhook",
+            "callback": TWITCH_EVENTSUB_CALLBACK,
+            "secret": TWITCH_EVENTSUB_SECRET,
+        },
+    }
+    requests.post(
+        "https://api.twitch.tv/helix/eventsub/subscriptions",
+        headers=headers,
+        data=json.dumps(payload),
+    )
 
 
 # =====================================
@@ -41,10 +121,14 @@ class ActiveChannel(Base):
     channel_id = Column(String, unique=True, nullable=False)  # Twitch channel ID
     channel_name = Column(String, nullable=False)
     join_active = Column(Integer, default=1)
+    authorized = Column(Boolean, default=False)
+    owner_id = Column(Integer, ForeignKey("twitch_users.id"))
 
+    owner = relationship("TwitchUser", back_populates="owned_channels")
     settings = relationship("ChannelSettings", back_populates="channel", uselist=False, cascade="all, delete-orphan")
     songs = relationship("Song", back_populates="channel", cascade="all, delete-orphan")
     users = relationship("User", back_populates="channel", cascade="all, delete-orphan")
+    moderators = relationship("ChannelModerator", back_populates="channel", cascade="all, delete-orphan")
 
 class ChannelSettings(Base):
     __tablename__ = "channel_settings"
@@ -124,6 +208,26 @@ class Event(Base):
     meta = Column(Text)  # JSON string
     event_time = Column(DateTime, default=datetime.utcnow)
 
+class TwitchUser(Base):
+    __tablename__ = "twitch_users"
+    id = Column(Integer, primary_key=True)
+    twitch_id = Column(String, unique=True, nullable=False)
+    username = Column(String, nullable=False)
+    access_token = Column(String, nullable=False)
+    refresh_token = Column(String)
+    scopes = Column(Text)
+
+    owned_channels = relationship("ActiveChannel", back_populates="owner")
+
+class ChannelModerator(Base):
+    __tablename__ = "channel_moderators"
+    id = Column(Integer, primary_key=True)
+    channel_id = Column(Integer, ForeignKey("active_channels.id", ondelete="CASCADE"), nullable=False)
+    user_id = Column(Integer, ForeignKey("twitch_users.id", ondelete="CASCADE"), nullable=False)
+    channel = relationship("ActiveChannel", back_populates="moderators")
+    user = relationship("TwitchUser")
+    __table_args__ = (UniqueConstraint('channel_id', 'user_id', name='uq_channel_mod'),)
+
 # =====================================
 # DB bootstrap
 # =====================================
@@ -142,6 +246,7 @@ class ChannelOut(BaseModel):
     channel_name: str
     channel_id: str
     join_active: int
+    authorized: bool
 
     class Config:
         from_attributes = True
@@ -156,6 +261,20 @@ class ChannelSettingsIn(BaseModel):
 
 class ChannelSettingsOut(ChannelSettingsIn):
     channel_id: int
+
+class AuthUrlOut(BaseModel):
+    auth_url: str
+
+class AuthCallbackOut(BaseModel):
+    success: bool
+
+class ChannelAccessOut(BaseModel):
+    channel_name: str
+    role: str
+
+class ModIn(BaseModel):
+    twitch_id: str
+    username: str
 
 class SongIn(BaseModel):
     artist: str
@@ -267,10 +386,39 @@ def get_db() -> Session:
     finally:
         db.close()
 
+def get_current_user(authorization: str = Header(None), db: Session = Depends(get_db)) -> TwitchUser:
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="missing token")
+    token = authorization.split(" ", 1)[1]
+    user = db.query(TwitchUser).filter_by(access_token=token).one_or_none()
+    if not user:
+        raise HTTPException(status_code=401, detail="invalid token")
+    return user
 
-def require_token(x_admin_token: str = Header(None)):
-    if x_admin_token != ADMIN_TOKEN:
-        raise HTTPException(status_code=401, detail="invalid admin token")
+def _user_has_access(user: TwitchUser, channel_pk: int, db: Session) -> bool:
+    ch = db.get(ActiveChannel, channel_pk)
+    if not ch:
+        return False
+    if ch.owner_id == user.id:
+        return True
+    mod = (
+        db.query(ChannelModerator)
+        .filter_by(channel_id=channel_pk, user_id=user.id)
+        .one_or_none()
+    )
+    return mod is not None
+
+def require_token(channel: Optional[str] = None, x_admin_token: str = Header(None), authorization: str = Header(None), db: Session = Depends(get_db)):
+    if x_admin_token == ADMIN_TOKEN:
+        return
+    if channel and authorization and authorization.startswith("Bearer "):
+        token = authorization.split(" ", 1)[1]
+        user = db.query(TwitchUser).filter_by(access_token=token).one_or_none()
+        if user:
+            channel_pk = get_channel_pk(channel, db)
+            if _user_has_access(user, channel_pk, db):
+                return
+    raise HTTPException(status_code=401, detail="invalid admin token")
 
 def get_channel_pk(channel: str, db: Session) -> int:
     """Return the primary key for a channel, matching name case-insensitively."""
@@ -282,6 +430,142 @@ def get_channel_pk(channel: str, db: Session) -> int:
     if not ch:
         raise HTTPException(status_code=404, detail="channel not found")
     return ch.id
+
+@app.get("/auth/login", response_model=AuthUrlOut)
+def auth_login(channel: str):
+    scope = "+".join(TWITCH_SCOPES)
+    url = (
+        "https://id.twitch.tv/oauth2/authorize"
+        f"?response_type=code&client_id={TWITCH_CLIENT_ID}"
+        f"&redirect_uri={TWITCH_REDIRECT_URI}&scope={scope}&state={channel}"
+    )
+    return {"auth_url": url}
+
+@app.get("/auth/callback", response_model=AuthCallbackOut)
+def auth_callback(code: str, state: str, db: Session = Depends(get_db)):
+    token_resp = requests.post(
+        "https://id.twitch.tv/oauth2/token",
+        data={
+            "client_id": TWITCH_CLIENT_ID,
+            "client_secret": TWITCH_CLIENT_SECRET,
+            "code": code,
+            "grant_type": "authorization_code",
+            "redirect_uri": TWITCH_REDIRECT_URI,
+        },
+    ).json()
+    access_token = token_resp["access_token"]
+    refresh_token = token_resp.get("refresh_token")
+    scopes_list = token_resp.get("scope", [])
+    if "channel:bot" not in scopes_list:
+        raise HTTPException(status_code=400, detail="channel:bot scope required")
+    scopes = " ".join(scopes_list)
+    headers = {"Authorization": f"Bearer {access_token}", "Client-Id": TWITCH_CLIENT_ID}
+    user_info = requests.get("https://api.twitch.tv/helix/users", headers=headers).json()["data"][0]
+    user = db.query(TwitchUser).filter_by(twitch_id=user_info["id"]).one_or_none()
+    if not user:
+        user = TwitchUser(
+            twitch_id=user_info["id"],
+            username=user_info["login"],
+            access_token=access_token,
+            refresh_token=refresh_token,
+            scopes=scopes,
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+    else:
+        user.username = user_info["login"]
+        user.access_token = access_token
+        user.refresh_token = refresh_token
+        user.scopes = scopes
+        db.commit()
+    channel_name = state
+    ch = (
+        db.query(ActiveChannel)
+        .filter(func.lower(ActiveChannel.channel_name) == channel_name.lower())
+        .one_or_none()
+    )
+    if not ch:
+        ch = ActiveChannel(
+            channel_id=user_info["id"],
+            channel_name=user_info["login"],
+            join_active=1,
+            authorized=True,
+            owner_id=user.id,
+        )
+        db.add(ch)
+    else:
+        ch.owner_id = user.id
+        ch.authorized = True
+    db.commit()
+    subscribe_chat_eventsub(user_info["id"])
+    return {"success": True}
+
+
+@app.post("/eventsub/callback")
+async def eventsub_callback(
+    request: Request,
+    twitch_eventsub_message_type: str = Header(None),
+    twitch_eventsub_message_id: str = Header(None),
+    twitch_eventsub_message_timestamp: str = Header(None),
+    twitch_eventsub_message_signature: str = Header(None),
+):
+    body = await request.body()
+    if twitch_eventsub_message_type == "webhook_callback_verification":
+        data = json.loads(body)
+        return Response(content=data.get("challenge", ""))
+    message = (
+        twitch_eventsub_message_id + twitch_eventsub_message_timestamp + body.decode()
+    )
+    sig = hmac.new(
+        TWITCH_EVENTSUB_SECRET.encode(), message.encode(), hashlib.sha256
+    ).hexdigest()
+    if twitch_eventsub_message_signature != f"sha256={sig}":
+        raise HTTPException(status_code=403, detail="invalid signature")
+    return {"ok": True}
+
+@app.get("/me/channels", response_model=List[ChannelAccessOut])
+def my_channels(current: TwitchUser = Depends(get_current_user), db: Session = Depends(get_db)):
+    owned = db.query(ActiveChannel).filter_by(owner_id=current.id).all()
+    mod_links = db.query(ChannelModerator).filter_by(user_id=current.id).all()
+    res = [{"channel_name": c.channel_name, "role": "owner"} for c in owned]
+    for link in mod_links:
+        ch = db.get(ActiveChannel, link.channel_id)
+        if ch:
+            res.append({"channel_name": ch.channel_name, "role": "moderator"})
+    return res
+
+@app.post("/channels/{channel}/mods", dependencies=[Depends(require_token)])
+def add_mod(channel: str, payload: ModIn, db: Session = Depends(get_db), authorization: str = Header(None)):
+    channel_pk = get_channel_pk(channel, db)
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization.split(" ", 1)[1]
+        current = db.query(TwitchUser).filter_by(access_token=token).one()
+        ch = db.get(ActiveChannel, channel_pk)
+        if ch.owner_id != current.id:
+            raise HTTPException(status_code=403, detail="only owner can add moderators")
+    user = db.query(TwitchUser).filter_by(twitch_id=payload.twitch_id).one_or_none()
+    if not user:
+        user = TwitchUser(
+            twitch_id=payload.twitch_id,
+            username=payload.username,
+            access_token="",
+            refresh_token="",
+            scopes="",
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+    link = (
+        db.query(ChannelModerator)
+        .filter_by(channel_id=channel_pk, user_id=user.id)
+        .one_or_none()
+    )
+    if not link:
+        link = ChannelModerator(channel_id=channel_pk, user_id=user.id)
+        db.add(link)
+        db.commit()
+    return {"success": True}
 
 # =====================================
 # Helpers / Services
