@@ -277,6 +277,9 @@ class AuthUrlOut(BaseModel):
 class AuthCallbackOut(BaseModel):
     success: bool
 
+class MeOut(BaseModel):
+    login: str
+
 class ChannelAccessOut(BaseModel):
     channel_name: str
     role: str
@@ -400,8 +403,32 @@ def get_current_user(authorization: str = Header(None), db: Session = Depends(ge
         raise HTTPException(status_code=401, detail="missing token")
     token = authorization.split(" ", 1)[1]
     user = db.query(TwitchUser).filter_by(access_token=token).one_or_none()
-    if not user:
+    if user:
+        return user
+    resp = requests.get(
+        "https://id.twitch.tv/oauth2/validate",
+        headers={"Authorization": f"OAuth {token}"},
+    )
+    if resp.status_code != 200:
         raise HTTPException(status_code=401, detail="invalid token")
+    data = resp.json()
+    login = data.get("login")
+    if not login:
+        raise HTTPException(status_code=401, detail="invalid token")
+    user = db.query(TwitchUser).filter(func.lower(TwitchUser.username) == login.lower()).one_or_none()
+    if not user:
+        user = TwitchUser(
+            twitch_id=data.get("user_id", ""),
+            username=login,
+            access_token=token,
+            refresh_token="",
+            scopes=" ".join(data.get("scopes", [])),
+        )
+        db.add(user)
+    else:
+        user.access_token = token
+    db.commit()
+    db.refresh(user)
     return user
 
 def _user_has_access(user: TwitchUser, channel_pk: int, db: Session) -> bool:
@@ -532,6 +559,10 @@ async def eventsub_callback(
     if twitch_eventsub_message_signature != f"sha256={sig}":
         raise HTTPException(status_code=403, detail="invalid signature")
     return {"ok": True}
+
+@app.get("/me", response_model=MeOut)
+def me(current: TwitchUser = Depends(get_current_user)):
+    return {"login": current.username}
 
 @app.get("/me/channels", response_model=List[ChannelAccessOut])
 def my_channels(current: TwitchUser = Depends(get_current_user), db: Session = Depends(get_db)):
