@@ -11,7 +11,16 @@ import requests
 from sse_starlette.sse import EventSourceResponse
 from fastapi.middleware.cors import CORSMiddleware
 
-from fastapi import FastAPI, HTTPException, Depends, Header, Query, APIRouter, Request, Response
+from fastapi import (
+    FastAPI,
+    HTTPException,
+    Depends,
+    Header,
+    Query,
+    APIRouter,
+    Request as FastAPIRequest,
+    Response,
+)
 from pydantic import BaseModel, Field
 from sqlalchemy import (
     create_engine, Column, Integer, String, Text, DateTime, Boolean,
@@ -504,7 +513,7 @@ def auth_callback(code: str, state: str, db: Session = Depends(get_db)):
 
 @app.post("/eventsub/callback")
 async def eventsub_callback(
-    request: Request,
+    request: FastAPIRequest,
     twitch_eventsub_message_type: str = Header(None),
     twitch_eventsub_message_id: str = Header(None),
     twitch_eventsub_message_timestamp: str = Header(None),
