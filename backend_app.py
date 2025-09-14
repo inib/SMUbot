@@ -273,7 +273,12 @@ def require_token(x_admin_token: str = Header(None)):
         raise HTTPException(status_code=401, detail="invalid admin token")
 
 def get_channel_pk(channel: str, db: Session) -> int:
-    ch = db.query(ActiveChannel).filter(ActiveChannel.channel_name == channel).one_or_none()
+    """Return the primary key for a channel, matching name case-insensitively."""
+    ch = (
+        db.query(ActiveChannel)
+        .filter(func.lower(ActiveChannel.channel_name) == channel.lower())
+        .one_or_none()
+    )
     if not ch:
         raise HTTPException(status_code=404, detail="channel not found")
     return ch.id
