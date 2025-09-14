@@ -277,6 +277,9 @@ class AuthUrlOut(BaseModel):
 class AuthCallbackOut(BaseModel):
     success: bool
 
+class MeOut(BaseModel):
+    login: str
+
 class ChannelAccessOut(BaseModel):
     channel_name: str
     role: str
@@ -556,6 +559,10 @@ async def eventsub_callback(
     if twitch_eventsub_message_signature != f"sha256={sig}":
         raise HTTPException(status_code=403, detail="invalid signature")
     return {"ok": True}
+
+@app.get("/me", response_model=MeOut)
+def me(current: TwitchUser = Depends(get_current_user)):
+    return {"login": current.username}
 
 @app.get("/me/channels", response_model=List[ChannelAccessOut])
 def my_channels(current: TwitchUser = Depends(get_current_user), db: Session = Depends(get_db)):

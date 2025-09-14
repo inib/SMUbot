@@ -142,9 +142,9 @@ function initToken() {
     const params = new URLSearchParams(location.hash.slice(1));
     token = params.get('access_token');
     history.replaceState({}, document.title, location.pathname);
-    fetch('https://id.twitch.tv/oauth2/validate', {headers:{Authorization:`OAuth ${token}`}})
-      .then(r=>r.json())
-      .then(info=>{ userLogin = info.login || ''; updateRegButton(); })
+    fetch(`${API}/me`, {headers:{Authorization:`Bearer ${token}`}})
+      .then(r => r.json())
+      .then(info => { userLogin = info.login || ''; updateRegButton(); })
       .catch(()=>{});
     fetch(`${API}/me/channels`, {headers:{Authorization:`Bearer ${token}`}})
       .then(r => r.json())
