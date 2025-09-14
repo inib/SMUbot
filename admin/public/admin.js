@@ -117,8 +117,12 @@ async function updateRegButton() {
       };
     } else {
       btn.textContent = 'register your channel';
-      btn.onclick = () => {
-        location.href = `${API}/auth/login?channel=${encodeURIComponent(userLogin)}`;
+      btn.onclick = async () => {
+        const resp = await fetch(
+          `${API}/auth/login?channel=${encodeURIComponent(userLogin)}`
+        );
+        const data = await resp.json();
+        location.href = data.auth_url;
       };
     }
     btn.style.display = '';

@@ -41,7 +41,7 @@ ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "change-me")
 
 TWITCH_CLIENT_ID = os.getenv("TWITCH_CLIENT_ID")
 TWITCH_CLIENT_SECRET = os.getenv("TWITCH_CLIENT_SECRET")
-TWITCH_REDIRECT_URI = os.getenv("TWITCH_REDIRECT_URI", "http://localhost:8000/auth/callback")
+TWITCH_REDIRECT_URI = os.getenv("TWITCH_REDIRECT_URI")
 TWITCH_SCOPES = os.getenv("TWITCH_SCOPES", "chat:read chat:edit channel:bot").split()
 TWITCH_EVENTSUB_CALLBACK = os.getenv("TWITCH_EVENTSUB_CALLBACK", "http://localhost:8000/eventsub/callback")
 TWITCH_EVENTSUB_SECRET = os.getenv("TWITCH_EVENTSUB_SECRET", "change-me")
@@ -468,17 +468,24 @@ def get_channel_pk(channel: str, db: Session) -> int:
     return ch.id
 
 @app.get("/auth/login", response_model=AuthUrlOut)
-def auth_login(channel: str):
+def auth_login(channel: str, request: FastAPIRequest):
     scope = "+".join(TWITCH_SCOPES)
+    redirect_uri = TWITCH_REDIRECT_URI or str(request.url_for("auth_callback"))
     url = (
         "https://id.twitch.tv/oauth2/authorize"
         f"?response_type=code&client_id={TWITCH_CLIENT_ID}"
-        f"&redirect_uri={TWITCH_REDIRECT_URI}&scope={scope}&state={channel}"
+        f"&redirect_uri={redirect_uri}&scope={scope}&state={channel}"
     )
     return {"auth_url": url}
 
 @app.get("/auth/callback", response_model=AuthCallbackOut)
-def auth_callback(code: str, state: str, db: Session = Depends(get_db)):
+def auth_callback(
+    code: str,
+    state: str,
+    request: FastAPIRequest,
+    db: Session = Depends(get_db),
+):
+    redirect_uri = TWITCH_REDIRECT_URI or str(request.url_for("auth_callback"))
     token_resp = requests.post(
         "https://id.twitch.tv/oauth2/token",
         data={
@@ -486,7 +493,7 @@ def auth_callback(code: str, state: str, db: Session = Depends(get_db)):
             "client_secret": TWITCH_CLIENT_SECRET,
             "code": code,
             "grant_type": "authorization_code",
-            "redirect_uri": TWITCH_REDIRECT_URI,
+            "redirect_uri": redirect_uri,
         },
     ).json()
     access_token = token_resp["access_token"]
