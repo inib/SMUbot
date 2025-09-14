@@ -1,9 +1,9 @@
 // Configuration is primarily driven by environment variables exposed via
 // `config.js`. Query parameters still allow overrides for debugging:
-// ?backend=http://localhost:7070&channel=1
+// ?backend=http://localhost:7070&channel=example_channel
 const qs = new URLSearchParams(location.search);
 const BACKEND = (qs.get('backend') || window.BACKEND_URL || 'http://localhost:7070').replace(/\/$/, '');
-const CHANNEL = qs.get('channel') || '1';
+const CHANNEL = qs.get('channel') || 'example_channel';
 
 const el = (sel) => document.querySelector(sel);
 const queueEl   = el('#queue');
