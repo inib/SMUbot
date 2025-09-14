@@ -160,6 +160,9 @@ function initToken() {
             b.onclick = () => selectChannel(c.channel_name);
             container.appendChild(b);
           });
+        } else {
+          qs('landing').style.display = 'none';
+          qs('app').style.display = '';
         }
       })
       .catch(()=>{});
