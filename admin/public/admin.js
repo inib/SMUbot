@@ -104,7 +104,9 @@ async function updateRegButton() {
   const btn = qs('reg-btn');
   if (!userLogin) { btn.style.display = 'none'; return; }
   try {
-    const resp = await fetch(`${API}/channels`);
+    const resp = await fetch(`${API}/channels`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {}
+    });
     const list = await resp.json();
     const found = list.find(ch => ch.channel_name.toLowerCase() === userLogin.toLowerCase());
     if (found) {
