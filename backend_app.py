@@ -407,13 +407,13 @@ def get_current_user(authorization: str = Header(None), db: Session = Depends(ge
         headers={"Authorization": f"OAuth {token}"},
     )
     if resp.status_code != 200:
-        raise HTTPException(status_code=401, detail="invalid token")
+        raise HTTPException(status_code=401, detail="invalid token !200")
     login = resp.json().get("login")
     if not login:
-        raise HTTPException(status_code=401, detail="invalid token")
+        raise HTTPException(status_code=401, detail="invalid token not login")
     user = db.query(TwitchUser).filter(func.lower(TwitchUser.username) == login.lower()).one_or_none()
     if not user:
-        raise HTTPException(status_code=401, detail="invalid token")
+        raise HTTPException(status_code=401, detail="invalid token not user")
     user.access_token = token
     db.commit()
     return user
