@@ -93,60 +93,60 @@ class Backend:
             'join_active': join_active,
         })
 
-    async def find_or_create_user(self, channel_pk: int, twitch_id: str, username: str) -> int:
-        users = await self._req('GET', f"/channels/{channel_pk}/users?search={username}")
+    async def find_or_create_user(self, channel: str, twitch_id: str, username: str) -> int:
+        users = await self._req('GET', f"/channels/{channel}/users?search={username}")
         for u in users:
             if u['twitch_id'] == twitch_id:
                 return u['id']
-        resp = await self._req('POST', f"/channels/{channel_pk}/users", { 'twitch_id': twitch_id, 'username': username })
+        resp = await self._req('POST', f"/channels/{channel}/users", { 'twitch_id': twitch_id, 'username': username })
         return resp['id']
 
-    async def search_song(self, channel_pk: int, query: str) -> Optional[dict]:
-        songs = await self._req('GET', f"/channels/{channel_pk}/songs?search={query}")
+    async def search_song(self, channel: str, query: str) -> Optional[dict]:
+        songs = await self._req('GET', f"/channels/{channel}/songs?search={query}")
         return songs[0] if songs else None
 
-    async def song_by_link(self, channel_pk: int, link: str) -> Optional[dict]:
-        songs = await self._req('GET', f"/channels/{channel_pk}/songs?search={link}")
+    async def song_by_link(self, channel: str, link: str) -> Optional[dict]:
+        songs = await self._req('GET', f"/channels/{channel}/songs?search={link}")
         for s in songs:
             if s.get('youtube_link') == link:
                 return s
         return None
 
-    async def add_song(self, channel_pk: int, artist: str, title: str, link: Optional[str]) -> int:
-        resp = await self._req('POST', f"/channels/{channel_pk}/songs", {
+    async def add_song(self, channel: str, artist: str, title: str, link: Optional[str]) -> int:
+        resp = await self._req('POST', f"/channels/{channel}/songs", {
             'artist': artist, 'title': title, 'youtube_link': link
         })
         return resp['id']
 
-    async def add_request(self, channel_id: int, song_id: int, user_id: int,
+    async def add_request(self, channel: str, song_id: int, user_id: int,
                           want_priority: bool, prefer_sub_free: bool, is_subscriber: bool):
-        return await self._req('POST', f"/channels/{channel_id}/queue", {
+        return await self._req('POST', f"/channels/{channel}/queue", {
             'song_id': song_id, 'user_id': user_id,
             'want_priority': want_priority,
             'prefer_sub_free': prefer_sub_free,
             'is_subscriber': is_subscriber,
         })
 
-    async def get_queue(self, channel_pk: int, include_played: bool = False):
-        path = f"/channels/{channel_pk}/queue"
+    async def get_queue(self, channel: str, include_played: bool = False):
+        path = f"/channels/{channel}/queue"
         if include_played:
             path += "?include_played=1"
         return await self._req('GET', path)
 
-    async def delete_request(self, channel_pk: int, request_id: int):
-        return await self._req('DELETE', f"/channels/{channel_pk}/queue/{request_id}")
+    async def delete_request(self, channel: str, request_id: int):
+        return await self._req('DELETE', f"/channels/{channel}/queue/{request_id}")
 
-    async def archive_stream(self, channel_pk: int):
-        return await self._req('POST', f"/channels/{channel_pk}/streams/archive")
+    async def archive_stream(self, channel: str):
+        return await self._req('POST', f"/channels/{channel}/streams/archive")
 
-    async def get_user(self, channel_pk: int, user_id: int):
-        return await self._req('GET', f"/channels/{channel_pk}/users/{user_id}")
+    async def get_user(self, channel: str, user_id: int):
+        return await self._req('GET', f"/channels/{channel}/users/{user_id}")
 
-    async def get_song(self, channel_pk: int, song_id: int):
-        return await self._req('GET', f"/channels/{channel_pk}/songs/{song_id}")
+    async def get_song(self, channel: str, song_id: int):
+        return await self._req('GET', f"/channels/{channel}/songs/{song_id}")
 
-    async def get_events(self, channel_pk: int, since: Optional[str] = None):
-        path = f"/channels/{channel_pk}/events"
+    async def get_events(self, channel: str, since: Optional[str] = None):
+        path = f"/channels/{channel}/events"
         if since:
             path += f"?since={since}"
         return await self._req('GET', path)
@@ -213,7 +213,7 @@ class SongBot(commands.Bot):
         super().__init__(token=f"oauth:{BOT_TOKEN}", prefix=prefix, initial_channels=CHANNELS or [])
         self.channel_map: Dict[str, Dict] = {}
         self.ready_event = asyncio.Event()
-        self.state: Dict[int, Dict] = {}
+        self.state: Dict[str, Dict] = {}
 
     async def event_ready(self):
         rows = await backend.get_channels()
@@ -227,13 +227,13 @@ class SongBot(commands.Bot):
                 existing[key] = new_row
         self.channel_map = existing
         for _, row in self.channel_map.items():
-            pk = row['id']
-            initial_queue = await backend.get_queue(pk, include_played=True)
-            self.state[pk] = {
+            name = row['channel_name']
+            initial_queue = await backend.get_queue(name, include_played=True)
+            self.state[name] = {
                 'queue': initial_queue,
                 'last_event': datetime.utcnow().isoformat(),
             }
-            asyncio.create_task(self.listen_backend(row['channel_name'], pk))
+            asyncio.create_task(self.listen_backend(name))
         self.ready_event.set()
 
     async def event_message(self, message):
@@ -263,26 +263,26 @@ class SongBot(commands.Bot):
         if not ch_row:
             await msg.channel.send(self.messages['channel_not_registered'])
             return
-        channel_pk = ch_row['id']
-        user_id = await backend.find_or_create_user(channel_pk, str(msg.author.id), msg.author.name)
+        channel = ch_row['channel_name']
+        user_id = await backend.find_or_create_user(channel, str(msg.author.id), msg.author.name)
 
         # detect YouTube link
         ylink = extract_youtube_url(arg)
         song = None
         if ylink:
-            song = await backend.song_by_link(channel_pk, ylink)
+            song = await backend.song_by_link(channel, ylink)
             if not song:
                 if backend.session is None:
                     await backend.start()
                 title_text = await fetch_youtube_oembed_title(backend.session, ylink)
                 artist, title = parse_artist_title(title_text) if title_text else ("YouTube", ylink)
-                song_id = await backend.add_song(channel_pk, artist, title, ylink)
+                song_id = await backend.add_song(channel, artist, title, ylink)
                 song = { 'id': song_id, 'artist': artist, 'title': title, 'youtube_link': ylink }
         else:
             artist, title = parse_artist_title(arg)
-            found = await backend.search_song(channel_pk, f"{artist} - {title}")
+            found = await backend.search_song(channel, f"{artist} - {title}")
             if not found:
-                song_id = await backend.add_song(channel_pk, artist, title, None)
+                song_id = await backend.add_song(channel, artist, title, None)
                 song = { 'id': song_id, 'artist': artist, 'title': title }
             else:
                 song = found
@@ -290,7 +290,7 @@ class SongBot(commands.Bot):
         try:
             # initial requests are non-priority
             await backend.add_request(
-                channel_pk,
+                channel,
                 song['id'],
                 user_id,
                 want_priority=False,
@@ -313,10 +313,10 @@ class SongBot(commands.Bot):
         if not ch_row:
             await msg.channel.send(self.messages['channel_not_registered'])
             return
-        channel_pk = ch_row['id']
-        user_id = await backend.find_or_create_user(channel_pk, str(msg.author.id), msg.author.name)
+        channel = ch_row['channel_name']
+        user_id = await backend.find_or_create_user(channel, str(msg.author.id), msg.author.name)
 
-        queue = await backend.get_queue(channel_pk)
+        queue = await backend.get_queue(channel)
         my_prio = [q for q in queue if q['user_id'] == user_id and q['is_priority'] == 1]
         if len(my_prio) >= 3:
             await msg.channel.send(self.messages['prioritize_limit'])
@@ -337,14 +337,14 @@ class SongBot(commands.Bot):
         try:
             # re-add as priority, then delete old
             await backend.add_request(
-                channel_pk,
+                channel,
                 target['song_id'],
                 user_id,
                 want_priority=True,
                 prefer_sub_free=True,
                 is_subscriber=msg.author.is_subscriber,
             )
-            await backend.delete_request(channel_pk, target['id'])
+            await backend.delete_request(channel, target['id'])
             await msg.channel.send(
                 self.messages['prioritize_success'].format(request_id=target['id'])
             )
@@ -357,9 +357,9 @@ class SongBot(commands.Bot):
         if not ch_row:
             await msg.channel.send(self.messages['channel_not_registered'])
             return
-        channel_pk = ch_row['id']
-        user_id = await backend.find_or_create_user(channel_pk, str(msg.author.id), msg.author.name)
-        u = await backend.get_user(channel_pk, user_id)
+        channel = ch_row['channel_name']
+        user_id = await backend.find_or_create_user(channel, str(msg.author.id), msg.author.name)
+        u = await backend.get_user(channel, user_id)
         await msg.channel.send(
             self.messages['points'].format(
                 username=msg.author.name,
@@ -374,16 +374,16 @@ class SongBot(commands.Bot):
         if not ch_row:
             await msg.channel.send(self.messages['channel_not_registered'])
             return
-        channel_pk = ch_row['id']
-        user_id = await backend.find_or_create_user(channel_pk, str(msg.author.id), msg.author.name)
-        queue = await backend.get_queue(channel_pk)
+        channel = ch_row['channel_name']
+        user_id = await backend.find_or_create_user(channel, str(msg.author.id), msg.author.name)
+        queue = await backend.get_queue(channel)
         mine = [q for q in queue if q['user_id'] == user_id and q['played'] == 0]
         if not mine:
             await msg.channel.send(self.messages['remove_no_pending'])
             return
         latest = mine[-1]
         try:
-            await backend.delete_request(channel_pk, latest['id'])
+            await backend.delete_request(channel, latest['id'])
             await msg.channel.send(
                 self.messages['remove_success'].format(request_id=latest['id'])
             )
@@ -399,16 +399,16 @@ class SongBot(commands.Bot):
         if not ch_row:
             await msg.channel.send(self.messages['channel_not_registered'])
             return
-        channel_pk = ch_row['id']
+        channel = ch_row['channel_name']
         try:
-            await backend.archive_stream(channel_pk)
-            await self.process_backend_update(ch_name, channel_pk)
+            await backend.archive_stream(channel)
+            await self.process_backend_update(channel)
             await msg.channel.send(self.messages['archive_success'])
         except Exception as e:
             await msg.channel.send(self.messages['failed'].format(error=e))
 
-    async def listen_backend(self, ch_name: str, channel_pk: int):
-        url = f"{backend.base}/channels/{channel_pk}/queue/stream"
+    async def listen_backend(self, ch_name: str):
+        url = f"{backend.base}/channels/{ch_name}/queue/stream"
         while True:
             try:
                 if backend.session is None:
@@ -417,30 +417,30 @@ class SongBot(commands.Bot):
                     async for line in resp.content:
                         line = line.decode().strip()
                         if line.startswith("data:"):
-                            await self.process_backend_update(ch_name, channel_pk)
+                            await self.process_backend_update(ch_name)
             except Exception:
                 await asyncio.sleep(5)
 
-    async def process_backend_update(self, ch_name: str, channel_pk: int):
-        state = self.state.get(channel_pk, {})
+    async def process_backend_update(self, ch_name: str):
+        state = self.state.get(ch_name, {})
         prev_queue = state.get('queue', [])
         last_event = state.get('last_event')
-        new_queue = await backend.get_queue(channel_pk, include_played=True)
+        new_queue = await backend.get_queue(ch_name, include_played=True)
 
-        await self.check_played(ch_name, channel_pk, prev_queue, new_queue)
-        await self.check_bumps(ch_name, channel_pk, prev_queue, new_queue)
+        await self.check_played(ch_name, prev_queue, new_queue)
+        await self.check_bumps(ch_name, prev_queue, new_queue)
 
-        events = await backend.get_events(channel_pk, since=last_event) if last_event else await backend.get_events(channel_pk)
+        events = await backend.get_events(ch_name, since=last_event) if last_event else await backend.get_events(ch_name)
         if events:
             for ev in reversed(events):
                 ev_time = ev['event_time']
                 if last_event and ev_time <= last_event:
                     continue
-                await self.announce_event(ch_name, channel_pk, ev)
+                await self.announce_event(ch_name, ev)
             state['last_event'] = max(ev['event_time'] for ev in events)
         state['queue'] = new_queue
 
-    async def check_played(self, ch_name: str, channel_pk: int, prev_queue: List[dict], new_queue: List[dict]):
+    async def check_played(self, ch_name: str, prev_queue: List[dict], new_queue: List[dict]):
         prev_map = {q['id']: q for q in prev_queue}
         chan = self.get_channel(ch_name.lower())
         if not chan:
@@ -448,13 +448,13 @@ class SongBot(commands.Bot):
         for req in new_queue:
             old = prev_map.get(req['id'])
             if old and old['played'] == 0 and req['played'] == 1:
-                song = await backend.get_song(channel_pk, req['song_id'])
-                user = await backend.get_user(channel_pk, req['user_id'])
+                song = await backend.get_song(ch_name, req['song_id'])
+                user = await backend.get_user(ch_name, req['user_id'])
                 pending_prio = [q for q in new_queue if q['played'] == 0 and q['is_priority'] == 1]
                 if pending_prio:
                     next_req = pending_prio[0]
-                    next_song = await backend.get_song(channel_pk, next_req['song_id'])
-                    next_user = await backend.get_user(channel_pk, next_req['user_id'])
+                    next_song = await backend.get_song(ch_name, next_req['song_id'])
+                    next_user = await backend.get_user(ch_name, next_req['user_id'])
                     msg = self.messages['played_next'].format(
                         artist=song.get('artist', '?'),
                         title=song.get('title', '?'),
@@ -472,7 +472,7 @@ class SongBot(commands.Bot):
                     )
                 await chan.send(msg)
 
-    async def check_bumps(self, ch_name: str, channel_pk: int, prev_queue: List[dict], new_queue: List[dict]):
+    async def check_bumps(self, ch_name: str, prev_queue: List[dict], new_queue: List[dict]):
         prev_map = {q['id']: q for q in prev_queue}
         chan = self.get_channel(ch_name.lower())
         if not chan:
@@ -482,8 +482,8 @@ class SongBot(commands.Bot):
             new_prio = req['is_priority'] == 1 and req.get('priority_source') == 'admin'
             was_prio = old and old['is_priority'] == 1 if old else False
             if new_prio and not was_prio:
-                song = await backend.get_song(channel_pk, req['song_id'])
-                user = await backend.get_user(channel_pk, req['user_id'])
+                song = await backend.get_song(ch_name, req['song_id'])
+                user = await backend.get_user(ch_name, req['user_id'])
                 await chan.send(
                     self.messages['bump_free'].format(
                         artist=song.get('artist', '?'),
@@ -492,13 +492,13 @@ class SongBot(commands.Bot):
                     )
                 )
 
-    async def announce_event(self, ch_name: str, channel_pk: int, ev: dict):
+    async def announce_event(self, ch_name: str, ev: dict):
         chan = self.get_channel(ch_name.lower())
         if not chan:
             return
         user = None
         if ev.get('user_id'):
-            user = await backend.get_user(channel_pk, ev['user_id'])
+            user = await backend.get_user(ch_name, ev['user_id'])
         if not user:
             return
         meta = json.loads(ev.get('meta') or '{}')
