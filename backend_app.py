@@ -272,6 +272,12 @@ def require_token(x_admin_token: str = Header(None)):
     if x_admin_token != ADMIN_TOKEN:
         raise HTTPException(status_code=401, detail="invalid admin token")
 
+def get_channel_pk(channel: str, db: Session) -> int:
+    ch = db.query(ActiveChannel).filter(ActiveChannel.channel_name == channel).one_or_none()
+    if not ch:
+        raise HTTPException(status_code=404, detail="channel not found")
+    return ch.id
+
 # =====================================
 # Helpers / Services
 # =====================================
@@ -389,8 +395,9 @@ def add_channel(payload: ChannelIn, db: Session = Depends(get_db)):
     except: pass
     return ch
 
-@app.put("/channels/{channel_pk}", dependencies=[Depends(require_token)])
-def update_channel_status(channel_pk: int, join_active: int, db: Session = Depends(get_db)):
+@app.put("/channels/{channel}", dependencies=[Depends(require_token)])
+def update_channel_status(channel: str, join_active: int, db: Session = Depends(get_db)):
+    channel_pk = get_channel_pk(channel, db)
     ch = db.get(ActiveChannel, channel_pk)
     if not ch:
         raise HTTPException(404, "channel not found")
@@ -400,8 +407,9 @@ def update_channel_status(channel_pk: int, join_active: int, db: Session = Depen
     except: pass
     return {"success": True}
 
-@app.get("/channels/{channel_pk}/settings", response_model=ChannelSettingsOut)
-def get_channel_settings(channel_pk: int, db: Session = Depends(get_db)):
+@app.get("/channels/{channel}/settings", response_model=ChannelSettingsOut)
+def get_channel_settings(channel: str, db: Session = Depends(get_db)):
+    channel_pk = get_channel_pk(channel, db)
     st = get_or_create_settings(db, channel_pk)
     return ChannelSettingsOut(
         channel_id=st.channel_id,
@@ -413,8 +421,9 @@ def get_channel_settings(channel_pk: int, db: Session = Depends(get_db)):
         max_prio_points=st.max_prio_points,
     )
 
-@app.put("/channels/{channel_pk}/settings", dependencies=[Depends(require_token)])
-def set_channel_settings(channel_pk: int, payload: ChannelSettingsIn, db: Session = Depends(get_db)):
+@app.put("/channels/{channel}/settings", dependencies=[Depends(require_token)])
+def set_channel_settings(channel: str, payload: ChannelSettingsIn, db: Session = Depends(get_db)):
+    channel_pk = get_channel_pk(channel, db)
     st = get_or_create_settings(db, channel_pk)
     st.max_requests_per_user = payload.max_requests_per_user
     st.prio_only = payload.prio_only
@@ -430,16 +439,18 @@ def set_channel_settings(channel_pk: int, payload: ChannelSettingsIn, db: Sessio
 # =====================================
 # Routes: Songs
 # =====================================
-@app.get("/channels/{channel_pk}/songs", response_model=List[SongOut])
-def search_songs(channel_pk: int, search: Optional[str] = Query(None), db: Session = Depends(get_db)):
+@app.get("/channels/{channel}/songs", response_model=List[SongOut])
+def search_songs(channel: str, search: Optional[str] = Query(None), db: Session = Depends(get_db)):
+    channel_pk = get_channel_pk(channel, db)
     q = db.query(Song).filter(Song.channel_id == channel_pk)
     if search:
         like = f"%{search}%"
         q = q.filter((Song.artist.ilike(like)) | (Song.title.ilike(like)))
     return q.order_by(Song.artist.asc(), Song.title.asc()).all()
 
-@app.post("/channels/{channel_pk}/songs", response_model=dict, dependencies=[Depends(require_token)])
-def add_song(channel_pk: int, payload: SongIn, db: Session = Depends(get_db)):
+@app.post("/channels/{channel}/songs", response_model=dict, dependencies=[Depends(require_token)])
+def add_song(channel: str, payload: SongIn, db: Session = Depends(get_db)):
+    channel_pk = get_channel_pk(channel, db)
     song = Song(channel_id=channel_pk, **payload.model_dump())
     db.add(song)
     db.commit()
@@ -447,15 +458,17 @@ def add_song(channel_pk: int, payload: SongIn, db: Session = Depends(get_db)):
     except: pass
     return {"id": song.id}
 
-@app.get("/channels/{channel_pk}/songs/{song_id}", response_model=SongOut)
-def get_song(channel_pk: int, song_id: int, db: Session = Depends(get_db)):
+@app.get("/channels/{channel}/songs/{song_id}", response_model=SongOut)
+def get_song(channel: str, song_id: int, db: Session = Depends(get_db)):
+    channel_pk = get_channel_pk(channel, db)
     song = db.query(Song).filter(Song.id == song_id, Song.channel_id == channel_pk).one_or_none()
     if not song:
         raise HTTPException(404, "song not found")
     return song
 
-@app.put("/channels/{channel_pk}/songs/{song_id}", dependencies=[Depends(require_token)])
-def update_song(channel_pk: int, song_id: int, payload: SongIn, db: Session = Depends(get_db)):
+@app.put("/channels/{channel}/songs/{song_id}", dependencies=[Depends(require_token)])
+def update_song(channel: str, song_id: int, payload: SongIn, db: Session = Depends(get_db)):
+    channel_pk = get_channel_pk(channel, db)
     song = db.query(Song).filter(Song.id == song_id, Song.channel_id == channel_pk).one_or_none()
     if not song:
         raise HTTPException(404, "song not found")
@@ -466,8 +479,9 @@ def update_song(channel_pk: int, song_id: int, payload: SongIn, db: Session = De
     except: pass
     return {"success": True}
 
-@app.delete("/channels/{channel_pk}/songs/{song_id}", dependencies=[Depends(require_token)])
-def delete_song(channel_pk: int, song_id: int, db: Session = Depends(get_db)):
+@app.delete("/channels/{channel}/songs/{song_id}", dependencies=[Depends(require_token)])
+def delete_song(channel: str, song_id: int, db: Session = Depends(get_db)):
+    channel_pk = get_channel_pk(channel, db)
     song = db.query(Song).filter(Song.id == song_id, Song.channel_id == channel_pk).one_or_none()
     if not song:
         raise HTTPException(404, "song not found")
@@ -480,16 +494,18 @@ def delete_song(channel_pk: int, song_id: int, db: Session = Depends(get_db)):
 # =====================================
 # Routes: Users
 # =====================================
-@app.get("/channels/{channel_pk}/users", response_model=List[UserOut])
-def search_users(channel_pk: int, search: Optional[str] = Query(None), db: Session = Depends(get_db)):
+@app.get("/channels/{channel}/users", response_model=List[UserOut])
+def search_users(channel: str, search: Optional[str] = Query(None), db: Session = Depends(get_db)):
+    channel_pk = get_channel_pk(channel, db)
     q = db.query(User).filter(User.channel_id == channel_pk)
     if search:
         like = f"%{search}%"
         q = q.filter(User.username.ilike(like))
     return q.order_by(User.username.asc()).all()
 
-@app.post("/channels/{channel_pk}/users", response_model=dict, dependencies=[Depends(require_token)])
-def get_or_create_user(channel_pk: int, payload: UserIn, db: Session = Depends(get_db)):
+@app.post("/channels/{channel}/users", response_model=dict, dependencies=[Depends(require_token)])
+def get_or_create_user(channel: str, payload: UserIn, db: Session = Depends(get_db)):
+    channel_pk = get_channel_pk(channel, db)
     u = (
         db.query(User)
         .filter(User.channel_id == channel_pk, User.twitch_id == payload.twitch_id)
@@ -508,15 +524,17 @@ def get_or_create_user(channel_pk: int, payload: UserIn, db: Session = Depends(g
     except: pass
     return {"id": u.id}
 
-@app.get("/channels/{channel_pk}/users/{user_id}", response_model=UserOut)
-def get_user(channel_pk: int, user_id: int, db: Session = Depends(get_db)):
+@app.get("/channels/{channel}/users/{user_id}", response_model=UserOut)
+def get_user(channel: str, user_id: int, db: Session = Depends(get_db)):
+    channel_pk = get_channel_pk(channel, db)
     u = db.query(User).filter(User.id == user_id, User.channel_id == channel_pk).one_or_none()
     if not u:
         raise HTTPException(404, "user not found")
     return u
 
-@app.put("/channels/{channel_pk}/users/{user_id}", dependencies=[Depends(require_token)])
-def update_user(channel_pk: int, user_id: int, prio_points: Optional[int] = None, amount_requested: Optional[int] = None, db: Session = Depends(get_db)):
+@app.put("/channels/{channel}/users/{user_id}", dependencies=[Depends(require_token)])
+def update_user(channel: str, user_id: int, prio_points: Optional[int] = None, amount_requested: Optional[int] = None, db: Session = Depends(get_db)):
+    channel_pk = get_channel_pk(channel, db)
     u = db.query(User).filter(User.id == user_id, User.channel_id == channel_pk).one_or_none()
     if not u:
         raise HTTPException(404, "user not found")
@@ -530,8 +548,9 @@ def update_user(channel_pk: int, user_id: int, prio_points: Optional[int] = None
     except: pass
     return {"success": True}
 
-@app.get("/channels/{channel_pk}/users/{user_id}/stream_state")
-def get_user_stream_state(channel_pk: int, user_id: int, db: Session = Depends(get_db)):
+@app.get("/channels/{channel}/users/{user_id}/stream_state")
+def get_user_stream_state(channel: str, user_id: int, db: Session = Depends(get_db)):
+    channel_pk = get_channel_pk(channel, db)
     sid = current_stream(db, channel_pk)
     ensure_user_stream_state(db, user_id, sid)
     st = (
@@ -541,12 +560,14 @@ def get_user_stream_state(channel_pk: int, user_id: int, db: Session = Depends(g
     )
     return {"stream_id": sid, "sub_free_used": int(st.sub_free_used)}
 
-@app.get("/channels/{channel_pk}/users", dependencies=[Depends(require_token)])
-def list_users(channel_pk: int, db: Session = Depends(get_db)):
+@app.get("/channels/{channel}/users", dependencies=[Depends(require_token)])
+def list_users(channel: str, db: Session = Depends(get_db)):
+    channel_pk = get_channel_pk(channel, db)
     return db.query(User).filter(User.channel_id==channel_pk).all()
 
-@app.put("/channels/{channel_pk}/users/{user_id}/points", dependencies=[Depends(require_token)])
-def set_points(channel_pk: int, user_id: int, payload: dict, db: Session = Depends(get_db)):
+@app.put("/channels/{channel}/users/{user_id}/points", dependencies=[Depends(require_token)])
+def set_points(channel: str, user_id: int, payload: dict, db: Session = Depends(get_db)):
+    channel_pk = get_channel_pk(channel, db)
     u = db.get(User, user_id)
     if not u or u.channel_id != channel_pk: raise HTTPException(404)
     u.prio_points = int(payload.get("prio_points", 0))
@@ -558,8 +579,9 @@ def set_points(channel_pk: int, user_id: int, payload: dict, db: Session = Depen
 # =====================================
 # Routes: Queue
 # =====================================
-@app.get("/channels/{channel_pk}/queue/stream")
-async def stream_queue(channel_pk: int):
+@app.get("/channels/{channel}/queue/stream")
+async def stream_queue(channel: str, db: Session = Depends(get_db)):
+    channel_pk = get_channel_pk(channel, db)
     q = _broker(channel_pk)
     async def gen():
         # initial tick so clients render immediately
@@ -575,8 +597,9 @@ async def stream_queue(channel_pk: int):
     }
 )
 
-@app.get("/channels/{channel_pk}/queue", response_model=List[RequestOut])
-def get_queue(channel_pk: int, db: Session = Depends(get_db)):
+@app.get("/channels/{channel}/queue", response_model=List[RequestOut])
+def get_queue(channel: str, db: Session = Depends(get_db)):
+    channel_pk = get_channel_pk(channel, db)
     sid = current_stream(db, channel_pk)
     return (
         db.query(Request)
@@ -594,8 +617,9 @@ def get_queue(channel_pk: int, db: Session = Depends(get_db)):
         .all()
     )
 
-@app.get("/channels/{channel_pk}/streams/{stream_id}/queue", response_model=List[RequestOut])
-def get_stream_queue(channel_pk: int, stream_id: int, db: Session = Depends(get_db)):
+@app.get("/channels/{channel}/streams/{stream_id}/queue", response_model=List[RequestOut])
+def get_stream_queue(channel: str, stream_id: int, db: Session = Depends(get_db)):
+    channel_pk = get_channel_pk(channel, db)
     return (
         db.query(Request)
         .filter(Request.channel_id == channel_pk, Request.stream_id == stream_id)
@@ -609,8 +633,9 @@ def get_stream_queue(channel_pk: int, stream_id: int, db: Session = Depends(get_
         .all()
     )
 
-@app.post("/channels/{channel_pk}/queue", response_model=dict, dependencies=[Depends(require_token)])
-def add_request(channel_pk: int, payload: RequestCreate, db: Session = Depends(get_db)):
+@app.post("/channels/{channel}/queue", response_model=dict, dependencies=[Depends(require_token)])
+def add_request(channel: str, payload: RequestCreate, db: Session = Depends(get_db)):
+    channel_pk = get_channel_pk(channel, db)
     # Checks
     enforce_queue_limits(db, channel_pk, payload.user_id, payload.want_priority)
     sid = current_stream(db, channel_pk)
@@ -681,8 +706,9 @@ def add_request(channel_pk: int, payload: RequestCreate, db: Session = Depends(g
         pass
     return {"request_id": req.id}
 
-@app.put("/channels/{channel_pk}/queue/{request_id}", dependencies=[Depends(require_token)])
-def update_request(channel_pk: int, request_id: int, payload: RequestUpdate, db: Session = Depends(get_db)):
+@app.put("/channels/{channel}/queue/{request_id}", dependencies=[Depends(require_token)])
+def update_request(channel: str, request_id: int, payload: RequestUpdate, db: Session = Depends(get_db)):
+    channel_pk = get_channel_pk(channel, db)
     r = db.query(Request).filter(Request.id == request_id, Request.channel_id == channel_pk).one_or_none()
     if not r:
         raise HTTPException(404, "request not found")
@@ -710,8 +736,9 @@ def update_request(channel_pk: int, request_id: int, payload: RequestUpdate, db:
         pass
     return {"success": True}
 
-@app.delete("/channels/{channel_pk}/queue/{request_id}", dependencies=[Depends(require_token)])
-def remove_request(channel_pk: int, request_id: int, db: Session = Depends(get_db)):
+@app.delete("/channels/{channel}/queue/{request_id}", dependencies=[Depends(require_token)])
+def remove_request(channel: str, request_id: int, db: Session = Depends(get_db)):
+    channel_pk = get_channel_pk(channel, db)
     r = db.query(Request).filter(Request.id == request_id, Request.channel_id == channel_pk).one_or_none()
     if not r:
         raise HTTPException(404, "request not found")
@@ -723,8 +750,9 @@ def remove_request(channel_pk: int, request_id: int, db: Session = Depends(get_d
         pass
     return {"success": True}
 
-@app.post("/channels/{channel_pk}/queue/clear", dependencies=[Depends(require_token)])
-def clear_queue(channel_pk: int, db: Session = Depends(get_db)):
+@app.post("/channels/{channel}/queue/clear", dependencies=[Depends(require_token)])
+def clear_queue(channel: str, db: Session = Depends(get_db)):
+    channel_pk = get_channel_pk(channel, db)
     sid = current_stream(db, channel_pk)
     db.query(Request).filter(Request.channel_id == channel_pk, Request.stream_id == sid, Request.played == 0).delete()
     db.commit()
@@ -734,8 +762,9 @@ def clear_queue(channel_pk: int, db: Session = Depends(get_db)):
         pass
     return {"success": True}
 
-@app.get("/channels/{channel_pk}/queue/random_nonpriority")
-def random_nonpriority(channel_pk: int, db: Session = Depends(get_db)):
+@app.get("/channels/{channel}/queue/random_nonpriority")
+def random_nonpriority(channel: str, db: Session = Depends(get_db)):
+    channel_pk = get_channel_pk(channel, db)
     sid = current_stream(db, channel_pk)
     row = (
         db.query(Request, Song, User)
@@ -757,8 +786,9 @@ def random_nonpriority(channel_pk: int, db: Session = Depends(get_db)):
         "user": {"id": u.id, "username": u.username}
     }
 
-@app.post("/channels/{channel_pk}/queue/{request_id}/bump_admin", dependencies=[Depends(require_token)])
-def bump_admin(channel_pk: int, request_id: int, db: Session = Depends(get_db)):
+@app.post("/channels/{channel}/queue/{request_id}/bump_admin", dependencies=[Depends(require_token)])
+def bump_admin(channel: str, request_id: int, db: Session = Depends(get_db)):
+    channel_pk = get_channel_pk(channel, db)
     r = db.query(Request).filter(Request.id == request_id, Request.channel_id == channel_pk).one_or_none()
     if not r:
         raise HTTPException(404, "request not found")
@@ -780,8 +810,9 @@ def _get_req(db, channel_pk: int, request_id: int):
         raise HTTPException(status_code=404, detail="request not found")
     return req
 
-@app.post("/channels/{channel_pk}/queue/{request_id}/move", dependencies=[Depends(require_token)])
-def move_request(channel_pk: int, request_id: int, direction: str, db: Session = Depends(get_db)):
+@app.post("/channels/{channel}/queue/{request_id}/move", dependencies=[Depends(require_token)])
+def move_request(channel: str, request_id: int, direction: str, db: Session = Depends(get_db)):
+    channel_pk = get_channel_pk(channel, db)
     if direction not in ("up", "down"):
         raise HTTPException(400, "direction must be 'up' or 'down'")
     req = _get_req(db, channel_pk, request_id)
@@ -812,8 +843,9 @@ def move_request(channel_pk: int, request_id: int, direction: str, db: Session =
     except: pass
     return {"success": True}
 
-@app.post("/channels/{channel_pk}/queue/{request_id}/skip", dependencies=[Depends(require_token)])
-def skip_request(channel_pk: int, request_id: int, db: Session = Depends(get_db)):
+@app.post("/channels/{channel}/queue/{request_id}/skip", dependencies=[Depends(require_token)])
+def skip_request(channel: str, request_id: int, db: Session = Depends(get_db)):
+    channel_pk = get_channel_pk(channel, db)
     req = _get_req(db, channel_pk, request_id)
     # move to bottom of pending
     max_pos = db.execute(
@@ -826,8 +858,9 @@ def skip_request(channel_pk: int, request_id: int, db: Session = Depends(get_db)
     except: pass
     return {"success": True}
 
-@app.post("/channels/{channel_pk}/queue/{request_id}/priority", dependencies=[Depends(require_token)])
-def set_priority(channel_pk: int, request_id: int, enabled: bool, db: Session = Depends(get_db)):
+@app.post("/channels/{channel}/queue/{request_id}/priority", dependencies=[Depends(require_token)])
+def set_priority(channel: str, request_id: int, enabled: bool, db: Session = Depends(get_db)):
+    channel_pk = get_channel_pk(channel, db)
     req = _get_req(db, channel_pk, request_id)
     # optional: refund or spend points can be inserted here
     req.is_priority = 1 if enabled else 0
@@ -836,8 +869,9 @@ def set_priority(channel_pk: int, request_id: int, enabled: bool, db: Session = 
     except: pass
     return {"success": True}
 
-@app.post("/channels/{channel_pk}/queue/{request_id}/played", dependencies=[Depends(require_token)])
-def mark_played(channel_pk: int, request_id: int, db: Session = Depends(get_db)):
+@app.post("/channels/{channel}/queue/{request_id}/played", dependencies=[Depends(require_token)])
+def mark_played(channel: str, request_id: int, db: Session = Depends(get_db)):
+    channel_pk = get_channel_pk(channel, db)
     req = _get_req(db, channel_pk, request_id)
     req.played = 1
     # optionally push it out of visible order by setting a sentinel position
@@ -849,8 +883,9 @@ def mark_played(channel_pk: int, request_id: int, db: Session = Depends(get_db))
 # =====================================
 # Routes: Events
 # =====================================
-@app.post("/channels/{channel_pk}/events", response_model=dict, dependencies=[Depends(require_token)])
-def log_event(channel_pk: int, payload: EventIn, db: Session = Depends(get_db)):
+@app.post("/channels/{channel}/events", response_model=dict, dependencies=[Depends(require_token)])
+def log_event(channel: str, payload: EventIn, db: Session = Depends(get_db)):
+    channel_pk = get_channel_pk(channel, db)
     meta = payload.meta or {}
     meta_str = json.dumps(meta)
     ev = Event(channel_id=channel_pk, event_type=payload.type, user_id=payload.user_id, meta=meta_str)
@@ -878,8 +913,9 @@ def log_event(channel_pk: int, payload: EventIn, db: Session = Depends(get_db)):
     except: pass    
     return {"event_id": ev.id}
 
-@app.get("/channels/{channel_pk}/events", response_model=List[EventOut])
-def list_events(channel_pk: int, type: Optional[str] = None, since: Optional[str] = None, db: Session = Depends(get_db)):
+@app.get("/channels/{channel}/events", response_model=List[EventOut])
+def list_events(channel: str, type: Optional[str] = None, since: Optional[str] = None, db: Session = Depends(get_db)):
+    channel_pk = get_channel_pk(channel, db)
     q = db.query(Event).filter(Event.channel_id == channel_pk)
     if type:
         q = q.filter(Event.event_type == type)
@@ -894,8 +930,9 @@ def list_events(channel_pk: int, type: Optional[str] = None, since: Optional[str
 # =====================================
 # Routes: Streams
 # =====================================
-@app.get("/channels/{channel_pk}/streams", response_model=List[StreamOut])
-def list_streams(channel_pk: int, db: Session = Depends(get_db)):
+@app.get("/channels/{channel}/streams", response_model=List[StreamOut])
+def list_streams(channel: str, db: Session = Depends(get_db)):
+    channel_pk = get_channel_pk(channel, db)
     return (
         db.query(StreamSession)
         .filter(StreamSession.channel_id == channel_pk)
@@ -903,13 +940,15 @@ def list_streams(channel_pk: int, db: Session = Depends(get_db)):
         .all()
     )
 
-@app.post("/channels/{channel_pk}/streams/start", response_model=dict, dependencies=[Depends(require_token)])
-def start_stream(channel_pk: int, db: Session = Depends(get_db)):
+@app.post("/channels/{channel}/streams/start", response_model=dict, dependencies=[Depends(require_token)])
+def start_stream(channel: str, db: Session = Depends(get_db)):
+    channel_pk = get_channel_pk(channel, db)
     sid = current_stream(db, channel_pk)
     return {"stream_id": sid}
 
-@app.post("/channels/{channel_pk}/streams/archive", response_model=dict, dependencies=[Depends(require_token)])
-def archive_stream(channel_pk: int, db: Session = Depends(get_db)):
+@app.post("/channels/{channel}/streams/archive", response_model=dict, dependencies=[Depends(require_token)])
+def archive_stream(channel: str, db: Session = Depends(get_db)):
+    channel_pk = get_channel_pk(channel, db)
     # close current
     cur = (
         db.query(StreamSession)
@@ -931,8 +970,9 @@ def archive_stream(channel_pk: int, db: Session = Depends(get_db)):
 # =====================================
 # Routes: Stats
 # =====================================
-@app.get("/channels/{channel_pk}/stats/general")
-def stats_general(channel_pk: int, since: Optional[str] = None, db: Session = Depends(get_db)):
+@app.get("/channels/{channel}/stats/general")
+def stats_general(channel: str, since: Optional[str] = None, db: Session = Depends(get_db)):
+    channel_pk = get_channel_pk(channel, db)
     sid = current_stream(db, channel_pk)
     rq = db.query(Request).filter(Request.channel_id == channel_pk, Request.stream_id == sid)
     if since:
@@ -946,8 +986,9 @@ def stats_general(channel_pk: int, since: Optional[str] = None, db: Session = De
     unique_users = rq.with_entities(Request.user_id).distinct().count()
     return {"total_requests": total_requests, "unique_songs": unique_songs, "unique_users": unique_users}
 
-@app.get("/channels/{channel_pk}/stats/songs")
-def stats_top_songs(channel_pk: int, top: int = 10, since: Optional[str] = None, db: Session = Depends(get_db)):
+@app.get("/channels/{channel}/stats/songs")
+def stats_top_songs(channel: str, top: int = 10, since: Optional[str] = None, db: Session = Depends(get_db)):
+    channel_pk = get_channel_pk(channel, db)
     sid = current_stream(db, channel_pk)
     rq = db.query(Request.song_id, func.count(Request.id).label("cnt")).\
         filter(Request.channel_id == channel_pk, Request.stream_id == sid).group_by(Request.song_id)
@@ -960,8 +1001,9 @@ def stats_top_songs(channel_pk: int, top: int = 10, since: Optional[str] = None,
     rows = rq.order_by(func.count(Request.id).desc()).limit(top).all()
     return [{"song_id": r[0], "count": r[1]} for r in rows]
 
-@app.get("/channels/{channel_pk}/stats/users")
-def stats_top_users(channel_pk: int, top: int = 10, since: Optional[str] = None, db: Session = Depends(get_db)):
+@app.get("/channels/{channel}/stats/users")
+def stats_top_users(channel: str, top: int = 10, since: Optional[str] = None, db: Session = Depends(get_db)):
+    channel_pk = get_channel_pk(channel, db)
     sid = current_stream(db, channel_pk)
     rq = db.query(Request.user_id, func.count(Request.id).label("cnt")).\
         filter(Request.channel_id == channel_pk, Request.stream_id == sid).group_by(Request.user_id)
