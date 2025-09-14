@@ -31,3 +31,7 @@ a:hover{text-decoration:underline}
 .stream{padding:8px;border-radius:8px;border:1px solid #24283b;background:#121423;cursor:pointer}
 .stream.active{border-color:var(--accent)}
 .footer{margin-top:10px;color:var(--muted);font-size:12px}
+.landing{display:flex;flex-direction:column;align-items:center;gap:16px;margin:80px auto;text-align:center}
+.landing h1{margin:0 0 20px;font-size:32px}
+.landing button{padding:.5rem 1rem;border-radius:8px;border:1px solid #24283b;background:#121423;color:var(--text);cursor:pointer}
+.channel-list{display:flex;flex-wrap:wrap;gap:8px;margin-top:16px}

@@ -3,42 +3,50 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>Admin Console</title>
+  <title>ALPEN.BOT SONGQ</title>
   <link rel="stylesheet" href="style.css"/>
 </head>
 <body>
-<div class="wrap">
-  <div class="header">
-    <div class="brand">Admin Console</div>
-    <span id="ch-badge" class="badge">channel: ?</span>
-    <button id="login-btn" class="badge">login</button>
-  </div>
+<div id="landing" class="landing">
+  <h1>ALPEN.BOT SONGQ</h1>
+  <button id="owner-login-btn">log in as channel owner</button>
+  <button id="mod-login-btn">log in as moderator to an existing channel</button>
+  <div id="channel-list" class="channel-list"></div>
+</div>
 
-  <div class="grid">
-    <div class="card">
-      <div class="tabs">
-        <button id="tab-queue" class="tab active">Queue</button>
-        <button id="tab-users" class="tab">Users</button>
-        <button id="tab-settings" class="tab">Settings</button>
-      </div>
+<div id="app" style="display:none">
+  <div class="wrap">
+    <div class="header">
+      <div class="brand">Admin Console</div>
+      <span id="ch-badge" class="badge">channel: ?</span>
+    </div>
 
-      <div id="queue-view">
-        <h2>Active Queue</h2>
-        <div id="queue" class="queue"></div>
-        <div class="footer">
-          <button id="archive-btn">Archive Stream</button>
-          <button id="mute-btn">Toggle Requests</button>
+    <div class="grid">
+      <div class="card">
+        <div class="tabs">
+          <button id="tab-queue" class="tab active">Queue</button>
+          <button id="tab-users" class="tab">Users</button>
+          <button id="tab-settings" class="tab">Settings</button>
         </div>
-      </div>
 
-      <div id="users-view" style="display:none">
-        <h2>Users</h2>
-        <div id="users" class="queue"></div>
-      </div>
+        <div id="queue-view">
+          <h2>Active Queue</h2>
+          <div id="queue" class="queue"></div>
+          <div class="footer">
+            <button id="archive-btn">Archive Stream</button>
+            <button id="mute-btn">Toggle Requests</button>
+          </div>
+        </div>
 
-      <div id="settings-view" style="display:none">
-        <h2>Settings</h2>
-        <div id="settings"></div>
+        <div id="users-view" style="display:none">
+          <h2>Users</h2>
+          <div id="users" class="queue"></div>
+        </div>
+
+        <div id="settings-view" style="display:none">
+          <h2>Settings</h2>
+          <div id="settings"></div>
+        </div>
       </div>
     </div>
   </div>

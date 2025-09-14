@@ -1,5 +1,6 @@
 const API = window.BACKEND_URL;
 let token = null; // oauth token from Twitch
+let channelName = '';
 
 function qs(id) { return document.getElementById(id); }
 
@@ -90,25 +91,54 @@ async function updateSetting(key, value) {
   await fetch(`${API}/channels/${channelName}/settings`, {method:'POST', body: JSON.stringify({[key]:value}), headers:{'Content-Type':'application/json'}});
 }
 
-// ===== Twitch login =====
-const channelName = new URLSearchParams(window.location.search).get('channel') || '';
-qs('login-btn').onclick = () => {
+// ===== Landing page & login =====
+qs('owner-login-btn').onclick = async () => {
+  const ch = prompt('Enter your channel name');
+  if (!ch) return;
+  const resp = await fetch(`${API}/auth/login?channel=${encodeURIComponent(ch)}`);
+  const data = await resp.json();
+  location.href = data.auth_url;
+};
+
+qs('mod-login-btn').onclick = () => {
   const client = window.TWITCH_CLIENT_ID || '';
   const scopes = ['user:read:email'];
-  const url = `https://id.twitch.tv/oauth2/authorize?response_type=token&client_id=${client}&redirect_uri=${encodeURIComponent(location.href)}&scope=${scopes.join(' ')}&state=123&force_verify=true`;
+  const url = `https://id.twitch.tv/oauth2/authorize?response_type=token&client_id=${client}&redirect_uri=${encodeURIComponent(location.href)}&scope=${scopes.join(' ')}&state=mod&force_verify=true`;
   location.href = url;
 };
+
+function selectChannel(ch) {
+  channelName = ch;
+  qs('ch-badge').textContent = `channel: ${channelName}`;
+  qs('landing').style.display = 'none';
+  qs('app').style.display = '';
+  fetchQueue();
+  fetchUsers();
+  fetchSettings();
+}
 
 function initToken() {
   if (location.hash.startsWith('#access_token')) {
     const params = new URLSearchParams(location.hash.slice(1));
     token = params.get('access_token');
-    history.replaceState({}, document.title, location.pathname+location.search);
-    qs('login-btn').textContent = 'logged in';
+    history.replaceState({}, document.title, location.pathname);
+    fetch(`${API}/me/channels`, {headers:{Authorization:`Bearer ${token}`}})
+      .then(r => r.json())
+      .then(list => {
+        if (list.length === 1) {
+          selectChannel(list[0].channel_name);
+        } else {
+          const container = qs('channel-list');
+          container.innerHTML = '';
+          list.forEach(c => {
+            const b = document.createElement('button');
+            b.textContent = c.channel_name;
+            b.onclick = () => selectChannel(c.channel_name);
+            container.appendChild(b);
+          });
+        }
+      });
   }
 }
 
 initToken();
-fetchQueue();
-fetchUsers();
-fetchSettings();
