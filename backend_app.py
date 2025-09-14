@@ -407,15 +407,25 @@ def get_current_user(authorization: str = Header(None), db: Session = Depends(ge
         headers={"Authorization": f"OAuth {token}"},
     )
     if resp.status_code != 200:
-        raise HTTPException(status_code=401, detail="invalid token !200")
-    login = resp.json().get("login")
+        raise HTTPException(status_code=401, detail="invalid token")
+    data = resp.json()
+    login = data.get("login")
     if not login:
-        raise HTTPException(status_code=401, detail="invalid token not login")
+        raise HTTPException(status_code=401, detail="invalid token")
     user = db.query(TwitchUser).filter(func.lower(TwitchUser.username) == login.lower()).one_or_none()
     if not user:
-        raise HTTPException(status_code=401, detail="invalid token not user")
-    user.access_token = token
+        user = TwitchUser(
+            twitch_id=data.get("user_id", ""),
+            username=login,
+            access_token=token,
+            refresh_token="",
+            scopes=" ".join(data.get("scopes", [])),
+        )
+        db.add(user)
+    else:
+        user.access_token = token
     db.commit()
+    db.refresh(user)
     return user
 
 def _user_has_access(user: TwitchUser, channel_pk: int, db: Session) -> bool:
