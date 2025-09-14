@@ -202,7 +202,7 @@ def load_messages(path: Path) -> Dict[str, str]:
 
 # ---- bot ----
 class SongBot(commands.Bot):
-    def __init__(self):
+    def __init__(self, initial_channels: Optional[List[str]] = None):
         if not BOT_TOKEN or not BOT_NICK:
             raise RuntimeError('TWITCH_BOT_TOKEN and BOT_NICK required')
         self.commands_map = load_commands(COMMANDS_FILE)
@@ -210,15 +210,18 @@ class SongBot(commands.Bot):
         self.currency_singular = self.messages.get('currency_singular', 'point')
         self.currency_plural = self.messages.get('currency_plural', 'points')
         prefix = self.commands_map['prefix'][0]
-        super().__init__(token=f"oauth:{BOT_TOKEN}", prefix=prefix, initial_channels=CHANNELS or [])
+        chans = initial_channels or []
+        super().__init__(token=f"oauth:{BOT_TOKEN}", prefix=prefix, initial_channels=chans)
+        self.initial_channels = chans
         self.channel_map: Dict[str, Dict] = {}
         self.ready_event = asyncio.Event()
         self.state: Dict[str, Dict] = {}
 
     async def event_ready(self):
         rows = await backend.get_channels()
+        rows = [r for r in rows if r.get('authorized') and r.get('join_active')]
         existing = { r['channel_name'].lower(): r for r in rows }
-        for ch in CHANNELS:
+        for ch in self.initial_channels:
             name = ch.strip()
             key = name.lower()
             if key and key not in existing:
@@ -534,7 +537,13 @@ class SongBot(commands.Bot):
 # ---- entry ----
 async def main():
     await backend.start()
-    bot = SongBot()
+    rows = await backend.get_channels()
+    allowed = {r['channel_name'].lower(): r for r in rows if r.get('authorized') and r.get('join_active')}
+    if CHANNELS:
+        chans = [c for c in CHANNELS if c.lower() in allowed]
+    else:
+        chans = [r['channel_name'] for r in allowed.values()]
+    bot = SongBot(initial_channels=chans)
     await asyncio.gather(bot.start())
 
 if __name__ == '__main__':
