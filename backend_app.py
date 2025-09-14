@@ -400,8 +400,22 @@ def get_current_user(authorization: str = Header(None), db: Session = Depends(ge
         raise HTTPException(status_code=401, detail="missing token")
     token = authorization.split(" ", 1)[1]
     user = db.query(TwitchUser).filter_by(access_token=token).one_or_none()
+    if user:
+        return user
+    resp = requests.get(
+        "https://id.twitch.tv/oauth2/validate",
+        headers={"Authorization": f"OAuth {token}"},
+    )
+    if resp.status_code != 200:
+        raise HTTPException(status_code=401, detail="invalid token")
+    login = resp.json().get("login")
+    if not login:
+        raise HTTPException(status_code=401, detail="invalid token")
+    user = db.query(TwitchUser).filter(func.lower(TwitchUser.username) == login.lower()).one_or_none()
     if not user:
         raise HTTPException(status_code=401, detail="invalid token")
+    user.access_token = token
+    db.commit()
     return user
 
 def _user_has_access(user: TwitchUser, channel_pk: int, db: Session) -> bool:
