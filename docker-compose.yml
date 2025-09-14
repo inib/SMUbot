@@ -46,3 +46,18 @@ services:
     restart: unless-stopped
     volumes:
       - ./web:/web
+  admin:
+    build:
+      context: .
+      dockerfile: admin/Dockerfile
+    container_name: songqueue-admin
+    environment:
+      BACKEND_URL: ${BACKEND_URL:-http://api:7070}
+      TWITCH_CLIENT_ID: ${TWITCH_CLIENT_ID}
+    env_file:
+      - stack.env
+    ports:
+      - "${ADMIN_PORT:-7100}:80"
+    restart: unless-stopped
+    volumes:
+      - ./admin:/admin

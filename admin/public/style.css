@@ -1,0 +1,33 @@
+:root{
+  --bg:#0f1117; --panel:#151821; --muted:#9aa4b2; --text:#f8fafc; --accent:#8b5cf6;
+  --ok:#22c55e; --warn:#f59e0b; --danger:#ef4444;
+  --w: min(1100px, 96vw);
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--text);font:14px/1.4 system-ui,Segoe UI,Roboto,Arial}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+.wrap{max-width:var(--w);margin:24px auto;padding:0 8px}
+.header{display:flex;gap:16px;align-items:center;margin-bottom:16px}
+.brand{font-weight:700;font-size:20px}
+.badge{display:inline-block;padding:.15rem .5rem;border-radius:999px;background:var(--panel);border:1px solid #24283b;color:var(--muted);font-size:12px}
+.grid{display:grid;grid-template-columns:2fr 1fr;gap:16px}
+.card{background:var(--panel);border:1px solid #24283b;border-radius:12px;padding:14px}
+.card h2{margin:0 0 10px 0;font-size:16px}
+.row{display:flex;gap:10px;align-items:center}
+.queue{display:flex;flex-direction:column;gap:10px}
+.item{display:grid;grid-template-columns:56px 1fr auto;gap:10px;align-items:center;padding:8px;border-radius:10px;border:1px solid #24283b;background:#121423}
+.item.prio{border-color:var(--accent);box-shadow:0 0 0 1px rgba(139,92,246,0.2) inset}
+.item.played{opacity:.6;background:#0f121a}
+.thumb{width:56px;height:42px;border-radius:6px;background:#0b0d13;display:grid;place-items:center;color:var(--muted);font-weight:700}
+.meta{min-width:220px;text-align:right;color:var(--muted);font-size:12px}
+.title{font-weight:600}
+.sep{height:1px;background:#24283b;margin:8px 0}
+.info p{margin:.25rem 0;color:var(--muted)}
+.tabs{display:flex;gap:8px;margin-bottom:8px}
+.tab{padding:.35rem .7rem;border-radius:8px;border:1px solid #24283b;background:#121423;color:var(--muted);cursor:pointer}
+.tab.active{color:var(--text);border-color:var(--accent)}
+.streams{display:flex;flex-direction:column;gap:6px;max-height:300px;overflow:auto}
+.stream{padding:8px;border-radius:8px;border:1px solid #24283b;background:#121423;cursor:pointer}
+.stream.active{border-color:var(--accent)}
+.footer{margin-top:10px;color:var(--muted);font-size:12px}
