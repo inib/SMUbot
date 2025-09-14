@@ -1,6 +1,7 @@
 const API = window.BACKEND_URL;
 let token = null; // oauth token from Twitch
 let channelName = '';
+let userLogin = '';
 
 function qs(id) { return document.getElementById(id); }
 
@@ -92,20 +93,37 @@ async function updateSetting(key, value) {
 }
 
 // ===== Landing page & login =====
-qs('owner-login-btn').onclick = async () => {
-  const ch = prompt('Enter your channel name');
-  if (!ch) return;
-  const resp = await fetch(`${API}/auth/login?channel=${encodeURIComponent(ch)}`);
-  const data = await resp.json();
-  location.href = data.auth_url;
-};
-
-qs('mod-login-btn').onclick = () => {
+qs('login-btn').onclick = () => {
   const client = window.TWITCH_CLIENT_ID || '';
   const scopes = ['user:read:email'];
-  const url = `https://id.twitch.tv/oauth2/authorize?response_type=token&client_id=${client}&redirect_uri=${encodeURIComponent(location.href)}&scope=${scopes.join(' ')}&state=mod&force_verify=true`;
+  const url = `https://id.twitch.tv/oauth2/authorize?response_type=token&client_id=${client}&redirect_uri=${encodeURIComponent(location.href)}&scope=${scopes.join(' ')}&force_verify=true`;
   location.href = url;
 };
+
+async function updateRegButton() {
+  const btn = qs('reg-btn');
+  if (!userLogin) { btn.style.display = 'none'; return; }
+  try {
+    const resp = await fetch(`${API}/channels`);
+    const list = await resp.json();
+    const found = list.find(ch => ch.channel_name.toLowerCase() === userLogin.toLowerCase());
+    if (found) {
+      btn.textContent = 'unregister your channel';
+      btn.onclick = async () => {
+        await fetch(`${API}/channels/${userLogin}`, {method:'DELETE', headers:{Authorization:`Bearer ${token}`}});
+        location.reload();
+      };
+    } else {
+      btn.textContent = 'register your channel';
+      btn.onclick = () => {
+        location.href = `${API}/auth/login?channel=${encodeURIComponent(userLogin)}`;
+      };
+    }
+    btn.style.display = '';
+  } catch (e) {
+    btn.style.display = 'none';
+  }
+}
 
 function selectChannel(ch) {
   channelName = ch;
@@ -122,12 +140,16 @@ function initToken() {
     const params = new URLSearchParams(location.hash.slice(1));
     token = params.get('access_token');
     history.replaceState({}, document.title, location.pathname);
+    fetch('https://id.twitch.tv/oauth2/validate', {headers:{Authorization:`OAuth ${token}`}})
+      .then(r=>r.json())
+      .then(info=>{ userLogin = info.login || ''; updateRegButton(); })
+      .catch(()=>{});
     fetch(`${API}/me/channels`, {headers:{Authorization:`Bearer ${token}`}})
       .then(r => r.json())
       .then(list => {
         if (list.length === 1) {
           selectChannel(list[0].channel_name);
-        } else {
+        } else if (list.length > 1) {
           const container = qs('channel-list');
           container.innerHTML = '';
           list.forEach(c => {
@@ -137,7 +159,8 @@ function initToken() {
             container.appendChild(b);
           });
         }
-      });
+      })
+      .catch(()=>{});
   }
 }
 

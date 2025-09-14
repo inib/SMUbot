@@ -705,6 +705,22 @@ def update_channel_status(channel: str, join_active: int, db: Session = Depends(
     except: pass
     return {"success": True}
 
+@app.delete("/channels/{channel}", dependencies=[Depends(require_token)])
+def delete_channel(channel: str, db: Session = Depends(get_db), authorization: str = Header(None)):
+    channel_pk = get_channel_pk(channel, db)
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization.split(" ", 1)[1]
+        user = db.query(TwitchUser).filter_by(access_token=token).one_or_none()
+        ch = db.get(ActiveChannel, channel_pk)
+        if not user or ch.owner_id != user.id:
+            raise HTTPException(status_code=403, detail="only owner can unregister")
+    ch = db.get(ActiveChannel, channel_pk)
+    if not ch:
+        raise HTTPException(status_code=404, detail="channel not found")
+    db.delete(ch)
+    db.commit()
+    return {"success": True}
+
 @app.get("/channels/{channel}/settings", response_model=ChannelSettingsOut)
 def get_channel_settings(channel: str, db: Session = Depends(get_db)):
     channel_pk = get_channel_pk(channel, db)
