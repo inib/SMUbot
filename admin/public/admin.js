@@ -104,7 +104,9 @@ async function updateRegButton() {
   const btn = qs('reg-btn');
   if (!userLogin) { btn.style.display = 'none'; return; }
   try {
-    const resp = await fetch(`${API}/channels`);
+    const resp = await fetch(`${API}/channels`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {}
+    });
     const list = await resp.json();
     const found = list.find(ch => ch.channel_name.toLowerCase() === userLogin.toLowerCase());
     if (found) {
@@ -115,8 +117,13 @@ async function updateRegButton() {
       };
     } else {
       btn.textContent = 'register your channel';
-      btn.onclick = () => {
-        location.href = `${API}/auth/login?channel=${encodeURIComponent(userLogin)}`;
+      btn.onclick = async () => {
+        const returnUrl = window.location.href.split('#')[0];
+        const resp = await fetch(
+          `${API}/auth/login?channel=${encodeURIComponent(userLogin)}&return_url=${encodeURIComponent(returnUrl)}`
+        );
+        const data = await resp.json();
+        location.href = data.auth_url;
       };
     }
     btn.style.display = '';
@@ -140,9 +147,9 @@ function initToken() {
     const params = new URLSearchParams(location.hash.slice(1));
     token = params.get('access_token');
     history.replaceState({}, document.title, location.pathname);
-    fetch('https://id.twitch.tv/oauth2/validate', {headers:{Authorization:`OAuth ${token}`}})
-      .then(r=>r.json())
-      .then(info=>{ userLogin = info.login || ''; updateRegButton(); })
+    fetch(`${API}/me`, {headers:{Authorization:`Bearer ${token}`}})
+      .then(r => r.json())
+      .then(info => { userLogin = info.login || ''; updateRegButton(); })
       .catch(()=>{});
     fetch(`${API}/me/channels`, {headers:{Authorization:`Bearer ${token}`}})
       .then(r => r.json())
@@ -158,6 +165,9 @@ function initToken() {
             b.onclick = () => selectChannel(c.channel_name);
             container.appendChild(b);
           });
+        } else {
+          qs('landing').style.display = 'none';
+          qs('app').style.display = '';
         }
       })
       .catch(()=>{});

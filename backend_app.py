@@ -5,6 +5,7 @@ import json
 import time
 import hmac
 import hashlib
+from urllib.parse import quote, urlparse
 from datetime import datetime
 import asyncio
 import requests
@@ -21,6 +22,7 @@ from fastapi import (
     Request as FastAPIRequest,
     Response,
 )
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import (
     create_engine, Column, Integer, String, Text, DateTime, Boolean,
@@ -41,7 +43,7 @@ ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "change-me")
 
 TWITCH_CLIENT_ID = os.getenv("TWITCH_CLIENT_ID")
 TWITCH_CLIENT_SECRET = os.getenv("TWITCH_CLIENT_SECRET")
-TWITCH_REDIRECT_URI = os.getenv("TWITCH_REDIRECT_URI", "http://localhost:8000/auth/callback")
+TWITCH_REDIRECT_URI = os.getenv("TWITCH_REDIRECT_URI")
 TWITCH_SCOPES = os.getenv("TWITCH_SCOPES", "chat:read chat:edit channel:bot").split()
 TWITCH_EVENTSUB_CALLBACK = os.getenv("TWITCH_EVENTSUB_CALLBACK", "http://localhost:8000/eventsub/callback")
 TWITCH_EVENTSUB_SECRET = os.getenv("TWITCH_EVENTSUB_SECRET", "change-me")
@@ -277,6 +279,9 @@ class AuthUrlOut(BaseModel):
 class AuthCallbackOut(BaseModel):
     success: bool
 
+class MeOut(BaseModel):
+    login: str
+
 class ChannelAccessOut(BaseModel):
     channel_name: str
     role: str
@@ -400,8 +405,32 @@ def get_current_user(authorization: str = Header(None), db: Session = Depends(ge
         raise HTTPException(status_code=401, detail="missing token")
     token = authorization.split(" ", 1)[1]
     user = db.query(TwitchUser).filter_by(access_token=token).one_or_none()
-    if not user:
+    if user:
+        return user
+    resp = requests.get(
+        "https://id.twitch.tv/oauth2/validate",
+        headers={"Authorization": f"OAuth {token}"},
+    )
+    if resp.status_code != 200:
         raise HTTPException(status_code=401, detail="invalid token")
+    data = resp.json()
+    login = data.get("login")
+    if not login:
+        raise HTTPException(status_code=401, detail="invalid token")
+    user = db.query(TwitchUser).filter(func.lower(TwitchUser.username) == login.lower()).one_or_none()
+    if not user:
+        user = TwitchUser(
+            twitch_id=data.get("user_id", ""),
+            username=login,
+            access_token=token,
+            refresh_token="",
+            scopes=" ".join(data.get("scopes", [])),
+        )
+        db.add(user)
+    else:
+        user.access_token = token
+    db.commit()
+    db.refresh(user)
     return user
 
 def _user_has_access(user: TwitchUser, channel_pk: int, db: Session) -> bool:
@@ -441,17 +470,36 @@ def get_channel_pk(channel: str, db: Session) -> int:
     return ch.id
 
 @app.get("/auth/login", response_model=AuthUrlOut)
-def auth_login(channel: str):
+def auth_login(
+    channel: str,
+    request: FastAPIRequest,
+    return_url: Optional[str] = Query(None),
+):
+    if not TWITCH_CLIENT_ID or not TWITCH_CLIENT_SECRET:
+        raise HTTPException(status_code=500, detail="Twitch OAuth not configured")
     scope = "+".join(TWITCH_SCOPES)
+    redirect_uri = TWITCH_REDIRECT_URI or str(request.url_for("auth_callback"))
+    state_payload = {"channel": channel}
+    if return_url:
+        state_payload["return_url"] = return_url
+    state_param = quote(json.dumps(state_payload, separators=(",", ":")), safe="")
     url = (
         "https://id.twitch.tv/oauth2/authorize"
         f"?response_type=code&client_id={TWITCH_CLIENT_ID}"
-        f"&redirect_uri={TWITCH_REDIRECT_URI}&scope={scope}&state={channel}"
+        f"&redirect_uri={redirect_uri}&scope={scope}&state={state_param}"
     )
     return {"auth_url": url}
 
 @app.get("/auth/callback", response_model=AuthCallbackOut)
-def auth_callback(code: str, state: str, db: Session = Depends(get_db)):
+def auth_callback(
+    code: str,
+    state: str,
+    request: FastAPIRequest,
+    db: Session = Depends(get_db),
+):
+    if not TWITCH_CLIENT_ID or not TWITCH_CLIENT_SECRET:
+        raise HTTPException(status_code=500, detail="Twitch OAuth not configured")
+    redirect_uri = TWITCH_REDIRECT_URI or str(request.url_for("auth_callback"))
     token_resp = requests.post(
         "https://id.twitch.tv/oauth2/token",
         data={
@@ -459,7 +507,7 @@ def auth_callback(code: str, state: str, db: Session = Depends(get_db)):
             "client_secret": TWITCH_CLIENT_SECRET,
             "code": code,
             "grant_type": "authorization_code",
-            "redirect_uri": TWITCH_REDIRECT_URI,
+            "redirect_uri": redirect_uri,
         },
     ).json()
     access_token = token_resp["access_token"]
@@ -468,6 +516,18 @@ def auth_callback(code: str, state: str, db: Session = Depends(get_db)):
     if "channel:bot" not in scopes_list:
         raise HTTPException(status_code=400, detail="channel:bot scope required")
     scopes = " ".join(scopes_list)
+    channel_name = state
+    return_to: Optional[str] = None
+    try:
+        state_data = json.loads(state)
+    except json.JSONDecodeError:
+        pass
+    else:
+        if isinstance(state_data, dict):
+            channel_name = state_data.get("channel", channel_name)
+            return_to = state_data.get("return_url")
+        elif isinstance(state_data, str):
+            channel_name = state_data
     headers = {"Authorization": f"Bearer {access_token}", "Client-Id": TWITCH_CLIENT_ID}
     user_info = requests.get("https://api.twitch.tv/helix/users", headers=headers).json()["data"][0]
     user = db.query(TwitchUser).filter_by(twitch_id=user_info["id"]).one_or_none()
@@ -488,7 +548,6 @@ def auth_callback(code: str, state: str, db: Session = Depends(get_db)):
         user.refresh_token = refresh_token
         user.scopes = scopes
         db.commit()
-    channel_name = state
     ch = (
         db.query(ActiveChannel)
         .filter(func.lower(ActiveChannel.channel_name) == channel_name.lower())
@@ -508,6 +567,10 @@ def auth_callback(code: str, state: str, db: Session = Depends(get_db)):
         ch.authorized = True
     db.commit()
     subscribe_chat_eventsub(user_info["id"])
+    if return_to:
+        parsed = urlparse(return_to)
+        if parsed.scheme in {"http", "https"} and parsed.netloc:
+            return RedirectResponse(return_to)
     return {"success": True}
 
 
@@ -532,6 +595,10 @@ async def eventsub_callback(
     if twitch_eventsub_message_signature != f"sha256={sig}":
         raise HTTPException(status_code=403, detail="invalid signature")
     return {"ok": True}
+
+@app.get("/me", response_model=MeOut)
+def me(current: TwitchUser = Depends(get_current_user)):
+    return {"login": current.username}
 
 @app.get("/me/channels", response_model=List[ChannelAccessOut])
 def my_channels(current: TwitchUser = Depends(get_current_user), db: Session = Depends(get_db)):
