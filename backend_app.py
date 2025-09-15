@@ -5,6 +5,7 @@ import json
 import time
 import hmac
 import hashlib
+from urllib.parse import quote, urlparse
 from datetime import datetime
 import asyncio
 import requests
@@ -21,6 +22,7 @@ from fastapi import (
     Request as FastAPIRequest,
     Response,
 )
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import (
     create_engine, Column, Integer, String, Text, DateTime, Boolean,
@@ -468,13 +470,23 @@ def get_channel_pk(channel: str, db: Session) -> int:
     return ch.id
 
 @app.get("/auth/login", response_model=AuthUrlOut)
-def auth_login(channel: str, request: FastAPIRequest):
+def auth_login(
+    channel: str,
+    request: FastAPIRequest,
+    return_url: Optional[str] = Query(None),
+):
+    if not TWITCH_CLIENT_ID or not TWITCH_CLIENT_SECRET:
+        raise HTTPException(status_code=500, detail="Twitch OAuth not configured")
     scope = "+".join(TWITCH_SCOPES)
     redirect_uri = TWITCH_REDIRECT_URI or str(request.url_for("auth_callback"))
+    state_payload = {"channel": channel}
+    if return_url:
+        state_payload["return_url"] = return_url
+    state_param = quote(json.dumps(state_payload, separators=(",", ":")), safe="")
     url = (
         "https://id.twitch.tv/oauth2/authorize"
         f"?response_type=code&client_id={TWITCH_CLIENT_ID}"
-        f"&redirect_uri={redirect_uri}&scope={scope}&state={channel}"
+        f"&redirect_uri={redirect_uri}&scope={scope}&state={state_param}"
     )
     return {"auth_url": url}
 
@@ -485,6 +497,8 @@ def auth_callback(
     request: FastAPIRequest,
     db: Session = Depends(get_db),
 ):
+    if not TWITCH_CLIENT_ID or not TWITCH_CLIENT_SECRET:
+        raise HTTPException(status_code=500, detail="Twitch OAuth not configured")
     redirect_uri = TWITCH_REDIRECT_URI or str(request.url_for("auth_callback"))
     token_resp = requests.post(
         "https://id.twitch.tv/oauth2/token",
@@ -502,6 +516,18 @@ def auth_callback(
     if "channel:bot" not in scopes_list:
         raise HTTPException(status_code=400, detail="channel:bot scope required")
     scopes = " ".join(scopes_list)
+    channel_name = state
+    return_to: Optional[str] = None
+    try:
+        state_data = json.loads(state)
+    except json.JSONDecodeError:
+        pass
+    else:
+        if isinstance(state_data, dict):
+            channel_name = state_data.get("channel", channel_name)
+            return_to = state_data.get("return_url")
+        elif isinstance(state_data, str):
+            channel_name = state_data
     headers = {"Authorization": f"Bearer {access_token}", "Client-Id": TWITCH_CLIENT_ID}
     user_info = requests.get("https://api.twitch.tv/helix/users", headers=headers).json()["data"][0]
     user = db.query(TwitchUser).filter_by(twitch_id=user_info["id"]).one_or_none()
@@ -522,7 +548,6 @@ def auth_callback(
         user.refresh_token = refresh_token
         user.scopes = scopes
         db.commit()
-    channel_name = state
     ch = (
         db.query(ActiveChannel)
         .filter(func.lower(ActiveChannel.channel_name) == channel_name.lower())
@@ -542,6 +567,10 @@ def auth_callback(
         ch.authorized = True
     db.commit()
     subscribe_chat_eventsub(user_info["id"])
+    if return_to:
+        parsed = urlparse(return_to)
+        if parsed.scheme in {"http", "https"} and parsed.netloc:
+            return RedirectResponse(return_to)
     return {"success": True}
 
 

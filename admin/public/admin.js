@@ -118,8 +118,9 @@ async function updateRegButton() {
     } else {
       btn.textContent = 'register your channel';
       btn.onclick = async () => {
+        const returnUrl = window.location.href.split('#')[0];
         const resp = await fetch(
-          `${API}/auth/login?channel=${encodeURIComponent(userLogin)}`
+          `${API}/auth/login?channel=${encodeURIComponent(userLogin)}&return_url=${encodeURIComponent(returnUrl)}`
         );
         const data = await resp.json();
         location.href = data.auth_url;
