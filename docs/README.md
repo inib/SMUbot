@@ -15,7 +15,7 @@ Additional directories include:
 
 ## Running with Docker
 1. Copy `example.env` to `stack.env` and adjust values such as `ADMIN_TOKEN`,
-   `TWITCH_OAUTH_TOKEN`, `BOT_NICK`, `TWITCH_CLIENT_ID`, and
+   `TWITCH_BOT_TOKEN`, `BOT_NICK`, `TWITCH_CLIENT_ID`, and
    `TWITCH_CLIENT_SECRET`. When exposing the stack outside of Docker, set
    `BACKEND_URL` to the public URL of the API so the bot and web UI can reach
    it.
