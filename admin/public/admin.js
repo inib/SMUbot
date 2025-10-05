@@ -1,8 +1,80 @@
 const API = window.BACKEND_URL;
 let channelName = '';
 let userLogin = '';
+let userInfo = null;
 
 function qs(id) { return document.getElementById(id); }
+
+function updateLoginStatus() {
+  const bar = qs('login-status');
+  const avatar = qs('login-avatar');
+  const nameEl = qs('login-name');
+  const channelEl = qs('login-channel');
+  if (!bar || !avatar || !nameEl || !channelEl) { return; }
+  if (!userInfo || !userInfo.login) {
+    bar.style.display = 'none';
+    avatar.style.backgroundImage = '';
+    avatar.textContent = '';
+    nameEl.textContent = '';
+    channelEl.textContent = '';
+    return;
+  }
+  const display = userInfo.display_name || userInfo.login;
+  nameEl.textContent = display;
+  const baseChannel = `@${userInfo.login}`;
+  if (channelName && channelName.toLowerCase() !== userInfo.login.toLowerCase()) {
+    channelEl.textContent = `${baseChannel} • managing: ${channelName}`;
+  } else {
+    channelEl.textContent = baseChannel;
+  }
+  if (userInfo.profile_image_url) {
+    avatar.style.backgroundImage = `url("${userInfo.profile_image_url}")`;
+    avatar.textContent = '';
+  } else {
+    avatar.style.backgroundImage = '';
+    avatar.textContent = display ? display[0].toUpperCase() : '';
+  }
+  bar.style.display = '';
+}
+
+updateLoginStatus();
+
+const logoutBtn = qs('logout-btn');
+if (logoutBtn) {
+  logoutBtn.onclick = async () => {
+    try {
+      await fetch(`${API}/auth/logout`, { method: 'POST', credentials: 'include' });
+    } catch (e) {
+      console.error('Failed to log out', e);
+    } finally {
+      userInfo = null;
+      userLogin = '';
+      channelName = '';
+      updateLoginStatus();
+      location.reload();
+    }
+  };
+}
+
+const logoutPermBtn = qs('logout-perm-btn');
+if (logoutPermBtn) {
+  logoutPermBtn.onclick = async () => {
+    if (!confirm('This will remove your stored OAuth access and channel configuration. Continue?')) {
+      return;
+    }
+    try {
+      await fetch(`${API}/auth/session`, { method: 'DELETE', credentials: 'include' });
+    } catch (e) {
+      console.error('Failed to remove account session', e);
+    } finally {
+      userInfo = null;
+      userLogin = '';
+      channelName = '';
+      updateLoginStatus();
+      location.reload();
+    }
+  };
+}
 
 function showTab(name) {
   ['queue', 'users', 'settings'].forEach(t => {
@@ -160,6 +232,7 @@ async function updateRegButton() {
 function selectChannel(ch) {
   channelName = ch;
   qs('ch-badge').textContent = `channel: ${channelName}`;
+  updateLoginStatus();
   qs('landing').style.display = 'none';
   qs('app').style.display = '';
   fetchQueue();
@@ -190,10 +263,18 @@ async function initToken() {
     if (meResp.ok) {
       const info = await meResp.json();
       userLogin = info.login || '';
+      userInfo = info;
+      updateLoginStatus();
       updateRegButton();
+    } else {
+      userLogin = '';
+      userInfo = null;
+      updateLoginStatus();
     }
   } catch (e) {
     // ignore
+    userInfo = null;
+    updateLoginStatus();
   }
 
   try {

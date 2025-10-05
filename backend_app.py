@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Optional, List, Any
+from typing import Optional, List, Any, Dict
 import os
 import json
 import time
@@ -287,6 +287,12 @@ class SessionOut(BaseModel):
 
 class MeOut(BaseModel):
     login: str
+    display_name: Optional[str] = None
+    profile_image_url: Optional[str] = None
+
+
+class LogoutOut(BaseModel):
+    success: bool
 
 class ChannelAccessOut(BaseModel):
     channel_name: str
@@ -669,6 +675,28 @@ def auth_session(
     return {"login": user.username}
 
 
+@app.post("/auth/logout", response_model=LogoutOut)
+def auth_logout(response: Response):
+    response.delete_cookie(ADMIN_SESSION_COOKIE, path="/")
+    return {"success": True}
+
+
+@app.delete("/auth/session", response_model=LogoutOut)
+def auth_session_delete(
+    response: Response,
+    current: TwitchUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    owned = db.query(ActiveChannel).filter_by(owner_id=current.id).all()
+    for channel in owned:
+        db.delete(channel)
+    db.query(ChannelModerator).filter_by(user_id=current.id).delete()
+    db.delete(current)
+    db.commit()
+    response.delete_cookie(ADMIN_SESSION_COOKIE, path="/")
+    return {"success": True}
+
+
 @app.post("/eventsub/callback")
 async def eventsub_callback(
     request: FastAPIRequest,
@@ -693,7 +721,34 @@ async def eventsub_callback(
 
 @app.get("/me", response_model=MeOut)
 def me(current: TwitchUser = Depends(get_current_user)):
-    return {"login": current.username}
+    payload: Dict[str, Optional[str]] = {
+        "login": current.username,
+        "display_name": current.username,
+        "profile_image_url": None,
+    }
+    if TWITCH_CLIENT_ID and current.access_token:
+        try:
+            headers = {
+                "Authorization": f"Bearer {current.access_token}",
+                "Client-Id": TWITCH_CLIENT_ID,
+            }
+            resp = requests.get(
+                "https://api.twitch.tv/helix/users",
+                headers=headers,
+                timeout=5,
+            )
+            if resp.ok:
+                data = resp.json().get("data") or []
+                if data:
+                    info = data[0]
+                    payload["display_name"] = info.get("display_name") or info.get("login") or current.username
+                    payload["profile_image_url"] = info.get("profile_image_url")
+        except Exception:
+            # Best effort; fall back to stored username if Twitch API lookup fails.
+            pass
+    if not payload.get("display_name"):
+        payload["display_name"] = current.username
+    return payload
 
 @app.get("/me/channels", response_model=List[ChannelAccessOut])
 def my_channels(current: TwitchUser = Depends(get_current_user), db: Session = Depends(get_db)):
