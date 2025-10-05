@@ -7,6 +7,19 @@
   <link rel="stylesheet" href="style.css"/>
 </head>
 <body>
+<div id="login-status" class="status-bar" style="display:none">
+  <div class="status-user">
+    <div id="login-avatar" class="status-avatar" aria-hidden="true"></div>
+    <div class="status-info">
+      <span id="login-name" class="status-name"></span>
+      <span id="login-channel" class="status-channel"></span>
+    </div>
+  </div>
+  <div class="status-actions">
+    <button id="logout-btn" class="status-action">log out</button>
+    <button id="logout-perm-btn" class="status-action danger">forget &amp; log out</button>
+  </div>
+</div>
 <div id="landing" class="landing">
   <h1>ALPEN.BOT SONGQ</h1>
   <button id="login-btn">log in with Twitch</button>
