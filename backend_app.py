@@ -21,6 +21,7 @@ from fastapi import (
     APIRouter,
     Request as FastAPIRequest,
     Response,
+    Cookie,
 )
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
@@ -48,6 +49,8 @@ TWITCH_SCOPES = os.getenv("TWITCH_SCOPES", "chat:read chat:edit channel:bot").sp
 TWITCH_EVENTSUB_CALLBACK = os.getenv("TWITCH_EVENTSUB_CALLBACK", "http://localhost:8000/eventsub/callback")
 TWITCH_EVENTSUB_SECRET = os.getenv("TWITCH_EVENTSUB_SECRET", "change-me")
 BOT_NICK = os.getenv("BOT_NICK")
+
+ADMIN_SESSION_COOKIE = "admin_oauth_token"
 
 APP_ACCESS_TOKEN: Optional[str] = None
 APP_TOKEN_EXPIRES = 0
@@ -279,6 +282,9 @@ class AuthUrlOut(BaseModel):
 class AuthCallbackOut(BaseModel):
     success: bool
 
+class SessionOut(BaseModel):
+    login: str
+
 class MeOut(BaseModel):
     login: str
 
@@ -400,37 +406,80 @@ def get_db() -> Session:
     finally:
         db.close()
 
-def get_current_user(authorization: str = Header(None), db: Session = Depends(get_db)) -> TwitchUser:
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="missing token")
-    token = authorization.split(" ", 1)[1]
+def _resolve_user_from_token(
+    token: str,
+    db: Session,
+    *,
+    force_validate: bool = False,
+) -> tuple[TwitchUser, Optional[dict[str, Any]]]:
+    """Return the Twitch user associated with the OAuth token."""
     user = db.query(TwitchUser).filter_by(access_token=token).one_or_none()
-    if user:
-        return user
-    resp = requests.get(
-        "https://id.twitch.tv/oauth2/validate",
-        headers={"Authorization": f"OAuth {token}"},
-    )
-    if resp.status_code != 200:
-        raise HTTPException(status_code=401, detail="invalid token")
-    data = resp.json()
-    login = data.get("login")
-    if not login:
-        raise HTTPException(status_code=401, detail="invalid token")
-    user = db.query(TwitchUser).filter(func.lower(TwitchUser.username) == login.lower()).one_or_none()
-    if not user:
-        user = TwitchUser(
-            twitch_id=data.get("user_id", ""),
-            username=login,
-            access_token=token,
-            refresh_token="",
-            scopes=" ".join(data.get("scopes", [])),
+    data: Optional[dict[str, Any]] = None
+    must_validate = force_validate or user is None
+    if must_validate:
+        resp = requests.get(
+            "https://id.twitch.tv/oauth2/validate",
+            headers={"Authorization": f"OAuth {token}"},
         )
-        db.add(user)
-    else:
-        user.access_token = token
-    db.commit()
-    db.refresh(user)
+        if resp.status_code != 200:
+            raise HTTPException(status_code=401, detail="invalid token")
+        data = resp.json()
+        login = data.get("login")
+        if not login:
+            raise HTTPException(status_code=401, detail="invalid token")
+        scopes = " ".join(data.get("scopes", []))
+        twitch_id = data.get("user_id", "")
+        existing = (
+            db.query(TwitchUser)
+            .filter(func.lower(TwitchUser.username) == login.lower())
+            .one_or_none()
+        )
+        if existing and existing is not user:
+            user = existing
+        if not user:
+            user = TwitchUser(
+                twitch_id=twitch_id,
+                username=login,
+                access_token=token,
+                refresh_token="",
+                scopes=scopes,
+            )
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+        else:
+            updated = False
+            if user.twitch_id != twitch_id and twitch_id:
+                user.twitch_id = twitch_id
+                updated = True
+            if user.username != login:
+                user.username = login
+                updated = True
+            if user.access_token != token:
+                user.access_token = token
+                updated = True
+            if user.scopes != scopes:
+                user.scopes = scopes
+                updated = True
+            if updated:
+                db.commit()
+                db.refresh(user)
+    return user, data
+
+
+def get_current_user(
+    authorization: str = Header(None),
+    admin_session: Optional[str] = Cookie(None, alias=ADMIN_SESSION_COOKIE),
+    db: Session = Depends(get_db),
+) -> TwitchUser:
+    token: Optional[str] = None
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization.split(" ", 1)[1]
+    elif admin_session:
+        token = admin_session
+    if not token:
+        raise HTTPException(status_code=401, detail="missing token")
+    user, _ = _resolve_user_from_token(token, db)
     return user
 
 def _user_has_access(user: TwitchUser, channel_pk: int, db: Session) -> bool:
@@ -446,16 +495,25 @@ def _user_has_access(user: TwitchUser, channel_pk: int, db: Session) -> bool:
     )
     return mod is not None
 
-def require_token(channel: Optional[str] = None, x_admin_token: str = Header(None), authorization: str = Header(None), db: Session = Depends(get_db)):
+def require_token(
+    channel: Optional[str] = None,
+    x_admin_token: str = Header(None),
+    authorization: str = Header(None),
+    admin_session: Optional[str] = Cookie(None, alias=ADMIN_SESSION_COOKIE),
+    db: Session = Depends(get_db),
+):
     if x_admin_token == ADMIN_TOKEN:
         return
-    if channel and authorization and authorization.startswith("Bearer "):
+    token: Optional[str] = None
+    if authorization and authorization.startswith("Bearer "):
         token = authorization.split(" ", 1)[1]
-        user = db.query(TwitchUser).filter_by(access_token=token).one_or_none()
-        if user:
-            channel_pk = get_channel_pk(channel, db)
-            if _user_has_access(user, channel_pk, db):
-                return
+    elif admin_session:
+        token = admin_session
+    if channel and token:
+        user, _ = _resolve_user_from_token(token, db)
+        channel_pk = get_channel_pk(channel, db)
+        if _user_has_access(user, channel_pk, db):
+            return
     raise HTTPException(status_code=401, detail="invalid admin token")
 
 def get_channel_pk(channel: str, db: Session) -> int:
@@ -572,6 +630,29 @@ def auth_callback(
         if parsed.scheme in {"http", "https"} and parsed.netloc:
             return RedirectResponse(return_to)
     return {"success": True}
+
+
+@app.post("/auth/session", response_model=SessionOut)
+def auth_session(
+    response: Response,
+    authorization: str = Header(None),
+    db: Session = Depends(get_db),
+):
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="missing token")
+    token = authorization.split(" ", 1)[1]
+    user, data = _resolve_user_from_token(token, db, force_validate=True)
+    max_age: Optional[int] = None
+    if data and isinstance(data.get("expires_in"), int):
+        max_age = data["expires_in"]
+    cookie_kwargs = {
+        "httponly": True,
+        "samesite": "lax",
+    }
+    if max_age:
+        cookie_kwargs["max_age"] = max_age
+    response.set_cookie(ADMIN_SESSION_COOKIE, token, **cookie_kwargs)
+    return {"login": user.username}
 
 
 @app.post("/eventsub/callback")

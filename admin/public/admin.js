@@ -1,5 +1,4 @@
 const API = window.BACKEND_URL;
-let token = null; // oauth token from Twitch
 let channelName = '';
 let userLogin = '';
 
@@ -18,7 +17,8 @@ qs('tab-settings').onclick = () => showTab('settings');
 
 // ===== Queue functions =====
 async function fetchQueue() {
-  const resp = await fetch(`${API}/admin/queue`);
+  const resp = await fetch(`${API}/admin/queue`, { credentials: 'include' });
+  if (!resp.ok) { return; }
   const data = await resp.json();
   const q = qs('queue');
   q.innerHTML = '';
@@ -38,27 +38,42 @@ async function fetchQueue() {
 }
 
 async function moveReq(id, dir) {
-  await fetch(`${API}/admin/queue/${id}/move`, {method:'POST', body: JSON.stringify({dir}), headers:{'Content-Type':'application/json'}});
+  await fetch(`${API}/admin/queue/${id}/move`, {
+    method: 'POST',
+    body: JSON.stringify({ dir }),
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include'
+  });
   fetchQueue();
 }
+
 async function bumpReq(id) {
-  await fetch(`${API}/admin/queue/${id}/bump`, {method:'POST'});
+  await fetch(`${API}/admin/queue/${id}/bump`, { method: 'POST', credentials: 'include' });
   fetchQueue();
 }
+
 async function skipReq(id) {
-  await fetch(`${API}/admin/queue/${id}/skip`, {method:'POST'});
+  await fetch(`${API}/admin/queue/${id}/skip`, { method: 'POST', credentials: 'include' });
   fetchQueue();
 }
+
 async function markPlayed(id) {
-  await fetch(`${API}/admin/queue/${id}/played`, {method:'POST'});
+  await fetch(`${API}/admin/queue/${id}/played`, { method: 'POST', credentials: 'include' });
   fetchQueue();
 }
-qs('archive-btn').onclick = () => fetch(`${API}/channels/${channelName}/streams/archive`, {method:'POST'});
-qs('mute-btn').onclick = () => fetch(`${API}/channels/${channelName}/settings`, {method:'POST', body:JSON.stringify({queue_closed:1}), headers:{'Content-Type':'application/json'}});
+
+qs('archive-btn').onclick = () => fetch(`${API}/channels/${channelName}/streams/archive`, { method: 'POST', credentials: 'include' });
+qs('mute-btn').onclick = () => fetch(`${API}/channels/${channelName}/settings`, {
+  method: 'POST',
+  body: JSON.stringify({ queue_closed: 1 }),
+  headers: { 'Content-Type': 'application/json' },
+  credentials: 'include'
+});
 
 // ===== Users view =====
 async function fetchUsers() {
-  const resp = await fetch(`${API}/channels/${channelName}/users`);
+  const resp = await fetch(`${API}/channels/${channelName}/users`, { credentials: 'include' });
+  if (!resp.ok) { return; }
   const data = await resp.json();
   const u = qs('users');
   u.innerHTML = '';
@@ -71,13 +86,19 @@ async function fetchUsers() {
   });
 }
 async function modPoints(uid, delta) {
-  await fetch(`${API}/channels/${channelName}/users/${uid}/prio`, {method:'POST', body: JSON.stringify({delta}), headers:{'Content-Type':'application/json'}});
+  await fetch(`${API}/channels/${channelName}/users/${uid}/prio`, {
+    method: 'POST',
+    body: JSON.stringify({ delta }),
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include'
+  });
   fetchUsers();
 }
 
 // ===== Settings view =====
 async function fetchSettings() {
-  const resp = await fetch(`${API}/channels/${channelName}/settings`);
+  const resp = await fetch(`${API}/channels/${channelName}/settings`, { credentials: 'include' });
+  if (!resp.ok) { return; }
   const data = await resp.json();
   const s = qs('settings');
   s.innerHTML = '';
@@ -89,7 +110,12 @@ async function fetchSettings() {
   });
 }
 async function updateSetting(key, value) {
-  await fetch(`${API}/channels/${channelName}/settings`, {method:'POST', body: JSON.stringify({[key]:value}), headers:{'Content-Type':'application/json'}});
+  await fetch(`${API}/channels/${channelName}/settings`, {
+    method: 'POST',
+    body: JSON.stringify({ [key]: value }),
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include'
+  });
 }
 
 // ===== Landing page & login =====
@@ -104,15 +130,14 @@ async function updateRegButton() {
   const btn = qs('reg-btn');
   if (!userLogin) { btn.style.display = 'none'; return; }
   try {
-    const resp = await fetch(`${API}/channels`, {
-      headers: token ? { Authorization: `Bearer ${token}` } : {}
-    });
+    const resp = await fetch(`${API}/channels`, { credentials: 'include' });
+    if (!resp.ok) { btn.style.display = 'none'; return; }
     const list = await resp.json();
     const found = list.find(ch => ch.channel_name.toLowerCase() === userLogin.toLowerCase());
     if (found) {
       btn.textContent = 'unregister your channel';
       btn.onclick = async () => {
-        await fetch(`${API}/channels/${userLogin}`, {method:'DELETE', headers:{Authorization:`Bearer ${token}`}});
+        await fetch(`${API}/channels/${userLogin}`, {method:'DELETE', credentials: 'include'});
         location.reload();
       };
     } else {
@@ -142,35 +167,57 @@ function selectChannel(ch) {
   fetchSettings();
 }
 
-function initToken() {
+async function initToken() {
   if (location.hash.startsWith('#access_token')) {
     const params = new URLSearchParams(location.hash.slice(1));
-    token = params.get('access_token');
+    const oauthToken = params.get('access_token');
     history.replaceState({}, document.title, location.pathname);
-    fetch(`${API}/me`, {headers:{Authorization:`Bearer ${token}`}})
-      .then(r => r.json())
-      .then(info => { userLogin = info.login || ''; updateRegButton(); })
-      .catch(()=>{});
-    fetch(`${API}/me/channels`, {headers:{Authorization:`Bearer ${token}`}})
-      .then(r => r.json())
-      .then(list => {
-        if (list.length === 1) {
-          selectChannel(list[0].channel_name);
-        } else if (list.length > 1) {
-          const container = qs('channel-list');
-          container.innerHTML = '';
-          list.forEach(c => {
-            const b = document.createElement('button');
-            b.textContent = c.channel_name;
-            b.onclick = () => selectChannel(c.channel_name);
-            container.appendChild(b);
-          });
-        } else {
-          qs('landing').style.display = 'none';
-          qs('app').style.display = '';
-        }
-      })
-      .catch(()=>{});
+    if (oauthToken) {
+      try {
+        await fetch(`${API}/auth/session`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${oauthToken}` },
+          credentials: 'include'
+        });
+      } catch (e) {
+        console.error('Failed to establish admin session', e);
+      }
+    }
+  }
+
+  try {
+    const meResp = await fetch(`${API}/me`, { credentials: 'include' });
+    if (meResp.ok) {
+      const info = await meResp.json();
+      userLogin = info.login || '';
+      updateRegButton();
+    }
+  } catch (e) {
+    // ignore
+  }
+
+  try {
+    const channelsResp = await fetch(`${API}/me/channels`, { credentials: 'include' });
+    if (channelsResp.ok) {
+      const list = await channelsResp.json();
+      if (list.length === 1) {
+        selectChannel(list[0].channel_name);
+      } else if (list.length > 1) {
+        const container = qs('channel-list');
+        container.innerHTML = '';
+        list.forEach(c => {
+          const b = document.createElement('button');
+          b.textContent = c.channel_name;
+          b.onclick = () => selectChannel(c.channel_name);
+          container.appendChild(b);
+        });
+      } else {
+        qs('landing').style.display = 'none';
+        qs('app').style.display = '';
+      }
+    }
+  } catch (e) {
+    // ignore
   }
 }
 
