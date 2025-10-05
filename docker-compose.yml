@@ -20,7 +20,6 @@ services:
       ADMIN_TOKEN: ${ADMIN_TOKEN}
       TWITCH_BOT_TOKEN: ${TWITCH_OAUTH_TOKEN}
       BOT_NICK: ${BOT_NICK}
-      CHANNELS: ${TWITCH_CHANNELS}         # comma-separated
       COMMANDS_FILE: /bot/commands.yml
       BOT_MESSAGES_PATH: /bot/messages.yml
     env_file:

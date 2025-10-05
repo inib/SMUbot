@@ -12,7 +12,6 @@ from twitchio.ext import commands
 BACKEND_URL = os.getenv('BACKEND_URL', 'http://api:7070')
 # Token used for privileged requests to the backend.
 ADMIN_TOKEN = os.getenv('ADMIN_TOKEN', 'change-me')
-CHANNELS = [c.strip() for c in os.getenv('CHANNELS', '').split(',') if c.strip()]
 BOT_TOKEN = os.getenv('TWITCH_BOT_TOKEN')  # token without 'oauth:'
 BOT_NICK = os.getenv('BOT_NICK')
 MESSAGES_PATH = Path(os.getenv("BOT_MESSAGES_PATH", "/bot/messages.yml"))
@@ -202,7 +201,7 @@ def load_messages(path: Path) -> Dict[str, str]:
 
 # ---- bot ----
 class SongBot(commands.Bot):
-    def __init__(self, initial_channels: Optional[List[str]] = None):
+    def __init__(self):
         if not BOT_TOKEN or not BOT_NICK:
             raise RuntimeError('TWITCH_BOT_TOKEN and BOT_NICK required')
         self.commands_map = load_commands(COMMANDS_FILE)
@@ -210,34 +209,81 @@ class SongBot(commands.Bot):
         self.currency_singular = self.messages.get('currency_singular', 'point')
         self.currency_plural = self.messages.get('currency_plural', 'points')
         prefix = self.commands_map['prefix'][0]
-        chans = initial_channels or []
-        super().__init__(token=f"oauth:{BOT_TOKEN}", prefix=prefix, initial_channels=chans)
-        self.initial_channels = chans
+        super().__init__(token=f"oauth:{BOT_TOKEN}", prefix=prefix, initial_channels=[])
         self.channel_map: Dict[str, Dict] = {}
         self.ready_event = asyncio.Event()
         self.state: Dict[str, Dict] = {}
+        self.listeners: Dict[str, asyncio.Task] = {}
+        self.joined: set[str] = set()
+        self._sync_lock = asyncio.Lock()
 
     async def event_ready(self):
-        rows = await backend.get_channels()
-        rows = [r for r in rows if r.get('authorized') and r.get('join_active')]
-        existing = { r['channel_name'].lower(): r for r in rows }
-        for ch in self.initial_channels:
-            name = ch.strip()
-            key = name.lower()
-            if key and key not in existing:
-                new_row = await backend.add_channel(name, name)
-                rows.append(new_row)
-                existing[key] = new_row
-        self.channel_map = existing
-        for _, row in self.channel_map.items():
-            name = row['channel_name']
-            initial_queue = await backend.get_queue(name, include_played=True)
-            self.state[name] = {
-                'queue': initial_queue,
-                'last_event': datetime.utcnow().isoformat(),
-            }
-            asyncio.create_task(self.listen_backend(name))
+        await self.sync_channels()
+        asyncio.create_task(self.channel_refresher())
         self.ready_event.set()
+
+    async def channel_refresher(self):
+        while True:
+            await asyncio.sleep(60)
+            await self.sync_channels()
+
+    async def sync_channels(self):
+        async with self._sync_lock:
+            rows = await backend.get_channels()
+            allowed = {
+                r['channel_name'].lower(): r
+                for r in rows
+                if r.get('authorized') and r.get('join_active')
+            }
+
+            current_keys = set(self.channel_map.keys())
+            allowed_keys = set(allowed.keys())
+
+            removed = current_keys - allowed_keys
+            for key in removed:
+                info = self.channel_map.pop(key)
+                name = info['channel_name']
+                task = self.listeners.pop(name, None)
+                if task:
+                    task.cancel()
+                if name in self.joined:
+                    try:
+                        await self.part_channels([name])
+                    except Exception:
+                        pass
+                    self.joined.discard(name)
+                self.state.pop(name, None)
+
+            for key, row in allowed.items():
+                self.channel_map[key] = row
+
+            new_keys = allowed_keys - current_keys
+            for key in new_keys:
+                row = allowed[key]
+                name = row['channel_name']
+                try:
+                    await self.join_channels([name])
+                except Exception:
+                    continue
+                self.joined.add(name)
+                initial_queue = await backend.get_queue(name, include_played=True)
+                self.state[name] = {
+                    'queue': initial_queue,
+                    'last_event': datetime.utcnow().isoformat(),
+                }
+                self.listeners[name] = asyncio.create_task(self.listen_backend(name))
+
+            # Ensure listeners exist for channels that persisted through refresh.
+            for key, row in self.channel_map.items():
+                name = row['channel_name']
+                if name not in self.listeners:
+                    self.listeners[name] = asyncio.create_task(self.listen_backend(name))
+                if name not in self.state:
+                    initial_queue = await backend.get_queue(name, include_played=True)
+                    self.state[name] = {
+                        'queue': initial_queue,
+                        'last_event': datetime.utcnow().isoformat(),
+                    }
 
     async def event_message(self, message):
         if message.echo:
@@ -421,6 +467,8 @@ class SongBot(commands.Bot):
                         line = line.decode().strip()
                         if line.startswith("data:"):
                             await self.process_backend_update(ch_name)
+            except asyncio.CancelledError:
+                break
             except Exception:
                 await asyncio.sleep(5)
 
@@ -537,13 +585,7 @@ class SongBot(commands.Bot):
 # ---- entry ----
 async def main():
     await backend.start()
-    rows = await backend.get_channels()
-    allowed = {r['channel_name'].lower(): r for r in rows if r.get('authorized') and r.get('join_active')}
-    if CHANNELS:
-        chans = [c for c in CHANNELS if c.lower() in allowed]
-    else:
-        chans = [r['channel_name'] for r in allowed.values()]
-    bot = SongBot(initial_channels=chans)
+    bot = SongBot()
     await asyncio.gather(bot.start())
 
 if __name__ == '__main__':

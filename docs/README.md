@@ -15,10 +15,10 @@ Additional directories include:
 
 ## Running with Docker
 1. Copy `example.env` to `stack.env` and adjust values such as `ADMIN_TOKEN`,
-   `TWITCH_OAUTH_TOKEN`, `BOT_NICK`, `TWITCH_CLIENT_ID`, `TWITCH_CLIENT_SECRET`,
-   and `TWITCH_CHANNELS`. When exposing the
-   stack outside of Docker, set `BACKEND_URL` to the public URL of the API so
-   the bot and web UI can reach it.
+   `TWITCH_OAUTH_TOKEN`, `BOT_NICK`, `TWITCH_CLIENT_ID`, and
+   `TWITCH_CLIENT_SECRET`. When exposing the stack outside of Docker, set
+   `BACKEND_URL` to the public URL of the API so the bot and web UI can reach
+   it.
 2. Start the stack:
    ```bash
    docker-compose --env-file stack.env up --build
@@ -32,7 +32,7 @@ Additional directories include:
 - `run.sh` initializes the database and starts the server with Uvicorn.
 
 ## Bot Highlights
-- Connects to Twitch channels listed in the `CHANNELS` environment variable.
+- Automatically discovers authorized channels from the backend and joins them.
 - Supports commands:
   - `!request` – add a song request.
   - `!prioritize` – bump one of your requests using priority points.
@@ -49,6 +49,8 @@ Songbot now integrates with Twitch OAuth. Channel owners must authenticate via t
 Once authenticated, the bot is allowed to join the channel and an EventSub
 subscription for `channel.chat.message` is created using an App Access Token.
 This registration is required for Twitch to recognize the bot as a verified chat bot.
+The backend only creates channel records during this OAuth handshake, ensuring the
+bot joins channels explicitly approved through the admin panel.
 Owners can invite other moderators by registering their Twitch accounts, and
 authenticated users who manage multiple channels can switch between them using
 `/me/channels`.
