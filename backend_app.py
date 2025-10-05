@@ -386,10 +386,24 @@ class StreamOut(BaseModel):
 # =====================================
 app = FastAPI(title="Twitch Song Request Backend", version="1.0.0")
 
+CORS_ALLOW_ORIGIN_REGEX = os.getenv("CORS_ALLOW_ORIGIN_REGEX", r"https?://.*")
+CORS_ALLOW_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv("CORS_ALLOW_ORIGINS", "").split(",")
+    if origin.strip()
+]
+
+allow_origin_regex = None
+allow_origins = CORS_ALLOW_ORIGINS
+
+if not allow_origins:
+    allow_origin_regex = CORS_ALLOW_ORIGIN_REGEX
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
+    allow_origins=allow_origins,
+    allow_origin_regex=allow_origin_regex,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
