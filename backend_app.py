@@ -5,6 +5,7 @@ import json
 import time
 import hmac
 import hashlib
+import logging
 import re
 from urllib.parse import quote, urlparse
 from datetime import datetime, timedelta
@@ -58,6 +59,8 @@ APP_ACCESS_TOKEN: Optional[str] = None
 APP_TOKEN_EXPIRES = 0
 BOT_USER_ID: Optional[str] = None
 
+logger = logging.getLogger(__name__)
+
 engine = create_engine(DB_URL, connect_args={"check_same_thread": False} if DB_URL.startswith("sqlite") else {})
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 Base = declarative_base()
@@ -99,10 +102,21 @@ def get_bot_user_id() -> Optional[str]:
 
 
 def subscribe_chat_eventsub(broadcaster_id: str) -> None:
-    token = get_app_access_token()
-    bot_id = get_bot_user_id()
+    try:
+        token = get_app_access_token()
+    except requests.RequestException as exc:
+        logger.warning("Failed to obtain app access token for EventSub subscription: %s", exc)
+        return
+
+    try:
+        bot_id = get_bot_user_id()
+    except requests.RequestException as exc:
+        logger.warning("Failed to resolve bot user id for EventSub subscription: %s", exc)
+        return
+
     if not bot_id:
         return
+
     headers = {
         "Authorization": f"Bearer {token}",
         "Client-Id": TWITCH_CLIENT_ID,
@@ -121,11 +135,21 @@ def subscribe_chat_eventsub(broadcaster_id: str) -> None:
             "secret": TWITCH_EVENTSUB_SECRET,
         },
     }
-    requests.post(
-        "https://api.twitch.tv/helix/eventsub/subscriptions",
-        headers=headers,
-        data=json.dumps(payload),
-    )
+
+    try:
+        requests.post(
+            "https://api.twitch.tv/helix/eventsub/subscriptions",
+            headers=headers,
+            data=json.dumps(payload),
+            timeout=5,
+        )
+    except requests.RequestException as exc:
+        logger.warning(
+            "Failed to subscribe bot %s to chat messages for broadcaster %s: %s",
+            bot_id,
+            broadcaster_id,
+            exc,
+        )
 
 
 # =====================================
