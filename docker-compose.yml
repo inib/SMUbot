@@ -18,7 +18,6 @@ services:
     environment:
       BACKEND_URL: ${BACKEND_URL:-http://api:7070}
       ADMIN_TOKEN: ${ADMIN_TOKEN}
-      TWITCH_BOT_TOKEN: ${TWITCH_OAUTH_TOKEN}
       BOT_NICK: ${BOT_NICK}
       COMMANDS_FILE: /bot/commands.yml
       BOT_MESSAGES_PATH: /bot/messages.yml
