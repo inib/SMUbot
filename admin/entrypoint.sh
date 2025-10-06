@@ -2,10 +2,7 @@
 set -e
 : "${BACKEND_URL:=http://api:7070}"
 : "${TWITCH_CLIENT_ID:=}"
+: "${TWITCH_SCOPES:=chat:read chat:edit channel:bot}"
 # Substitute variables into config.js
-envsubst '${BACKEND_URL} ${TWITCH_CLIENT_ID}' < /usr/share/nginx/html/config.js.template > /usr/share/nginx/html/config.js
-# expose Twitch client id for JS
-if [ -n "$TWITCH_CLIENT_ID" ]; then
-echo "window.TWITCH_CLIENT_ID='${TWITCH_CLIENT_ID}';" >> /usr/share/nginx/html/config.js
-fi
+envsubst '${BACKEND_URL} ${TWITCH_CLIENT_ID} ${TWITCH_SCOPES}' < /usr/share/nginx/html/config.js.template > /usr/share/nginx/html/config.js
 exec nginx -g 'daemon off;'

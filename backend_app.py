@@ -494,6 +494,56 @@ def _resolve_user_from_token(
     return user, data
 
 
+def _auto_register_channel_from_token(user: TwitchUser, data: dict[str, Any], db: Session) -> None:
+    scopes = set(data.get("scopes") or [])
+    login = data.get("login")
+    user_id = data.get("user_id")
+    if "channel:bot" not in scopes or not login or not user_id:
+        return
+    channel_id = str(user_id)
+    channel = (
+        db.query(ActiveChannel)
+        .filter(ActiveChannel.channel_id == channel_id)
+        .one_or_none()
+    )
+    if not channel:
+        channel = (
+            db.query(ActiveChannel)
+            .filter(func.lower(ActiveChannel.channel_name) == login.lower())
+            .one_or_none()
+        )
+    if channel:
+        changed = False
+        if channel.channel_id != channel_id:
+            channel.channel_id = channel_id
+            changed = True
+        if (channel.channel_name or "").lower() != login.lower():
+            channel.channel_name = login
+            changed = True
+        if channel.owner_id != user.id:
+            channel.owner_id = user.id
+            changed = True
+        if not channel.authorized:
+            channel.authorized = True
+            changed = True
+        if changed:
+            db.commit()
+        get_or_create_settings(db, channel.id)
+    else:
+        channel = ActiveChannel(
+            channel_id=channel_id,
+            channel_name=login,
+            join_active=1,
+            authorized=True,
+            owner_id=user.id,
+        )
+        db.add(channel)
+        db.commit()
+        db.refresh(channel)
+        get_or_create_settings(db, channel.id)
+    subscribe_chat_eventsub(channel_id)
+
+
 def get_current_user(
     authorization: str = Header(None),
     admin_session: Optional[str] = Cookie(None, alias=ADMIN_SESSION_COOKIE),
@@ -669,6 +719,8 @@ def auth_session(
         raise HTTPException(status_code=401, detail="missing token")
     token = authorization.split(" ", 1)[1]
     user, data = _resolve_user_from_token(token, db, force_validate=True)
+    if data:
+        _auto_register_channel_from_token(user, data, db)
     max_age: Optional[int] = None
     if data and isinstance(data.get("expires_in"), int):
         max_age = data["expires_in"]

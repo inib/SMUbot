@@ -191,10 +191,25 @@ async function updateSetting(key, value) {
 }
 
 // ===== Landing page & login =====
+function buildLoginScopes() {
+  const configured = (window.TWITCH_SCOPES || '').split(/\s+/).filter(Boolean);
+  const scopes = configured.length ? configured : ['chat:read', 'chat:edit', 'channel:bot'];
+  if (!scopes.includes('user:read:email')) {
+    scopes.push('user:read:email');
+  }
+  return scopes;
+}
+
 qs('login-btn').onclick = () => {
   const client = window.TWITCH_CLIENT_ID || '';
-  const scopes = ['user:read:email'];
-  const url = `https://id.twitch.tv/oauth2/authorize?response_type=token&client_id=${client}&redirect_uri=${encodeURIComponent(location.href)}&scope=${scopes.join(' ')}&force_verify=true`;
+  if (!client) {
+    alert('Twitch OAuth is not configured.');
+    return;
+  }
+  const scopes = buildLoginScopes();
+  const redirectUri = encodeURIComponent(window.location.href.split('#')[0]);
+  const scopeParam = encodeURIComponent(scopes.join(' '));
+  const url = `https://id.twitch.tv/oauth2/authorize?response_type=token&client_id=${client}&redirect_uri=${redirectUri}&scope=${scopeParam}&force_verify=true`;
   location.href = url;
 };
 
@@ -216,11 +231,22 @@ async function updateRegButton() {
       btn.textContent = 'register your channel';
       btn.onclick = async () => {
         const returnUrl = window.location.href.split('#')[0];
-        const resp = await fetch(
-          `${API}/auth/login?channel=${encodeURIComponent(userLogin)}&return_url=${encodeURIComponent(returnUrl)}`
-        );
-        const data = await resp.json();
-        location.href = data.auth_url;
+        try {
+          const resp = await fetch(
+            `${API}/auth/login?channel=${encodeURIComponent(userLogin)}&return_url=${encodeURIComponent(returnUrl)}`
+          );
+          if (!resp.ok) {
+            throw new Error(`failed with status ${resp.status}`);
+          }
+          const data = await resp.json();
+          if (!data || !data.auth_url) {
+            throw new Error('missing auth URL');
+          }
+          location.href = data.auth_url;
+        } catch (e) {
+          console.error('Failed to start channel registration', e);
+          alert('Failed to start the channel registration flow. Please try again.');
+        }
       };
     }
     btn.style.display = '';
