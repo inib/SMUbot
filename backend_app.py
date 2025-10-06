@@ -31,6 +31,7 @@ from sqlalchemy import (
     ForeignKey, UniqueConstraint, func, select, and_, text
 )
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker, Session
+from sqlalchemy.exc import IntegrityError
 
 # =====================================
 # Config
@@ -462,18 +463,28 @@ def _resolve_user_from_token(
     data: Optional[dict[str, Any]] = None
     must_validate = force_validate or user is None
     if must_validate:
-        resp = requests.get(
-            "https://id.twitch.tv/oauth2/validate",
-            headers={"Authorization": f"OAuth {token}"},
-        )
+        try:
+            resp = requests.get(
+                "https://id.twitch.tv/oauth2/validate",
+                headers={"Authorization": f"OAuth {token}"},
+            )
+        except requests.RequestException as exc:
+            # Surfacing the failure as an HTTPException keeps the request inside
+            # FastAPI's normal response handling flow so middleware such as CORS
+            # can still attach the proper headers. Without this the browser sees
+            # the low-level network exception as a CORS failure.
+            raise HTTPException(status_code=502, detail="twitch validation failed") from exc
         if resp.status_code != 200:
             raise HTTPException(status_code=401, detail="invalid token")
-        data = resp.json()
+        try:
+            data = resp.json()
+        except ValueError as exc:
+            raise HTTPException(status_code=502, detail="invalid response from twitch") from exc
         login = data.get("login")
-        if not login:
+        twitch_id = data.get("user_id")
+        if not login or not twitch_id:
             raise HTTPException(status_code=401, detail="invalid token")
         scopes = " ".join(data.get("scopes", []))
-        twitch_id = data.get("user_id", "")
         existing = (
             db.query(TwitchUser)
             .filter(func.lower(TwitchUser.username) == login.lower())
@@ -490,8 +501,17 @@ def _resolve_user_from_token(
                 scopes=scopes,
             )
             db.add(user)
-            db.commit()
-            db.refresh(user)
+            try:
+                db.commit()
+            except IntegrityError:
+                db.rollback()
+                user = (
+                    db.query(TwitchUser)
+                    .filter(TwitchUser.twitch_id == twitch_id)
+                    .one()
+                )
+            else:
+                db.refresh(user)
         else:
             updated = False
             if user.twitch_id != twitch_id and twitch_id:
