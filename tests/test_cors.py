@@ -1,4 +1,5 @@
 import os
+import re
 import unittest
 import uuid
 from unittest.mock import patch
@@ -9,6 +10,44 @@ from fastapi.testclient import TestClient
 os.makedirs("/data", exist_ok=True)
 
 import backend_app
+
+
+class CorsConfigTests(unittest.TestCase):
+    def test_wildcard_origins_expand_to_regex(self) -> None:
+        allow_origins, allow_regex = backend_app._cors_settings_from_env(
+            {"CORS_ALLOW_ORIGINS": "https://*.alpen.bot"}
+        )
+
+        self.assertEqual(allow_origins, [])
+        self.assertIsNotNone(allow_regex)
+
+        pattern = re.compile(allow_regex or "")
+        self.assertIsNotNone(pattern.fullmatch("https://qadmin.alpen.bot"))
+        self.assertIsNone(pattern.fullmatch("https://alpen.bot"))
+        self.assertIsNone(pattern.fullmatch("https://example.com"))
+
+    def test_mixed_wildcard_and_explicit_origins(self) -> None:
+        allow_origins, allow_regex = backend_app._cors_settings_from_env(
+            {
+                "CORS_ALLOW_ORIGINS": "https://qadmin.alpen.bot https://*.alpen.bot",
+            }
+        )
+
+        self.assertEqual(allow_origins, ["https://qadmin.alpen.bot"])
+        self.assertIsNotNone(allow_regex)
+
+        pattern = re.compile(allow_regex or "")
+        self.assertIsNotNone(pattern.fullmatch("https://qstats.alpen.bot"))
+        self.assertIsNone(pattern.fullmatch("https://example.com"))
+
+    def test_default_regex_retained_when_no_overrides(self) -> None:
+        allow_origins, allow_regex = backend_app._cors_settings_from_env({})
+
+        self.assertEqual(allow_origins, [])
+        self.assertIsNotNone(allow_regex)
+
+        pattern = re.compile(allow_regex or "")
+        self.assertIsNotNone(pattern.fullmatch("https://anywhere.example"))
 
 
 class AuthSessionCORSTest(unittest.TestCase):
