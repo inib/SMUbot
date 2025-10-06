@@ -5,6 +5,7 @@ import json
 import time
 import hmac
 import hashlib
+import re
 from urllib.parse import quote, urlparse
 from datetime import datetime, timedelta
 import asyncio
@@ -400,11 +401,28 @@ class StreamOut(BaseModel):
 app = FastAPI(title="Twitch Song Request Backend", version="1.0.0")
 
 CORS_ALLOW_ORIGIN_REGEX = os.getenv("CORS_ALLOW_ORIGIN_REGEX", r"https?://.*")
-CORS_ALLOW_ORIGINS = [
-    origin.strip()
-    for origin in os.getenv("CORS_ALLOW_ORIGINS", "").split(",")
-    if origin.strip()
-]
+def _parse_cors_origins(raw: str) -> list[str]:
+    """Return a list of origins from an environment variable value.
+
+    The original implementation only supported comma separated values, but the
+    deployment environment may provide a space separated list (e.g. when the
+    value comes from Terraform or certain container schedulers). In that case
+    the string would be treated as a single origin and the request's `Origin`
+    header would not match, resulting in missing CORS headers. By splitting on
+    both commas and whitespace we gracefully handle either format.
+    """
+
+    if not raw:
+        return []
+
+    return [
+        origin
+        for origin in (part.strip() for part in re.split(r"[\s,]+", raw))
+        if origin
+    ]
+
+
+CORS_ALLOW_ORIGINS = _parse_cors_origins(os.getenv("CORS_ALLOW_ORIGINS", ""))
 
 allow_origin_regex = None
 allow_origins = CORS_ALLOW_ORIGINS
