@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Optional, List, Any, Dict
+from typing import Optional, List, Any, Dict, Mapping
 import os
 import json
 import time
@@ -425,7 +425,9 @@ class StreamOut(BaseModel):
 # =====================================
 app = FastAPI(title="Twitch Song Request Backend", version="1.0.0")
 
-CORS_ALLOW_ORIGIN_REGEX = os.getenv("CORS_ALLOW_ORIGIN_REGEX", r"https?://.*")
+DEFAULT_CORS_ALLOW_ORIGIN_REGEX = r"https?://.*"
+
+
 def _parse_cors_origins(raw: str) -> list[str]:
     """Return a list of origins from an environment variable value.
 
@@ -447,13 +449,48 @@ def _parse_cors_origins(raw: str) -> list[str]:
     ]
 
 
-CORS_ALLOW_ORIGINS = _parse_cors_origins(os.getenv("CORS_ALLOW_ORIGINS", ""))
+def _separate_cors_origins(origins: list[str]) -> tuple[list[str], list[str]]:
+    """Split origins into explicit values and wildcard fragments."""
 
-allow_origin_regex = None
-allow_origins = CORS_ALLOW_ORIGINS
+    explicit: list[str] = []
+    wildcard_fragments: list[str] = []
 
-if not allow_origins:
-    allow_origin_regex = CORS_ALLOW_ORIGIN_REGEX
+    for origin in origins:
+        if "*" not in origin:
+            explicit.append(origin)
+            continue
+
+        escaped = re.escape(origin)
+        # Replace the escaped wildcard with a pattern that matches at least one
+        # character but stops at the path separator so that
+        # ``https://*.example.com`` matches ``https://foo.example.com`` but
+        # not ``https://example.com``.
+        fragment = escaped.replace(r"\*", r"[^/]+")
+        wildcard_fragments.append(fragment)
+
+    return explicit, wildcard_fragments
+
+
+def _cors_settings_from_env(env: Mapping[str, str]) -> tuple[list[str], Optional[str]]:
+    origins = _parse_cors_origins(env.get("CORS_ALLOW_ORIGINS", ""))
+    allow_origins, wildcard_fragments = _separate_cors_origins(origins)
+
+    regex_fragments: list[str] = list(wildcard_fragments)
+
+    configured_regex = env.get("CORS_ALLOW_ORIGIN_REGEX", "")
+    if configured_regex:
+        regex_fragments.append(configured_regex)
+    elif not allow_origins and not regex_fragments:
+        regex_fragments.append(DEFAULT_CORS_ALLOW_ORIGIN_REGEX)
+
+    allow_origin_regex = None
+    if regex_fragments:
+        allow_origin_regex = f"^(?:{'|'.join(regex_fragments)})$"
+
+    return allow_origins, allow_origin_regex
+
+
+allow_origins, allow_origin_regex = _cors_settings_from_env(os.environ)
 
 app.add_middleware(
     CORSMiddleware,
