@@ -6,7 +6,7 @@ import time
 import hmac
 import hashlib
 from urllib.parse import quote, urlparse
-from datetime import datetime
+from datetime import datetime, timedelta
 import asyncio
 import requests
 from sse_starlette.sse import EventSourceResponse
@@ -886,6 +886,127 @@ def enforce_queue_limits(db: Session, channel_pk: int, user_id: int, want_priori
         )
         if count >= settings.max_requests_per_user:
             raise HTTPException(409, detail="user request limit reached")
+
+
+def seed_default_data():
+    db = SessionLocal()
+    try:
+        existing = (
+            db.query(ActiveChannel)
+            .filter(func.lower(ActiveChannel.channel_name) == "example_channel")
+            .one_or_none()
+        )
+        if existing:
+            return
+
+        channel = ActiveChannel(
+            channel_id="example-channel-id",
+            channel_name="example_channel",
+            join_active=1,
+            authorized=True,
+        )
+        db.add(channel)
+        db.commit()
+        db.refresh(channel)
+
+        get_or_create_settings(db, channel.id)
+
+        now = datetime.utcnow()
+        archive_started = now - timedelta(days=1, hours=2)
+        archive_ended = archive_started + timedelta(hours=2)
+
+        queue_song = Song(
+            channel_id=channel.id,
+            artist="Daft Punk",
+            title="Veridis Quo",
+            total_played=0,
+        )
+
+        archive_songs = [
+            Song(
+                channel_id=channel.id,
+                artist="Queen",
+                title="Don't Stop Me Now",
+                total_played=1,
+                date_first_played=archive_started + timedelta(minutes=15),
+                date_last_played=archive_started + timedelta(minutes=15),
+            ),
+            Song(
+                channel_id=channel.id,
+                artist="David Bowie",
+                title="Heroes",
+                total_played=1,
+                date_first_played=archive_started + timedelta(minutes=40),
+                date_last_played=archive_started + timedelta(minutes=40),
+            ),
+            Song(
+                channel_id=channel.id,
+                artist="CHVRCHES",
+                title="The Mother We Share",
+                total_played=1,
+                date_first_played=archive_started + timedelta(minutes=65),
+                date_last_played=archive_started + timedelta(minutes=65),
+            ),
+        ]
+
+        db.add(queue_song)
+        db.add_all(archive_songs)
+        db.commit()
+        db.refresh(queue_song)
+        for song in archive_songs:
+            db.refresh(song)
+
+        user = User(
+            channel_id=channel.id,
+            twitch_id="example-user-id",
+            username="example_user",
+            amount_requested=len(archive_songs) + 1,
+            prio_points=0,
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+
+        active_stream = StreamSession(channel_id=channel.id)
+        archived_stream = StreamSession(
+            channel_id=channel.id,
+            started_at=archive_started,
+            ended_at=archive_ended,
+        )
+        db.add_all([active_stream, archived_stream])
+        db.commit()
+        db.refresh(active_stream)
+        db.refresh(archived_stream)
+
+        queue_request = Request(
+            channel_id=channel.id,
+            stream_id=active_stream.id,
+            song_id=queue_song.id,
+            user_id=user.id,
+            position=1,
+            played=0,
+        )
+        db.add(queue_request)
+
+        for idx, song in enumerate(archive_songs, start=1):
+            played_at = archive_started + timedelta(minutes=idx * 20)
+            req = Request(
+                channel_id=channel.id,
+                stream_id=archived_stream.id,
+                song_id=song.id,
+                user_id=user.id,
+                request_time=played_at,
+                position=idx,
+                played=1,
+            )
+            db.add(req)
+
+        db.commit()
+    finally:
+        db.close()
+
+
+seed_default_data()
 
 # =====================================
 # Routes: System
