@@ -1,4 +1,24 @@
-const API = (window.BACKEND_URL || 'http://localhost:7070').replace(/\/$/, '');
+function resolveBackendBase(value) {
+  const fallback = 'http://localhost:7070';
+  if (!value) return fallback;
+  const trimmed = value.trim();
+  if (!trimmed) return fallback;
+  const httpLike = /^https?:\/\//i;
+  try {
+    if (trimmed.startsWith('/')) {
+      return new URL(trimmed, window.location.origin).toString().replace(/\/$/, '');
+    }
+    if (!httpLike.test(trimmed) && !trimmed.includes('://')) {
+      return new URL(`http://${trimmed}`, window.location.origin).toString().replace(/\/$/, '');
+    }
+    return new URL(trimmed, window.location.origin).toString().replace(/\/$/, '');
+  } catch (err) {
+    console.warn('invalid BACKEND_URL, falling back to default', err);
+    return fallback;
+  }
+}
+
+const API = resolveBackendBase(window.BACKEND_URL);
 const statusEl = document.getElementById('status');
 const channelListEl = document.getElementById('channel-list');
 const treeEl = document.getElementById('channel-tree');
