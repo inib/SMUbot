@@ -265,6 +265,13 @@ class ChannelOut(BaseModel):
     class Config:
         from_attributes = True
 
+
+class ChannelOAuthOut(BaseModel):
+    channel_name: str
+    authorized: bool
+    owner_login: Optional[str] = None
+    scopes: List[str] = Field(default_factory=list)
+
 class ChannelSettingsIn(BaseModel):
     max_requests_per_user: int = -1
     prio_only: int = 0
@@ -950,6 +957,28 @@ def get_channel_settings(channel: str, db: Session = Depends(get_db)):
         allow_bumps=st.allow_bumps,
         other_flags=st.other_flags,
         max_prio_points=st.max_prio_points,
+    )
+
+
+@app.get("/channels/{channel}/oauth", response_model=ChannelOAuthOut)
+def get_channel_oauth(channel: str, db: Session = Depends(get_db)):
+    channel_pk = get_channel_pk(channel, db)
+    ch = db.get(ActiveChannel, channel_pk)
+    if not ch:
+        raise HTTPException(status_code=404, detail="channel not found")
+    owner_login: Optional[str] = None
+    scopes: List[str] = []
+    owner = ch.owner
+    if owner:
+        owner_login = owner.username
+        if owner.scopes:
+            scopes = owner.scopes.split()
+    authorized = bool(ch.authorized and owner and owner.access_token)
+    return ChannelOAuthOut(
+        channel_name=ch.channel_name,
+        authorized=authorized,
+        owner_login=owner_login,
+        scopes=scopes,
     )
 
 @app.put("/channels/{channel}/settings", dependencies=[Depends(require_token)])

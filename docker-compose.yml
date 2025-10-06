@@ -59,3 +59,17 @@ services:
     restart: unless-stopped
     volumes:
       - ./admin:/admin
+  stats:
+    build:
+      context: .
+      dockerfile: stats/Dockerfile
+    container_name: songqueue-stats
+    environment:
+      BACKEND_URL: ${BACKEND_URL:-http://api:7070}
+    env_file:
+      - stack.env
+    ports:
+      - "${STATS_PORT:-7171}:80"
+    restart: unless-stopped
+    volumes:
+      - ./stats:/stats
