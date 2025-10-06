@@ -40,6 +40,20 @@ class CorsConfigTests(unittest.TestCase):
         self.assertIsNotNone(pattern.fullmatch("https://qstats.alpen.bot"))
         self.assertIsNone(pattern.fullmatch("https://example.com"))
 
+    def test_trailing_slash_is_ignored(self) -> None:
+        allow_origins, allow_regex = backend_app._cors_settings_from_env(
+            {
+                "CORS_ALLOW_ORIGINS": "https://qadmin.alpen.bot/ https://*.alpen.bot/",
+            }
+        )
+
+        self.assertEqual(allow_origins, ["https://qadmin.alpen.bot"])
+        self.assertIsNotNone(allow_regex)
+
+        pattern = re.compile(allow_regex or "")
+        self.assertIsNotNone(pattern.fullmatch("https://qstats.alpen.bot"))
+        self.assertIsNone(pattern.fullmatch("https://example.com"))
+
     def test_default_regex_retained_when_no_overrides(self) -> None:
         allow_origins, allow_regex = backend_app._cors_settings_from_env({})
 

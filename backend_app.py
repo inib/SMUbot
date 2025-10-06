@@ -442,11 +442,25 @@ def _parse_cors_origins(raw: str) -> list[str]:
     if not raw:
         return []
 
-    return [
-        origin
-        for origin in (part.strip() for part in re.split(r"[\s,]+", raw))
-        if origin
-    ]
+    origins: list[str] = []
+    for part in re.split(r"[\s,]+", raw):
+        origin = part.strip()
+        if not origin:
+            continue
+
+        # Deployment manifests sometimes include a trailing slash when
+        # specifying origins (e.g. ``https://example.com/``). Browsers omit the
+        # trailing slash in the ``Origin`` header, so we normalise the value to
+        # avoid mismatches that would prevent CORS headers from being returned
+        # (and therefore block credentialed requests such as the admin login
+        # flow).
+        origin = origin.rstrip("/")
+        if not origin:
+            continue
+
+        origins.append(origin)
+
+    return origins
 
 
 def _separate_cors_origins(origins: list[str]) -> tuple[list[str], list[str]]:
