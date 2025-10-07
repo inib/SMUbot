@@ -22,9 +22,32 @@ const API = resolveBackendBase(window.BACKEND_URL);
 const statusEl = document.getElementById('status');
 const channelListEl = document.getElementById('channel-list');
 const treeEl = document.getElementById('channel-tree');
+const botPanelEl = document.getElementById('bot-panel');
+const botGuardEl = document.getElementById('bot-guard');
+const botLoginBtn = document.getElementById('bot-login-btn');
+const botLogoutBtn = document.getElementById('bot-logout-btn');
+const botAuthorizeBtn = document.getElementById('bot-authorize-btn');
+const botOwnerEl = document.getElementById('bot-owner');
+const botAccountEl = document.getElementById('bot-account');
+const botExpiryEl = document.getElementById('bot-expiry');
+const botAlertEl = document.getElementById('bot-alert');
+const botDisplayInput = document.getElementById('bot-display-name');
+const botEnabledInput = document.getElementById('bot-enabled');
+const botScopeList = document.getElementById('bot-scope-list');
+const botScopeResetBtn = document.getElementById('bot-scope-reset');
+const botScopeAddBtn = document.getElementById('bot-scope-add');
+const botScopeCustomInput = document.getElementById('bot-scope-custom');
+const botConsoleLog = document.getElementById('bot-console-log');
+const botConsoleClearBtn = document.getElementById('bot-console-clear');
+const botConsoleStatus = document.getElementById('bot-console-status');
 
 const songCache = new Map();
 const userCache = new Map();
+let currentUser = null;
+let currentBotConfig = null;
+let botConsoleSource = null;
+let botScopeCatalog = new Set();
+let suspendBotInputs = false;
 
 function setStatus(text, variant) {
   if (!statusEl) return;
@@ -315,6 +338,508 @@ async function renderChannelTree(channels, oauthMap) {
   }
 }
 
+function showBotAlert(message, variant = 'info') {
+  if (!botAlertEl) return;
+  if (!message) {
+    botAlertEl.textContent = '';
+    botAlertEl.className = 'bot-alert';
+    botAlertEl.hidden = true;
+    return;
+  }
+  botAlertEl.textContent = message;
+  botAlertEl.className = `bot-alert ${variant}`;
+  botAlertEl.hidden = false;
+}
+
+function getDefaultBotScopes() {
+  const configured = (window.TWITCH_SCOPES || '')
+    .split(/\s+/)
+    .map(scope => scope.trim())
+    .filter(Boolean);
+  const base = ['chat:read', 'chat:edit', 'channel:bot'];
+  const unique = new Set([...base, ...configured]);
+  return Array.from(unique);
+}
+
+function ensureScopeCatalog(scopes) {
+  if (!(botScopeCatalog instanceof Set)) {
+    botScopeCatalog = new Set();
+  }
+  getDefaultBotScopes().forEach(scope => botScopeCatalog.add(scope));
+  (scopes || []).forEach(scope => {
+    if (scope) {
+      botScopeCatalog.add(scope);
+    }
+  });
+}
+
+function renderBotScopes(selected, options = {}) {
+  if (!botScopeList) return;
+  const disabled = Boolean(options.disabled);
+  const selectedSet = new Set((selected || []).map(scope => scope.trim()).filter(Boolean));
+  const scopes = Array.from(botScopeCatalog).sort((a, b) => a.localeCompare(b));
+  botScopeList.innerHTML = '';
+  scopes.forEach(scope => {
+    const label = document.createElement('label');
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.value = scope;
+    input.checked = selectedSet.has(scope);
+    input.disabled = disabled;
+    input.addEventListener('change', () => {
+      if (suspendBotInputs) return;
+      handleScopeChange();
+    });
+    const span = document.createElement('span');
+    span.textContent = scope;
+    label.appendChild(input);
+    label.appendChild(span);
+    botScopeList.appendChild(label);
+  });
+}
+
+function collectSelectedScopes() {
+  if (!botScopeList) return [];
+  const result = [];
+  botScopeList.querySelectorAll('input[type="checkbox"]').forEach(input => {
+    if (input.checked) {
+      result.push(input.value.trim());
+    }
+  });
+  return result;
+}
+
+function setBotConsoleStatus(text, variant) {
+  if (!botConsoleStatus) return;
+  botConsoleStatus.textContent = text;
+  botConsoleStatus.className = 'badge' + (variant ? ` ${variant}` : '');
+}
+
+function formatDateTime(value) {
+  if (!value) return '—';
+  try {
+    const date = value instanceof Date ? value : new Date(value);
+    if (Number.isNaN(date.getTime())) return '—';
+    return date.toLocaleString();
+  } catch (err) {
+    return '—';
+  }
+}
+
+function formatTimeLabel(value) {
+  if (!value) return new Date().toLocaleTimeString();
+  try {
+    const date = value instanceof Date ? value : new Date(value);
+    if (Number.isNaN(date.getTime())) return new Date().toLocaleTimeString();
+    return date.toLocaleTimeString([], { hour12: false });
+  } catch (err) {
+    return new Date().toLocaleTimeString();
+  }
+}
+
+function appendConsoleEntry(event) {
+  if (!botConsoleLog) return;
+  const level = (event.level || 'info').toLowerCase();
+  const row = document.createElement('div');
+  row.className = `console-entry level-${level}`;
+
+  const timeEl = document.createElement('div');
+  timeEl.className = 'time';
+  timeEl.textContent = formatTimeLabel(event.timestamp);
+  row.appendChild(timeEl);
+
+  const levelEl = document.createElement('div');
+  levelEl.className = 'level';
+  levelEl.textContent = level.toUpperCase();
+  row.appendChild(levelEl);
+
+  const messageEl = document.createElement('div');
+  messageEl.className = 'message';
+  messageEl.textContent = event.message || '';
+  row.appendChild(messageEl);
+
+  const sourceEl = document.createElement('div');
+  sourceEl.className = 'source';
+  sourceEl.textContent = event.source || '';
+  row.appendChild(sourceEl);
+
+  botConsoleLog.appendChild(row);
+  while (botConsoleLog.children.length > 200) {
+    botConsoleLog.removeChild(botConsoleLog.firstChild);
+  }
+  botConsoleLog.scrollTop = botConsoleLog.scrollHeight;
+}
+
+function clearBotConsole() {
+  if (!botConsoleLog) return;
+  botConsoleLog.innerHTML = '';
+  if (botConsoleSource) {
+    setBotConsoleStatus('status: connected', 'ok');
+  } else {
+    setBotConsoleStatus('status: idle');
+  }
+}
+
+function disconnectBotConsole() {
+  if (botConsoleSource) {
+    try {
+      botConsoleSource.close();
+    } catch (err) {
+      // ignore
+    }
+    botConsoleSource = null;
+  }
+  setBotConsoleStatus('status: idle');
+}
+
+function connectBotConsole() {
+  if (!currentUser || botConsoleSource || !botConsoleLog) {
+    return;
+  }
+  setBotConsoleStatus('status: connecting…');
+  try {
+    botConsoleSource = new EventSource(`${API}/bot/logs/stream`, { withCredentials: true });
+  } catch (err) {
+    console.error('failed to open console stream', err);
+    setBotConsoleStatus('status: error', 'error');
+    return;
+  }
+  botConsoleSource.onopen = () => {
+    setBotConsoleStatus('status: connected', 'ok');
+  };
+  botConsoleSource.onerror = () => {
+    setBotConsoleStatus('status: disconnected', 'warn');
+  };
+  botConsoleSource.addEventListener('log', event => {
+    if (!event.data) return;
+    try {
+      const payload = JSON.parse(event.data);
+      if (payload.type === 'ready') {
+        setBotConsoleStatus('status: connected', 'ok');
+        return;
+      }
+      appendConsoleEntry(payload);
+    } catch (err) {
+      console.error('failed to parse console event', err);
+    }
+  });
+}
+
+function updateBotAuthUI() {
+  const loggedIn = Boolean(currentUser);
+  if (botPanelEl) {
+    botPanelEl.hidden = !loggedIn;
+  }
+  if (botGuardEl) {
+    botGuardEl.hidden = loggedIn;
+  }
+  if (botLoginBtn) {
+    botLoginBtn.hidden = loggedIn;
+  }
+  if (botLogoutBtn) {
+    botLogoutBtn.hidden = !loggedIn;
+  }
+  if (botAuthorizeBtn) {
+    botAuthorizeBtn.disabled = !loggedIn;
+  }
+  if (botOwnerEl) {
+    if (!loggedIn || !currentUser) {
+      botOwnerEl.textContent = '—';
+    } else {
+      botOwnerEl.textContent = currentUser.display_name || currentUser.login || '—';
+    }
+  }
+}
+
+function applyBotConfig(config) {
+  currentBotConfig = config;
+  const hasConfig = Boolean(config);
+  const scopes = hasConfig && Array.isArray(config.scopes) ? config.scopes : getDefaultBotScopes();
+  ensureScopeCatalog(scopes);
+  suspendBotInputs = true;
+  try {
+    if (botDisplayInput) {
+      botDisplayInput.disabled = !hasConfig;
+      botDisplayInput.value = hasConfig ? (config.display_name || config.login || '') : '';
+    }
+    if (botEnabledInput) {
+      botEnabledInput.disabled = !hasConfig;
+      botEnabledInput.checked = Boolean(hasConfig && config.enabled);
+    }
+    renderBotScopes(scopes, { disabled: !hasConfig });
+    if (botScopeAddBtn) {
+      botScopeAddBtn.disabled = !hasConfig;
+    }
+    if (botScopeCustomInput) {
+      botScopeCustomInput.disabled = !hasConfig;
+    }
+    if (botScopeResetBtn) {
+      botScopeResetBtn.disabled = !hasConfig;
+    }
+  } finally {
+    suspendBotInputs = false;
+  }
+  if (botAccountEl) {
+    if (!hasConfig || !config.login) {
+      botAccountEl.textContent = 'Not connected';
+    } else {
+      const display = config.display_name && config.display_name !== config.login
+        ? `${config.display_name} (${config.login})`
+        : (config.display_name || config.login);
+      botAccountEl.textContent = display || 'Not connected';
+    }
+  }
+  if (botExpiryEl) {
+    botExpiryEl.textContent = hasConfig && config.expires_at ? formatDateTime(config.expires_at) : '—';
+  }
+  if (botAuthorizeBtn) {
+    botAuthorizeBtn.textContent = hasConfig && config && config.login ? 'Re-authorize Bot' : 'Authorize Bot';
+  }
+}
+
+async function loadBotConfig() {
+  if (!currentUser) {
+    applyBotConfig(null);
+    return;
+  }
+  try {
+    const response = await fetch(`${API}/bot/config`, { credentials: 'include' });
+    if (!response.ok) {
+      throw new Error(`status ${response.status}`);
+    }
+    const data = await response.json();
+    applyBotConfig(data);
+  } catch (err) {
+    console.error('failed to load bot config', err);
+    applyBotConfig(null);
+    showBotAlert('Unable to load bot configuration. Check your permissions and try again.', 'error');
+  }
+}
+
+async function updateBotConfig(patch) {
+  if (!currentUser) return;
+  const previous = currentBotConfig;
+  try {
+    const response = await fetch(`${API}/bot/config`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify(patch),
+    });
+    if (!response.ok) {
+      throw new Error(`status ${response.status}`);
+    }
+    const data = await response.json();
+    applyBotConfig(data);
+    showBotAlert('', 'info');
+  } catch (err) {
+    console.error('failed to update bot config', err);
+    showBotAlert('Failed to update bot settings. Please try again.', 'error');
+    if (previous) {
+      applyBotConfig(previous);
+    }
+  }
+}
+
+function handleScopeChange() {
+  if (!currentUser) return;
+  const scopes = collectSelectedScopes();
+  updateBotConfig({ scopes });
+}
+
+function addCustomScope() {
+  if (!botScopeCustomInput || !currentUser) return;
+  const scope = botScopeCustomInput.value.trim();
+  if (!scope) return;
+  botScopeCustomInput.value = '';
+  botScopeCatalog.add(scope);
+  const selected = new Set(collectSelectedScopes());
+  selected.add(scope);
+  renderBotScopes(Array.from(selected));
+  updateBotConfig({ scopes: Array.from(selected) });
+}
+
+function buildLoginScopes() {
+  const configured = (window.TWITCH_SCOPES || '')
+    .split(/\s+/)
+    .map(scope => scope.trim())
+    .filter(Boolean);
+  const scopes = configured.length ? configured : ['chat:read', 'chat:edit', 'channel:bot'];
+  if (!scopes.includes('user:read:email')) {
+    scopes.push('user:read:email');
+  }
+  return scopes;
+}
+
+function startOwnerLogin() {
+  const client = window.TWITCH_CLIENT_ID || '';
+  if (!client) {
+    alert('Twitch OAuth is not configured.');
+    return;
+  }
+  const redirect = new URL(window.location.href);
+  redirect.hash = '';
+  const scopes = buildLoginScopes();
+  const scopeParam = encodeURIComponent(scopes.join(' '));
+  const url = `https://id.twitch.tv/oauth2/authorize?response_type=token&client_id=${encodeURIComponent(client)}`
+    + `&redirect_uri=${encodeURIComponent(redirect.toString())}&scope=${scopeParam}&force_verify=true`;
+  window.location.href = url;
+}
+
+async function handleAuthHash() {
+  if (!window.location.hash.startsWith('#access_token')) {
+    return;
+  }
+  const params = new URLSearchParams(window.location.hash.slice(1));
+  const token = params.get('access_token');
+  history.replaceState({}, document.title, window.location.pathname + window.location.search);
+  if (!token) return;
+  try {
+    await fetch(`${API}/auth/session`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+      credentials: 'include',
+    });
+  } catch (err) {
+    console.error('failed to establish admin session', err);
+    showBotAlert('Failed to establish session with Twitch. Please try again.', 'error');
+  }
+}
+
+function handleBotOAuthReturn() {
+  const url = new URL(window.location.href);
+  const flag = url.searchParams.get('bot_oauth');
+  if (!flag) return;
+  url.searchParams.delete('bot_oauth');
+  history.replaceState({}, document.title, url.toString());
+  if (flag === 'error') {
+    showBotAlert('Bot authorization failed. Please try again.', 'error');
+  } else {
+    showBotAlert('Bot authorization complete.', 'info');
+  }
+}
+
+async function refreshCurrentUser() {
+  try {
+    const response = await fetch(`${API}/me`, { credentials: 'include' });
+    if (response.ok) {
+      currentUser = await response.json();
+    } else {
+      currentUser = null;
+    }
+  } catch (err) {
+    currentUser = null;
+  }
+  updateBotAuthUI();
+  if (currentUser) {
+    await loadBotConfig();
+    connectBotConsole();
+  } else {
+    applyBotConfig(null);
+    disconnectBotConsole();
+  }
+}
+
+async function startBotOAuthFlow() {
+  if (!currentUser || !botAuthorizeBtn) return;
+  botAuthorizeBtn.disabled = true;
+  try {
+    const url = new URL(window.location.href);
+    url.searchParams.set('bot_oauth', '1');
+    const response = await fetch(`${API}/bot/config/oauth`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ return_url: url.toString() }),
+    });
+    if (!response.ok) {
+      throw new Error(`status ${response.status}`);
+    }
+    const data = await response.json();
+    if (!data || !data.auth_url) {
+      throw new Error('missing auth_url');
+    }
+    window.location.href = data.auth_url;
+  } catch (err) {
+    console.error('failed to start bot oauth', err);
+    showBotAlert('Failed to start the bot authorization flow. Please try again.', 'error');
+  } finally {
+    if (botAuthorizeBtn) {
+      botAuthorizeBtn.disabled = !currentUser;
+    }
+  }
+}
+
+async function logoutOwner() {
+  try {
+    await fetch(`${API}/auth/logout`, { method: 'POST', credentials: 'include' });
+  } catch (err) {
+    console.error('failed to log out', err);
+  } finally {
+    currentUser = null;
+    updateBotAuthUI();
+    applyBotConfig(null);
+    disconnectBotConsole();
+    clearBotConsole();
+    showBotAlert('');
+  }
+}
+
+async function initBotControls() {
+  if (!botPanelEl || !botGuardEl) return;
+  botScopeCatalog = new Set(getDefaultBotScopes());
+  renderBotScopes(getDefaultBotScopes(), { disabled: true });
+
+  if (botLoginBtn) {
+    botLoginBtn.addEventListener('click', startOwnerLogin);
+  }
+  if (botLogoutBtn) {
+    botLogoutBtn.addEventListener('click', logoutOwner);
+  }
+  if (botAuthorizeBtn) {
+    botAuthorizeBtn.addEventListener('click', startBotOAuthFlow);
+  }
+  if (botDisplayInput) {
+    botDisplayInput.addEventListener('change', () => {
+      if (suspendBotInputs || !currentUser) return;
+      updateBotConfig({ display_name: botDisplayInput.value.trim() });
+    });
+  }
+  if (botEnabledInput) {
+    botEnabledInput.addEventListener('change', () => {
+      if (suspendBotInputs || !currentUser) return;
+      updateBotConfig({ enabled: Boolean(botEnabledInput.checked) });
+    });
+  }
+  if (botScopeResetBtn) {
+    botScopeResetBtn.addEventListener('click', () => {
+      if (!currentUser) return;
+      const defaults = getDefaultBotScopes();
+      botScopeCatalog = new Set(defaults);
+      renderBotScopes(defaults);
+      updateBotConfig({ scopes: defaults });
+    });
+  }
+  if (botScopeAddBtn) {
+    botScopeAddBtn.addEventListener('click', addCustomScope);
+  }
+  if (botScopeCustomInput) {
+    botScopeCustomInput.addEventListener('keydown', event => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        addCustomScope();
+      }
+    });
+  }
+  if (botConsoleClearBtn) {
+    botConsoleClearBtn.addEventListener('click', clearBotConsole);
+  }
+
+  handleBotOAuthReturn();
+  await handleAuthHash();
+  await refreshCurrentUser();
+}
+
 async function init() {
   setStatus('status: loading…');
   try {
@@ -341,4 +866,9 @@ async function init() {
   }
 }
 
-window.addEventListener('DOMContentLoaded', init);
+window.addEventListener('DOMContentLoaded', () => {
+  init();
+  initBotControls().catch(err => {
+    console.error('failed to initialize bot controls', err);
+  });
+});
