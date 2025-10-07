@@ -64,6 +64,36 @@ class CorsConfigTests(unittest.TestCase):
         self.assertIsNotNone(pattern.fullmatch("https://anywhere.example"))
 
 
+class GetAppAccessTokenTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._client_id = backend_app.TWITCH_CLIENT_ID
+        self._client_secret = backend_app.TWITCH_CLIENT_SECRET
+        backend_app.TWITCH_CLIENT_ID = "client"
+        backend_app.TWITCH_CLIENT_SECRET = "secret"
+        backend_app.APP_ACCESS_TOKEN = None
+        backend_app.APP_TOKEN_EXPIRES = 0
+
+    def tearDown(self) -> None:
+        backend_app.TWITCH_CLIENT_ID = self._client_id
+        backend_app.TWITCH_CLIENT_SECRET = self._client_secret
+        backend_app.APP_ACCESS_TOKEN = None
+        backend_app.APP_TOKEN_EXPIRES = 0
+
+    def test_missing_access_token_raises_http_error(self) -> None:
+        class FakeResponse:
+            status_code = 200
+
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> dict[str, str]:
+                return {"message": "invalid"}
+
+        with patch.object(backend_app.requests, "post", return_value=FakeResponse()):
+            with self.assertRaises(requests.HTTPError):
+                backend_app.get_app_access_token()
+
+
 class AuthSessionCORSTest(unittest.TestCase):
     def setUp(self) -> None:
         self.client = TestClient(backend_app.app)
@@ -126,6 +156,55 @@ class AuthSessionCORSTest(unittest.TestCase):
         self.assertEqual(response.headers.get("access-control-allow-origin"), origin)
         self.assertEqual(response.headers.get("access-control-allow-credentials"), "true")
 
+    def test_auth_session_skips_eventsub_without_app_credentials(self) -> None:
+        origin = "https://qadmin.alpen.bot"
+        twitch_id = str(uuid.uuid4())
+
+        db = backend_app.SessionLocal()
+        user = backend_app.TwitchUser(
+            twitch_id=twitch_id,
+            username="tester",
+            access_token="token",
+            refresh_token="",
+            scopes="channel:bot",
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+        db.close()
+
+        data = {
+            "login": "tester",
+            "user_id": twitch_id,
+            "scopes": ["channel:bot"],
+        }
+
+        client_id = backend_app.TWITCH_CLIENT_ID
+        client_secret = backend_app.TWITCH_CLIENT_SECRET
+        backend_app.TWITCH_CLIENT_ID = None
+        backend_app.TWITCH_CLIENT_SECRET = None
+        try:
+            with patch.object(backend_app, "_resolve_user_from_token", return_value=(user, data)), \
+                patch.object(backend_app, "get_app_access_token") as token_mock, \
+                patch.object(backend_app, "get_bot_user_id") as bot_mock:
+                response = self.client.post(
+                    "/auth/session",
+                    headers={
+                        "Origin": origin,
+                        "Authorization": "Bearer test-token",
+                    },
+                )
+        finally:
+            backend_app.TWITCH_CLIENT_ID = client_id
+            backend_app.TWITCH_CLIENT_SECRET = client_secret
+
+        token_mock.assert_not_called()
+        bot_mock.assert_not_called()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"login": "tester"})
+        self.assertEqual(response.headers.get("access-control-allow-origin"), origin)
+        self.assertEqual(response.headers.get("access-control-allow-credentials"), "true")
+
     def test_auth_session_cookie_available_for_other_endpoints(self) -> None:
         origin = "https://qadmin.alpen.bot"
         twitch_id = str(uuid.uuid4())
@@ -174,6 +253,42 @@ class AuthSessionCORSTest(unittest.TestCase):
             "display_name": "tester",
             "profile_image_url": None,
         })
+
+    def test_auth_session_handles_missing_app_access_token(self) -> None:
+        origin = "https://qadmin.alpen.bot"
+        twitch_id = str(uuid.uuid4())
+
+        db = backend_app.SessionLocal()
+        user = backend_app.TwitchUser(
+            twitch_id=twitch_id,
+            username="tester",
+            access_token="token",
+            refresh_token="",
+            scopes="channel:bot",
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+        db.close()
+
+        data = {
+            "login": "tester",
+            "user_id": twitch_id,
+            "scopes": ["channel:bot"],
+        }
+
+        with patch.object(backend_app, "_resolve_user_from_token", return_value=(user, data)), \
+            patch.object(backend_app, "get_app_access_token", side_effect=requests.HTTPError("boom")):
+            response = self.client.post(
+                "/auth/session",
+                headers={
+                    "Origin": origin,
+                    "Authorization": "Bearer test-token",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"login": "tester"})
 
 
 if __name__ == "__main__":
