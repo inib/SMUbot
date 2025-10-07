@@ -1,13 +1,17 @@
 import os
 import re
+import sys
 import unittest
 import uuid
+from pathlib import Path
 from unittest.mock import patch
 
 import requests
 from fastapi.testclient import TestClient
 
 os.makedirs("/data", exist_ok=True)
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import backend_app
 

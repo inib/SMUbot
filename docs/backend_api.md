@@ -7,6 +7,20 @@ This document summarizes the REST endpoints exposed by `backend_app.py`.
 |--------|------|-------------|
 | GET | `/system/health` | Health check that verifies database connectivity. |
 
+## Bot
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/bot/config` | Retrieve the stored bot OAuth configuration (admin). |
+| PUT | `/bot/config` | Update bot settings such as scopes or enable flag (admin). |
+| POST | `/bot/config/oauth` | Start the OAuth authorization flow for the bot account (admin). |
+| GET | `/bot/config/oauth/callback` | Callback used by Twitch to finish the bot OAuth flow. |
+
+## Bot Logs
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/bot/logs` | Push a bot worker log event which is relayed to connected consoles (admin). |
+| GET | `/bot/logs/stream` | Server-sent events stream of bot worker log messages (admin). |
+
 ## Channels
 | Method | Path | Description |
 |--------|------|-------------|
