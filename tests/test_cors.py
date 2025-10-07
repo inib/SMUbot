@@ -40,6 +40,20 @@ class CorsConfigTests(unittest.TestCase):
         self.assertIsNotNone(pattern.fullmatch("https://qstats.alpen.bot"))
         self.assertIsNone(pattern.fullmatch("https://example.com"))
 
+    def test_trailing_slash_is_ignored(self) -> None:
+        allow_origins, allow_regex = backend_app._cors_settings_from_env(
+            {
+                "CORS_ALLOW_ORIGINS": "https://qadmin.alpen.bot/ https://*.alpen.bot/",
+            }
+        )
+
+        self.assertEqual(allow_origins, ["https://qadmin.alpen.bot"])
+        self.assertIsNotNone(allow_regex)
+
+        pattern = re.compile(allow_regex or "")
+        self.assertIsNotNone(pattern.fullmatch("https://qstats.alpen.bot"))
+        self.assertIsNone(pattern.fullmatch("https://example.com"))
+
     def test_default_regex_retained_when_no_overrides(self) -> None:
         allow_origins, allow_regex = backend_app._cors_settings_from_env({})
 
@@ -111,6 +125,55 @@ class AuthSessionCORSTest(unittest.TestCase):
         self.assertEqual(response.json(), {"login": "tester"})
         self.assertEqual(response.headers.get("access-control-allow-origin"), origin)
         self.assertEqual(response.headers.get("access-control-allow-credentials"), "true")
+
+    def test_auth_session_cookie_available_for_other_endpoints(self) -> None:
+        origin = "https://qadmin.alpen.bot"
+        twitch_id = str(uuid.uuid4())
+
+        db = backend_app.SessionLocal()
+        user = backend_app.TwitchUser(
+            twitch_id=twitch_id,
+            username="tester",
+            access_token="token",
+            refresh_token="",
+            scopes="channel:bot",
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+        db.close()
+
+        data = {
+            "login": "tester",
+            "user_id": twitch_id,
+            "scopes": ["channel:bot"],
+        }
+
+        with patch.object(backend_app, "_resolve_user_from_token", return_value=(user, data)), \
+            patch.object(backend_app, "subscribe_chat_eventsub"):
+            response = self.client.post(
+                "/auth/session",
+                headers={
+                    "Origin": origin,
+                    "Authorization": "Bearer test-token",
+                },
+            )
+
+            self.assertEqual(response.status_code, 200)
+            set_cookie = response.headers.get("set-cookie") or ""
+            self.assertIn("Path=/", set_cookie)
+
+            me_resp = self.client.get(
+                "/me",
+                headers={"Origin": origin},
+            )
+
+        self.assertEqual(me_resp.status_code, 200)
+        self.assertEqual(me_resp.json(), {
+            "login": "tester",
+            "display_name": "tester",
+            "profile_image_url": None,
+        })
 
 
 if __name__ == "__main__":
