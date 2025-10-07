@@ -840,6 +840,7 @@ def auth_session(
     cookie_kwargs = {
         "httponly": True,
         "samesite": "lax",
+        "path": "/",
     }
     if max_age:
         cookie_kwargs["max_age"] = max_age
