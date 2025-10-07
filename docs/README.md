@@ -15,10 +15,10 @@ Additional directories include:
 
 ## Running with Docker
 1. Copy `example.env` to `stack.env` and adjust values such as `ADMIN_TOKEN`,
-   `TWITCH_BOT_TOKEN`, `BOT_NICK`, `TWITCH_CLIENT_ID`, and
-   `TWITCH_CLIENT_SECRET`. When exposing the stack outside of Docker, set
-   `BACKEND_URL` to the public URL of the API so the bot and web UI can reach
-   it.
+   `TWITCH_CLIENT_ID`, and `TWITCH_CLIENT_SECRET`. When exposing the stack
+   outside of Docker, set `BACKEND_URL` to the public URL of the API so the bot
+   and web UI can reach it. Bot credentials are now managed through the backend
+   at `/bot/config` instead of `.env` entries.
 2. Start the stack:
    ```bash
    docker-compose --env-file stack.env up --build
@@ -28,7 +28,10 @@ Additional directories include:
 
 ## Backend Highlights
 - Uses a SQLite database stored at `/data/db.sqlite` and defines models for channels, songs, users, stream sessions, and requests.
-- Exposes REST endpoints for managing songs and queue entries, plus an SSE stream for real‑time events.
+- Stores bot OAuth credentials via the `/bot/config` API and exposes an OAuth
+  helper flow for authorizing the bot account.
+- Exposes REST endpoints for managing songs and queue entries, plus SSE streams
+  for queue updates and bot log streaming.
 - `run.sh` initializes the database and starts the server with Uvicorn.
 
 ## Bot Highlights
