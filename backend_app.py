@@ -69,16 +69,33 @@ Base = declarative_base()
 def get_app_access_token() -> str:
     global APP_ACCESS_TOKEN, APP_TOKEN_EXPIRES
     if not APP_ACCESS_TOKEN or time.time() > APP_TOKEN_EXPIRES:
-        resp = requests.post(
+        response = requests.post(
             "https://id.twitch.tv/oauth2/token",
             data={
                 "client_id": TWITCH_CLIENT_ID,
                 "client_secret": TWITCH_CLIENT_SECRET,
                 "grant_type": "client_credentials",
             },
-        ).json()
-        APP_ACCESS_TOKEN = resp["access_token"]
-        APP_TOKEN_EXPIRES = time.time() + resp.get("expires_in", 3600) - 60
+            timeout=5,
+        )
+        response.raise_for_status()
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise requests.HTTPError(
+                "Twitch app access token response was not valid JSON",
+                response=response,
+            ) from exc
+        token = payload.get("access_token")
+        if not token:
+            message = payload.get("message") or payload
+            raise requests.HTTPError(
+                f"Twitch app access token response missing access_token: {message}",
+                response=response,
+            )
+        APP_ACCESS_TOKEN = token
+        expires_in = int(payload.get("expires_in", 3600))
+        APP_TOKEN_EXPIRES = time.time() + expires_in - 60
     return APP_ACCESS_TOKEN
 
 
@@ -102,6 +119,12 @@ def get_bot_user_id() -> Optional[str]:
 
 
 def subscribe_chat_eventsub(broadcaster_id: str) -> None:
+    if not TWITCH_CLIENT_ID or not TWITCH_CLIENT_SECRET:
+        logger.info(
+            "Skipping chat EventSub subscription for %s due to missing app credentials",
+            broadcaster_id,
+        )
+        return
     try:
         token = get_app_access_token()
     except requests.RequestException as exc:
@@ -442,11 +465,25 @@ def _parse_cors_origins(raw: str) -> list[str]:
     if not raw:
         return []
 
-    return [
-        origin
-        for origin in (part.strip() for part in re.split(r"[\s,]+", raw))
-        if origin
-    ]
+    origins: list[str] = []
+    for part in re.split(r"[\s,]+", raw):
+        origin = part.strip()
+        if not origin:
+            continue
+
+        # Deployment manifests sometimes include a trailing slash when
+        # specifying origins (e.g. ``https://example.com/``). Browsers omit the
+        # trailing slash in the ``Origin`` header, so we normalise the value to
+        # avoid mismatches that would prevent CORS headers from being returned
+        # (and therefore block credentialed requests such as the admin login
+        # flow).
+        origin = origin.rstrip("/")
+        if not origin:
+            continue
+
+        origins.append(origin)
+
+    return origins
 
 
 def _separate_cors_origins(origins: list[str]) -> tuple[list[str], list[str]]:
@@ -826,6 +863,7 @@ def auth_session(
     cookie_kwargs = {
         "httponly": True,
         "samesite": "lax",
+        "path": "/",
     }
     if max_age:
         cookie_kwargs["max_age"] = max_age
