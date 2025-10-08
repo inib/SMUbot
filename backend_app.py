@@ -7,7 +7,9 @@ import hmac
 import hashlib
 import logging
 import re
-from urllib.parse import quote, urlparse
+import secrets
+import html
+from urllib.parse import quote, urlparse, urlunparse
 from datetime import datetime, timedelta
 import asyncio
 import requests
@@ -24,8 +26,9 @@ from fastapi import (
     Request as FastAPIRequest,
     Response,
     Cookie,
+    Body,
 )
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, HTMLResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import (
     create_engine, Column, Integer, String, Text, DateTime, Boolean,
@@ -64,6 +67,7 @@ APP_TOKEN_EXPIRES = 0
 BOT_USER_ID: Optional[str] = None
 
 _bot_log_listeners: set[asyncio.Queue[str]] = set()
+_bot_oauth_states: dict[str, Dict[str, Any]] = {}
 
 logger = logging.getLogger(__name__)
 
@@ -413,6 +417,10 @@ class BotLogEventIn(BaseModel):
 class BotLogAckOut(BaseModel):
     success: bool
 
+
+class BotOAuthStartIn(BaseModel):
+    return_url: Optional[str] = None
+
 class SongIn(BaseModel):
     artist: str
     title: str
@@ -615,6 +623,70 @@ def _broadcast_bot_log(event: Dict[str, Any]) -> None:
             stale.append(queue)
     for queue in stale:
         _bot_log_listeners.discard(queue)
+
+
+def _normalize_return_url(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    try:
+        parsed = urlparse(value)
+    except ValueError:
+        return None
+    if parsed.scheme not in ("http", "https"):
+        return None
+    if not parsed.netloc:
+        return None
+    sanitized = parsed._replace(fragment="")
+    return urlunparse(sanitized)
+
+
+def _cleanup_bot_oauth_states() -> None:
+    cutoff = time.time() - 600
+    stale = [key for key, meta in _bot_oauth_states.items() if meta.get("created_at", 0) < cutoff]
+    for key in stale:
+        _bot_oauth_states.pop(key, None)
+
+
+def _bot_oauth_html_response(success: bool, message: str, *, redirect_url: Optional[str] = None, status_code: int = 200) -> HTMLResponse:
+    payload = {"type": "bot-oauth-complete", "success": success}
+    if not success:
+        payload["error"] = message
+    script_payload = json.dumps(payload)
+    message_text = html.escape(message or "")
+    redirect_script = ""
+    if redirect_url:
+        redirect_script = f"\n          setTimeout(function() {{ window.location.replace('{html.escape(redirect_url)}'); }}, 1200);"
+    body = f"""<!DOCTYPE html>
+<html lang=\"en\">
+  <head>
+    <meta charset=\"utf-8\" />
+    <title>Bot Authorization</title>
+    <style>
+      body {{ font-family: sans-serif; margin: 2rem; }}
+    </style>
+  </head>
+  <body>
+    <h1>{'Success' if success else 'Authorization Failed'}</h1>
+    <p>{message_text or ('Authorization completed successfully. You can close this window.' if success else 'Unable to complete bot authorization.')}</p>
+    <script>
+      (function() {{
+        var payload = {script_payload};
+        try {{
+          if (window.opener) {{
+            window.opener.postMessage(payload, '*');
+          }} else if (window.parent && window.parent !== window) {{
+            window.parent.postMessage(payload, '*');
+          }}
+        }} catch (err) {{ /* ignore */ }}
+        setTimeout(function() {{
+          try {{ window.close(); }} catch (err) {{ /* ignore */ }}
+        }}, 1500);{redirect_script}
+      }})();
+    </script>
+  </body>
+</html>
+"""
+    return HTMLResponse(content=body, status_code=status_code)
 
 
 def get_db() -> Session:
@@ -1040,57 +1112,219 @@ def update_bot_config(payload: BotConfigUpdate, db: Session = Depends(get_db)):
     return _serialize_bot_config(cfg)
 
 
-@app.post("/bot/config/oauth", response_model=BotConfigOut, dependencies=[Depends(require_token)])
-def bot_oauth_start(db: Session = Depends(get_db)):
+@app.post("/bot/config/oauth", response_model=AuthUrlOut, dependencies=[Depends(require_token)])
+def bot_oauth_start(
+    request: FastAPIRequest,
+    payload: Optional[BotOAuthStartIn] = Body(default=None),
+    db: Session = Depends(get_db),
+):
     if not TWITCH_CLIENT_ID or not TWITCH_CLIENT_SECRET:
         raise HTTPException(status_code=500, detail="Twitch OAuth not configured")
     cfg = _get_bot_config(db)
-    scopes = (cfg.scopes or "").split() or BOT_APP_SCOPES
-    scope_param = " ".join(scopes)
-    try:
-        response = requests.post(
-            "https://id.twitch.tv/oauth2/token",
-            data={
-                "client_id": TWITCH_CLIENT_ID,
-                "client_secret": TWITCH_CLIENT_SECRET,
-                "grant_type": "client_credentials",
-                "scope": scope_param,
-            },
-            timeout=5,
-        )
-        response.raise_for_status()
-        token_resp = response.json()
-    except requests.RequestException as exc:
-        raise HTTPException(status_code=502, detail="token request failed") from exc
-    access_token = token_resp.get("access_token")
-    if not access_token:
-        raise HTTPException(status_code=502, detail="missing access_token")
-    expires_at: Optional[datetime] = None
-    expires_in = token_resp.get("expires_in")
-    if isinstance(expires_in, (int, float)) and expires_in > 0:
-        expires_at = datetime.utcnow() + timedelta(seconds=int(expires_in))
-    cfg.access_token = access_token
-    cfg.refresh_token = None
-    cfg.scopes = scope_param or None
-    cfg.expires_at = expires_at
-    cfg.enabled = True
-    cfg.updated_at = datetime.utcnow()
-    db.commit()
-    db.refresh(cfg)
-    _broadcast_bot_log(
-        {
-            "type": "oauth_complete",
-            "level": "info",
-            "message": "Bot app access token acquired",
-            "timestamp": datetime.utcnow(),
-        }
+    configured_scopes = (cfg.scopes or "").split()
+    seen: set[str] = set()
+    scopes: list[str] = []
+    for scope in configured_scopes or BOT_APP_SCOPES:
+        scope_value = scope.strip()
+        if scope_value and scope_value not in seen:
+            seen.add(scope_value)
+            scopes.append(scope_value)
+    if not scopes:
+        scopes = BOT_APP_SCOPES[:]
+    redirect_uri = TWITCH_REDIRECT_URI or str(request.url_for("bot_oauth_callback"))
+    nonce = secrets.token_urlsafe(24)
+    _cleanup_bot_oauth_states()
+    return_url = _normalize_return_url(payload.return_url) if payload else None
+    state_payload: Dict[str, Any] = {"nonce": nonce}
+    if return_url:
+        state_payload["return_url"] = return_url
+    state_param = quote(json.dumps(state_payload, separators=(",", ":")), safe="")
+    scope_param = quote(" ".join(scopes), safe="")
+    client_id_param = quote(TWITCH_CLIENT_ID, safe="")
+    redirect_param = quote(redirect_uri, safe="")
+    auth_url = (
+        "https://id.twitch.tv/oauth2/authorize"
+        f"?response_type=code&client_id={client_id_param}"
+        f"&redirect_uri={redirect_param}&scope={scope_param}&state={state_param}"
     )
-    return _serialize_bot_config(cfg)
+    _bot_oauth_states[nonce] = {
+        "return_url": return_url,
+        "scopes": scopes,
+        "created_at": time.time(),
+    }
+    return {"auth_url": auth_url}
 
 
-@app.get("/bot/config/oauth/callback", response_model=AuthCallbackOut)
-def bot_oauth_callback():
-    raise HTTPException(status_code=410, detail="bot oauth callback deprecated")
+@app.get("/bot/config/oauth/callback")
+def bot_oauth_callback(
+    code: str,
+    state: str,
+    request: FastAPIRequest,
+    db: Session = Depends(get_db),
+):
+    pending: Optional[Dict[str, Any]] = None
+    try:
+        if not TWITCH_CLIENT_ID or not TWITCH_CLIENT_SECRET:
+            raise HTTPException(status_code=500, detail="Twitch OAuth not configured")
+        if not state:
+            raise HTTPException(status_code=400, detail="missing state")
+        try:
+            state_data = json.loads(state)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=400, detail="invalid state") from exc
+        nonce = state_data.get("nonce") if isinstance(state_data, dict) else None
+        if not nonce or not isinstance(nonce, str):
+            raise HTTPException(status_code=400, detail="invalid state")
+        pending = _bot_oauth_states.pop(nonce, None)
+        if not pending:
+            raise HTTPException(status_code=400, detail="state expired or invalid")
+        redirect_url = pending.get("return_url") if pending else None
+        expected_scopes = pending.get("scopes") or BOT_APP_SCOPES
+        redirect_uri = TWITCH_REDIRECT_URI or str(request.url_for("bot_oauth_callback"))
+        try:
+            token_response = requests.post(
+                "https://id.twitch.tv/oauth2/token",
+                data={
+                    "client_id": TWITCH_CLIENT_ID,
+                    "client_secret": TWITCH_CLIENT_SECRET,
+                    "code": code,
+                    "grant_type": "authorization_code",
+                    "redirect_uri": redirect_uri,
+                },
+                timeout=10,
+            )
+            token_response.raise_for_status()
+        except requests.RequestException as exc:
+            logger.exception("failed to exchange bot oauth code: %s", exc)
+            return _bot_oauth_html_response(
+                False,
+                "Failed to exchange authorization code with Twitch.",
+                redirect_url=redirect_url,
+                status_code=502,
+            )
+        try:
+            token_payload = token_response.json()
+        except ValueError:
+            return _bot_oauth_html_response(
+                False,
+                "Invalid response from Twitch during authorization.",
+                redirect_url=redirect_url,
+                status_code=502,
+            )
+        access_token = token_payload.get("access_token")
+        if not access_token:
+            message = token_payload.get("message") or "Authorization response missing access token."
+            return _bot_oauth_html_response(
+                False,
+                str(message),
+                redirect_url=redirect_url,
+                status_code=502,
+            )
+        refresh_token = token_payload.get("refresh_token")
+        scopes_list = token_payload.get("scope") or []
+        if isinstance(scopes_list, str):
+            scopes_list = [scopes_list]
+        scopes_list = [scope for scope in scopes_list if isinstance(scope, str) and scope]
+        expected_set = {scope for scope in expected_scopes if isinstance(scope, str) and scope}
+        if expected_set and not expected_set.issubset(set(scopes_list)):
+            missing = sorted(expected_set.difference(set(scopes_list)))
+            message = "Missing required scopes: " + ", ".join(missing)
+            return _bot_oauth_html_response(
+                False,
+                message,
+                redirect_url=redirect_url,
+                status_code=400,
+            )
+        expires_at: Optional[datetime] = None
+        expires_in = token_payload.get("expires_in")
+        if isinstance(expires_in, (int, float)) and expires_in > 0:
+            expires_at = datetime.utcnow() + timedelta(seconds=int(expires_in))
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Client-Id": TWITCH_CLIENT_ID,
+        }
+        try:
+            user_response = requests.get(
+                "https://api.twitch.tv/helix/users",
+                headers=headers,
+                timeout=10,
+            )
+            user_response.raise_for_status()
+            user_payload = user_response.json()
+        except (requests.RequestException, ValueError) as exc:
+            logger.exception("failed to fetch bot user profile: %s", exc)
+            return _bot_oauth_html_response(
+                False,
+                "Failed to fetch bot account information from Twitch.",
+                redirect_url=redirect_url,
+                status_code=502,
+            )
+        data_list = user_payload.get("data") if isinstance(user_payload, dict) else None
+        user_info = data_list[0] if data_list else None
+        if not user_info or not isinstance(user_info, dict):
+            return _bot_oauth_html_response(
+                False,
+                "Twitch response did not include bot account information.",
+                redirect_url=redirect_url,
+                status_code=502,
+            )
+        login = user_info.get("login")
+        display_name = user_info.get("display_name")
+        if not login:
+            return _bot_oauth_html_response(
+                False,
+                "Twitch response missing bot account login.",
+                redirect_url=redirect_url,
+                status_code=502,
+            )
+        cfg = _get_bot_config(db)
+        cfg.login = login
+        cfg.display_name = display_name or login
+        cfg.access_token = access_token
+        cfg.refresh_token = refresh_token
+        cfg.scopes = " ".join(scopes_list) if scopes_list else None
+        cfg.expires_at = expires_at
+        cfg.enabled = True
+        cfg.updated_at = datetime.utcnow()
+        db.commit()
+        db.refresh(cfg)
+        global BOT_USER_ID
+        BOT_USER_ID = user_info.get("id")
+        _broadcast_bot_log(
+            {
+                "type": "oauth_complete",
+                "level": "info",
+                "message": f"Bot app access token acquired for {login}",
+                "timestamp": datetime.utcnow(),
+            }
+        )
+        return _bot_oauth_html_response(
+            True,
+            "Bot authorization completed successfully.",
+            redirect_url=redirect_url,
+            status_code=200,
+        )
+    except HTTPException as exc:
+        redirect_url = None
+        if pending:
+            redirect_url = pending.get("return_url")
+        return _bot_oauth_html_response(
+            False,
+            str(exc.detail),
+            redirect_url=redirect_url,
+            status_code=exc.status_code,
+        )
+    except Exception:
+        logger.exception("unexpected error during bot oauth callback")
+        redirect_url = None
+        if pending:
+            redirect_url = pending.get("return_url")
+        return _bot_oauth_html_response(
+            False,
+            "Unexpected error completing bot authorization.",
+            redirect_url=redirect_url,
+            status_code=500,
+        )
 
 
 @app.post("/bot/logs", response_model=BotLogAckOut, dependencies=[Depends(require_token)])
