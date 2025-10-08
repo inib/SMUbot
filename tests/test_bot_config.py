@@ -1,8 +1,8 @@
 import os
+import os
 import sys
 import unittest
 from pathlib import Path
-from urllib.parse import urlparse, parse_qs
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -21,7 +21,6 @@ class BotConfigApiTests(unittest.TestCase):
         self._redirect_uri = backend_app.TWITCH_REDIRECT_URI
         self._bot_nick = backend_app.BOT_NICK
         self._bot_user_id = backend_app.BOT_USER_ID
-        backend_app._bot_oauth_states.clear()
         db = backend_app.SessionLocal()
         try:
             db.query(backend_app.BotConfig).delete()
@@ -46,7 +45,7 @@ class BotConfigApiTests(unittest.TestCase):
         data = response.json()
         self.assertIsNone(data["login"])
         self.assertFalse(data["enabled"])
-        self.assertEqual(data["scopes"], backend_app.TWITCH_SCOPES)
+        self.assertEqual(data["scopes"], backend_app.BOT_APP_SCOPES)
 
     def test_update_config_scope_and_enabled(self) -> None:
         payload = {"enabled": True, "scopes": ["chat:read", "channel:bot"]}
@@ -60,20 +59,10 @@ class BotConfigApiTests(unittest.TestCase):
         self.assertTrue(data["enabled"])
         self.assertEqual(data["scopes"], payload["scopes"])
 
-    def test_oauth_flow_persists_tokens(self) -> None:
+    def test_client_credentials_flow_persists_tokens(self) -> None:
         backend_app.TWITCH_CLIENT_ID = "client"
         backend_app.TWITCH_CLIENT_SECRET = "secret"
         backend_app.TWITCH_REDIRECT_URI = None
-
-        auth_start = self.client.post(
-            "/bot/config/oauth",
-            headers={"X-Admin-Token": backend_app.ADMIN_TOKEN},
-        )
-        self.assertEqual(auth_start.status_code, 200)
-        auth_url = auth_start.json()["auth_url"]
-        parsed = urlparse(auth_url)
-        params = parse_qs(parsed.query)
-        state = params["state"][0]
 
         class FakeTokenResponse:
             status_code = 200
@@ -84,43 +73,34 @@ class BotConfigApiTests(unittest.TestCase):
             def json(self) -> dict[str, object]:
                 return {
                     "access_token": "access",
-                    "refresh_token": "refresh",
-                    "scope": ["chat:read", "chat:edit"],
                     "expires_in": 3600,
                 }
 
-        class FakeUserResponse:
-            status_code = 200
+        with patch.object(backend_app.requests, "post", return_value=FakeTokenResponse()) as mock_post:
+            auth_start = self.client.post(
+            "/bot/config/oauth",
+            headers={"X-Admin-Token": backend_app.ADMIN_TOKEN},
+        )
+        self.assertEqual(auth_start.status_code, 200)
+        mock_post.assert_called_once()
+        args, kwargs = mock_post.call_args
+        self.assertEqual(args[0], "https://id.twitch.tv/oauth2/token")
+        self.assertEqual(kwargs["data"]["grant_type"], "client_credentials")
+        data = auth_start.json()
+        self.assertTrue(data["enabled"])
+        self.assertEqual(data["scopes"], backend_app.BOT_APP_SCOPES)
 
-            def raise_for_status(self) -> None:
-                return None
-
-            def json(self) -> dict[str, object]:
-                return {
-                    "data": [
-                        {
-                            "id": "1234",
-                            "login": "botuser",
-                            "display_name": "BotUser",
-                        }
-                    ]
-                }
-
-        with patch.object(backend_app.requests, "post", return_value=FakeTokenResponse()), \
-            patch.object(backend_app.requests, "get", return_value=FakeUserResponse()):
-            callback = self.client.get(
-                "/bot/config/oauth/callback",
-                params={"code": "abc", "state": state},
-            )
-
-        self.assertEqual(callback.status_code, 200)
         data = self.client.get(
             "/bot/config",
             headers={"X-Admin-Token": backend_app.ADMIN_TOKEN},
         ).json()
-        self.assertEqual(data["login"], "botuser")
         self.assertTrue(data["enabled"])
-        self.assertIn("chat:read", data["scopes"])
+        db = backend_app.SessionLocal()
+        try:
+            cfg = backend_app._get_bot_config(db)
+            self.assertEqual(cfg.access_token, "access")
+        finally:
+            db.close()
 
 
 if __name__ == "__main__":

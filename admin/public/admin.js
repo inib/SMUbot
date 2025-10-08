@@ -1,198 +1,671 @@
-const API = window.BACKEND_URL;
-let channelName = '';
-let userLogin = '';
-let userInfo = null;
+function resolveBackendBase(value) {
+  const fallback = 'http://localhost:7070';
+  if (!value) return fallback;
+  const trimmed = value.trim();
+  if (!trimmed) return fallback;
+  const httpLike = /^https?:\/\//i;
+  try {
+    if (trimmed.startsWith('/')) {
+      return new URL(trimmed, window.location.origin).toString().replace(/\/$/, '');
+    }
+    if (!httpLike.test(trimmed) && !trimmed.includes('://')) {
+      return new URL(`http://${trimmed}`, window.location.origin).toString().replace(/\/$/, '');
+    }
+    return new URL(trimmed, window.location.origin).toString().replace(/\/$/, '');
+  } catch (err) {
+    console.warn('invalid BACKEND_URL, falling back to default', err);
+    return fallback;
+  }
+}
 
-function qs(id) { return document.getElementById(id); }
+const API = resolveBackendBase(window.BACKEND_URL);
+const statusEl = document.getElementById('status');
+const channelListEl = document.getElementById('channel-list');
+const treeEl = document.getElementById('channel-tree');
+const botPanelEl = document.getElementById('bot-panel');
+const botGuardEl = document.getElementById('bot-guard');
+const botLoginBtn = document.getElementById('bot-login-btn');
+const botLogoutBtn = document.getElementById('bot-logout-btn');
+const botAuthorizeBtn = document.getElementById('bot-authorize-btn');
+const botOwnerEl = document.getElementById('bot-owner');
+const botAccountEl = document.getElementById('bot-account');
+const botExpiryEl = document.getElementById('bot-expiry');
+const botAlertEl = document.getElementById('bot-alert');
+const botAccountInput = document.getElementById('bot-account-login');
+const botEnabledInput = document.getElementById('bot-enabled');
+const botScopeList = document.getElementById('bot-scope-list');
+const botScopeResetBtn = document.getElementById('bot-scope-reset');
+const botScopeAddBtn = document.getElementById('bot-scope-add');
+const botScopeCustomInput = document.getElementById('bot-scope-custom');
+const botConsoleLog = document.getElementById('bot-console-log');
+const botConsoleClearBtn = document.getElementById('bot-console-clear');
+const botConsoleStatus = document.getElementById('bot-console-status');
 
-function updateLoginStatus() {
-  const bar = qs('login-status');
-  const avatar = qs('login-avatar');
-  const nameEl = qs('login-name');
-  const channelEl = qs('login-channel');
-  if (!bar || !avatar || !nameEl || !channelEl) { return; }
-  if (!userInfo || !userInfo.login) {
-    bar.style.display = 'none';
-    avatar.style.backgroundImage = '';
-    avatar.textContent = '';
-    nameEl.textContent = '';
-    channelEl.textContent = '';
+const songCache = new Map();
+const userCache = new Map();
+let currentUser = null;
+let currentBotConfig = null;
+let botConsoleSource = null;
+let botScopeCatalog = new Set();
+let suspendBotInputs = false;
+
+function setStatus(text, variant) {
+  if (!statusEl) return;
+  statusEl.textContent = text;
+  statusEl.classList.remove('ok', 'warn', 'error');
+  if (variant) {
+    statusEl.classList.add(variant);
+  }
+}
+
+async function fetchJson(path) {
+  const res = await fetch(`${API}${path}`);
+  if (!res.ok) {
+    throw new Error(`request failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+async function fetchChannelOAuth(name) {
+  try {
+    return await fetchJson(`/channels/${encodeURIComponent(name)}/oauth`);
+  } catch (err) {
+    console.error('failed to load oauth info for', name, err);
+    return null;
+  }
+}
+
+function renderChannelList(channels, oauthMap) {
+  channelListEl.innerHTML = '';
+  if (!channels.length) {
+    const empty = document.createElement('div');
+    empty.className = 'empty';
+    empty.textContent = 'No registered channels.';
+    channelListEl.appendChild(empty);
     return;
   }
-  const display = userInfo.display_name || userInfo.login;
-  nameEl.textContent = display;
-  const baseChannel = `@${userInfo.login}`;
-  if (channelName && channelName.toLowerCase() !== userInfo.login.toLowerCase()) {
-    channelEl.textContent = `${baseChannel} • managing: ${channelName}`;
-  } else {
-    channelEl.textContent = baseChannel;
+  channels.forEach(ch => {
+    const pill = document.createElement('div');
+    pill.className = 'channel-pill';
+    const link = document.createElement('a');
+    link.href = `https://twitch.tv/${ch.channel_name}`;
+    link.target = '_blank';
+    link.rel = 'noopener';
+    link.textContent = ch.channel_name;
+    pill.appendChild(link);
+
+    const oauth = oauthMap.get(ch.channel_name);
+    if (oauth) {
+      const badge = document.createElement('span');
+      badge.className = 'badge ' + (oauth.authorized ? 'ok' : 'warn');
+      if (oauth.authorized) {
+        const scopes = oauth.scopes && oauth.scopes.length ? oauth.scopes.join(', ') : 'connected';
+        badge.textContent = `oauth: ${scopes}`;
+      } else {
+        badge.textContent = 'oauth missing';
+      }
+      pill.appendChild(badge);
+    }
+
+    channelListEl.appendChild(pill);
+  });
+}
+
+async function getSong(channel, id) {
+  const key = `${channel.toLowerCase()}:${id}`;
+  if (!songCache.has(key)) {
+    const promise = fetchJson(`/channels/${encodeURIComponent(channel)}/songs/${id}`)
+      .catch(err => {
+        songCache.delete(key);
+        throw err;
+      });
+    songCache.set(key, promise);
   }
-  if (userInfo.profile_image_url) {
-    avatar.style.backgroundImage = `url("${userInfo.profile_image_url}")`;
-    avatar.textContent = '';
-  } else {
-    avatar.style.backgroundImage = '';
-    avatar.textContent = display ? display[0].toUpperCase() : '';
+  return songCache.get(key);
+}
+
+async function getUser(channel, id) {
+  const key = `${channel.toLowerCase()}:${id}`;
+  if (!userCache.has(key)) {
+    const promise = fetchJson(`/channels/${encodeURIComponent(channel)}/users/${id}`)
+      .catch(err => {
+        userCache.delete(key);
+        throw err;
+      });
+    userCache.set(key, promise);
   }
-  bar.style.display = '';
+  return userCache.get(key);
 }
 
-updateLoginStatus();
+function formatSettingKey(key) {
+  return key.replace(/_/g, ' ');
+}
 
-const logoutBtn = qs('logout-btn');
-if (logoutBtn) {
-  logoutBtn.onclick = async () => {
+function renderSettings(container, settings) {
+  if (!settings) {
+    const msg = document.createElement('div');
+    msg.className = 'empty';
+    msg.textContent = 'Settings unavailable.';
+    container.appendChild(msg);
+    return;
+  }
+  const grid = document.createElement('div');
+  grid.className = 'settings';
+  Object.entries(settings).forEach(([key, value]) => {
+    if (key === 'channel_id') return;
+    const item = document.createElement('div');
+    item.className = 'setting';
+    const label = document.createElement('span');
+    label.textContent = formatSettingKey(key);
+    const val = document.createElement('div');
+    val.textContent = value === null || value === undefined || value === '' ? '—' : value;
+    item.appendChild(label);
+    item.appendChild(val);
+    grid.appendChild(item);
+  });
+  if (!grid.children.length) {
+    const msg = document.createElement('div');
+    msg.className = 'empty';
+    msg.textContent = 'No custom settings.';
+    container.appendChild(msg);
+    return;
+  }
+  container.appendChild(grid);
+}
+
+function queueItemNode(entry) {
+  const { request, song, user } = entry;
+  const node = document.createElement('li');
+  node.className = 'queue-item';
+  const title = document.createElement('div');
+  title.className = 'title';
+  if (song) {
+    const artist = song.artist || '?';
+    const songTitle = song.title || '?';
+    title.textContent = `${artist} – ${songTitle}`;
+  } else {
+    title.textContent = `Song #${request.song_id}`;
+  }
+  const meta = document.createElement('div');
+  meta.className = 'meta';
+  const requester = user ? user.username : `User #${request.user_id}`;
+  const priority = request.is_priority ? ' • priority' : '';
+  meta.textContent = `requested by ${requester}${priority}`;
+  node.appendChild(title);
+  node.appendChild(meta);
+  return node;
+}
+
+async function enrichQueue(channel, items) {
+  const results = [];
+  for (const request of items) {
     try {
-      await fetch(`${API}/auth/logout`, { method: 'POST', credentials: 'include' });
-    } catch (e) {
-      console.error('Failed to log out', e);
-    } finally {
-      userInfo = null;
-      userLogin = '';
-      channelName = '';
-      updateLoginStatus();
-      location.reload();
+      const [song, user] = await Promise.all([
+        getSong(channel, request.song_id),
+        getUser(channel, request.user_id),
+      ]);
+      results.push({ request, song, user });
+    } catch (err) {
+      console.error('failed to expand queue item', channel, request.id, err);
+      results.push({ request, song: null, user: null });
     }
-  };
+  }
+  return results;
 }
 
-const logoutPermBtn = qs('logout-perm-btn');
-if (logoutPermBtn) {
-  logoutPermBtn.onclick = async () => {
-    if (!confirm('This will remove your stored OAuth access and channel configuration. Continue?')) {
-      return;
-    }
+async function renderStreams(container, channel, streams) {
+  container.className = 'stream-details';
+  if (!streams || !streams.length) {
+    const msg = document.createElement('div');
+    msg.className = 'empty';
+    msg.textContent = 'No active streams.';
+    container.appendChild(msg);
+    return;
+  }
+  for (const stream of streams) {
+    const block = document.createElement('details');
+    block.open = true;
+    const summary = document.createElement('summary');
+    summary.className = 'stream-summary';
+    const started = new Date(stream.started_at);
+    summary.textContent = `Stream #${stream.id} • started ${started.toLocaleString()}`;
+    block.appendChild(summary);
+
+    let queue = [];
     try {
-      await fetch(`${API}/auth/session`, { method: 'DELETE', credentials: 'include' });
-    } catch (e) {
-      console.error('Failed to remove account session', e);
-    } finally {
-      userInfo = null;
-      userLogin = '';
-      channelName = '';
-      updateLoginStatus();
-      location.reload();
+      const raw = await fetchJson(`/channels/${encodeURIComponent(channel)}/streams/${stream.id}/queue`);
+      queue = raw.filter(item => !item.played);
+    } catch (err) {
+      console.error('failed to load queue for stream', channel, stream.id, err);
+      const errorMsg = document.createElement('div');
+      errorMsg.className = 'error';
+      errorMsg.textContent = 'Unable to load queue for this stream.';
+      block.appendChild(errorMsg);
+      container.appendChild(block);
+      continue;
     }
+
+    if (!queue.length) {
+      const empty = document.createElement('div');
+      empty.className = 'empty';
+      empty.textContent = 'No songs currently queued.';
+      block.appendChild(empty);
+      container.appendChild(block);
+      continue;
+    }
+
+    const expanded = await enrichQueue(channel, queue);
+    const list = document.createElement('ul');
+    list.className = 'queue-list';
+    expanded.forEach(entry => list.appendChild(queueItemNode(entry)));
+    block.appendChild(list);
+    container.appendChild(block);
+  }
+}
+
+async function renderChannelTree(channels, oauthMap) {
+  treeEl.innerHTML = '';
+  if (!channels.length) {
+    const empty = document.createElement('div');
+    empty.className = 'empty';
+    empty.textContent = 'No registered channels.';
+    treeEl.appendChild(empty);
+    return;
+  }
+
+  for (const ch of channels) {
+    const details = document.createElement('details');
+    details.open = true;
+    const summary = document.createElement('summary');
+    const main = document.createElement('div');
+    main.className = 'summary-main';
+    const link = document.createElement('a');
+    link.href = `https://twitch.tv/${ch.channel_name}`;
+    link.target = '_blank';
+    link.rel = 'noopener';
+    link.textContent = ch.channel_name;
+    main.appendChild(link);
+    const oauth = oauthMap.get(ch.channel_name);
+    if (oauth) {
+      const badge = document.createElement('span');
+      badge.className = 'badge ' + (oauth.authorized ? 'ok' : 'warn');
+      if (oauth.authorized) {
+        const scopes = oauth.scopes && oauth.scopes.length ? oauth.scopes.join(', ') : 'connected';
+        badge.textContent = `oauth: ${scopes}`;
+      } else {
+        badge.textContent = 'oauth missing';
+      }
+      main.appendChild(badge);
+    }
+    summary.appendChild(main);
+    const meta = document.createElement('div');
+    meta.className = 'summary-meta';
+    const ownerInfo = oauth && oauth.owner_login ? ` • owner: ${oauth.owner_login}` : '';
+    meta.textContent = `join active: ${ch.join_active ? 'yes' : 'no'} • channel id: ${ch.channel_id}${ownerInfo}`;
+    summary.appendChild(meta);
+    details.appendChild(summary);
+
+    const settingsWrapper = document.createElement('div');
+    const settingsTitle = document.createElement('h3');
+    settingsTitle.textContent = 'Custom Settings';
+    details.appendChild(settingsTitle);
+    details.appendChild(settingsWrapper);
+
+    let settings = null;
+    try {
+      settings = await fetchJson(`/channels/${encodeURIComponent(ch.channel_name)}/settings`);
+    } catch (err) {
+      console.error('failed to load settings for', ch.channel_name, err);
+    }
+    renderSettings(settingsWrapper, settings);
+
+    const streamTitle = document.createElement('h3');
+    streamTitle.textContent = 'Active Streams';
+    details.appendChild(streamTitle);
+    const streamContainer = document.createElement('div');
+    details.appendChild(streamContainer);
+
+    let streams = [];
+    try {
+      const raw = await fetchJson(`/channels/${encodeURIComponent(ch.channel_name)}/streams`);
+      streams = raw.filter(row => !row.ended_at);
+    } catch (err) {
+      console.error('failed to load streams for', ch.channel_name, err);
+    }
+    await renderStreams(streamContainer, ch.channel_name, streams);
+
+    treeEl.appendChild(details);
+  }
+}
+
+function showBotAlert(message, variant = 'info') {
+  if (!botAlertEl) return;
+  if (!message) {
+    botAlertEl.textContent = '';
+    botAlertEl.className = 'bot-alert';
+    botAlertEl.hidden = true;
+    return;
+  }
+  botAlertEl.textContent = message;
+  botAlertEl.className = `bot-alert ${variant}`;
+  botAlertEl.hidden = false;
+}
+
+function getDefaultBotScopes() {
+  const configured = (window.BOT_APP_SCOPES || '')
+    .split(/\s+/)
+    .map(scope => scope.trim())
+    .filter(Boolean);
+  const base = ['user:read:chat', 'user:write:chat', 'user:bot'];
+  const unique = new Set([...base, ...configured]);
+  return Array.from(unique);
+}
+
+function ensureScopeCatalog(scopes) {
+  if (!(botScopeCatalog instanceof Set)) {
+    botScopeCatalog = new Set();
+  }
+  getDefaultBotScopes().forEach(scope => botScopeCatalog.add(scope));
+  (scopes || []).forEach(scope => {
+    if (scope) {
+      botScopeCatalog.add(scope);
+    }
+  });
+}
+
+function renderBotScopes(selected, options = {}) {
+  if (!botScopeList) return;
+  const disabled = Boolean(options.disabled);
+  const selectedSet = new Set((selected || []).map(scope => scope.trim()).filter(Boolean));
+  const scopes = Array.from(botScopeCatalog).sort((a, b) => a.localeCompare(b));
+  botScopeList.innerHTML = '';
+  scopes.forEach(scope => {
+    const label = document.createElement('label');
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.value = scope;
+    input.checked = selectedSet.has(scope);
+    input.disabled = disabled;
+    input.addEventListener('change', () => {
+      if (suspendBotInputs) return;
+      handleScopeChange();
+    });
+    const span = document.createElement('span');
+    span.textContent = scope;
+    label.appendChild(input);
+    label.appendChild(span);
+    botScopeList.appendChild(label);
+  });
+}
+
+function collectSelectedScopes() {
+  if (!botScopeList) return [];
+  const result = [];
+  botScopeList.querySelectorAll('input[type="checkbox"]').forEach(input => {
+    if (input.checked) {
+      result.push(input.value.trim());
+    }
+  });
+  return result;
+}
+
+function setBotConsoleStatus(text, variant) {
+  if (!botConsoleStatus) return;
+  botConsoleStatus.textContent = text;
+  botConsoleStatus.className = 'badge' + (variant ? ` ${variant}` : '');
+}
+
+function formatDateTime(value) {
+  if (!value) return '—';
+  try {
+    const date = value instanceof Date ? value : new Date(value);
+    if (Number.isNaN(date.getTime())) return '—';
+    return date.toLocaleString();
+  } catch (err) {
+    return '—';
+  }
+}
+
+function formatTimeLabel(value) {
+  if (!value) return new Date().toLocaleTimeString();
+  try {
+    const date = value instanceof Date ? value : new Date(value);
+    if (Number.isNaN(date.getTime())) return new Date().toLocaleTimeString();
+    return date.toLocaleTimeString([], { hour12: false });
+  } catch (err) {
+    return new Date().toLocaleTimeString();
+  }
+}
+
+function appendConsoleEntry(event) {
+  if (!botConsoleLog) return;
+  const level = (event.level || 'info').toLowerCase();
+  const row = document.createElement('div');
+  row.className = `console-entry level-${level}`;
+
+  const timeEl = document.createElement('div');
+  timeEl.className = 'time';
+  timeEl.textContent = formatTimeLabel(event.timestamp);
+  row.appendChild(timeEl);
+
+  const levelEl = document.createElement('div');
+  levelEl.className = 'level';
+  levelEl.textContent = level.toUpperCase();
+  row.appendChild(levelEl);
+
+  const messageEl = document.createElement('div');
+  messageEl.className = 'message';
+  messageEl.textContent = event.message || '';
+  row.appendChild(messageEl);
+
+  const sourceEl = document.createElement('div');
+  sourceEl.className = 'source';
+  sourceEl.textContent = event.source || '';
+  row.appendChild(sourceEl);
+
+  botConsoleLog.appendChild(row);
+  while (botConsoleLog.children.length > 200) {
+    botConsoleLog.removeChild(botConsoleLog.firstChild);
+  }
+  botConsoleLog.scrollTop = botConsoleLog.scrollHeight;
+}
+
+function clearBotConsole() {
+  if (!botConsoleLog) return;
+  botConsoleLog.innerHTML = '';
+  if (botConsoleSource) {
+    setBotConsoleStatus('status: connected', 'ok');
+  } else {
+    setBotConsoleStatus('status: idle');
+  }
+}
+
+function disconnectBotConsole() {
+  if (botConsoleSource) {
+    try {
+      botConsoleSource.close();
+    } catch (err) {
+      // ignore
+    }
+    botConsoleSource = null;
+  }
+  setBotConsoleStatus('status: idle');
+}
+
+function connectBotConsole() {
+  if (!currentUser || botConsoleSource || !botConsoleLog) {
+    return;
+  }
+  setBotConsoleStatus('status: connecting…');
+  try {
+    botConsoleSource = new EventSource(`${API}/bot/logs/stream`, { withCredentials: true });
+  } catch (err) {
+    console.error('failed to open console stream', err);
+    setBotConsoleStatus('status: error', 'error');
+    return;
+  }
+  botConsoleSource.onopen = () => {
+    setBotConsoleStatus('status: connected', 'ok');
   };
-}
-
-function showTab(name) {
-  ['queue', 'users', 'settings'].forEach(t => {
-    qs(t+'-view').style.display = (t===name) ? '' : 'none';
-    qs('tab-'+t).classList.toggle('active', t===name);
+  botConsoleSource.onerror = () => {
+    setBotConsoleStatus('status: disconnected', 'warn');
+  };
+  botConsoleSource.addEventListener('log', event => {
+    if (!event.data) return;
+    try {
+      const payload = JSON.parse(event.data);
+      if (payload.type === 'ready') {
+        setBotConsoleStatus('status: connected', 'ok');
+        return;
+      }
+      appendConsoleEntry(payload);
+    } catch (err) {
+      console.error('failed to parse console event', err);
+    }
   });
 }
 
-qs('tab-queue').onclick = () => showTab('queue');
-qs('tab-users').onclick = () => showTab('users');
-qs('tab-settings').onclick = () => showTab('settings');
-
-// ===== Queue functions =====
-async function fetchQueue() {
-  const resp = await fetch(`${API}/admin/queue`, { credentials: 'include' });
-  if (!resp.ok) { return; }
-  const data = await resp.json();
-  const q = qs('queue');
-  q.innerHTML = '';
-  data.forEach(item => {
-    const row = document.createElement('div');
-    row.className = 'req';
-    row.innerHTML = `<span class="title">${item.artist} - ${item.title}</span>
-      <span class="ctrl">
-        <button onclick="moveReq(${item.id}, -1)">⬆️</button>
-        <button onclick="moveReq(${item.id}, 1)">⬇️</button>
-        <button onclick="bumpReq(${item.id})">⭐</button>
-        <button onclick="skipReq(${item.id})">⏭</button>
-        <button onclick="markPlayed(${item.id})">✔️</button>
-      </span>`;
-    q.appendChild(row);
-  });
+function updateBotAuthUI() {
+  const loggedIn = Boolean(currentUser);
+  if (botPanelEl) {
+    botPanelEl.hidden = !loggedIn;
+  }
+  if (botGuardEl) {
+    botGuardEl.hidden = loggedIn;
+  }
+  if (botLoginBtn) {
+    botLoginBtn.hidden = loggedIn;
+  }
+  if (botLogoutBtn) {
+    botLogoutBtn.hidden = !loggedIn;
+  }
+  if (botAuthorizeBtn) {
+    botAuthorizeBtn.disabled = !loggedIn;
+  }
+  if (botOwnerEl) {
+    if (!loggedIn || !currentUser) {
+      botOwnerEl.textContent = '—';
+    } else {
+      botOwnerEl.textContent = currentUser.display_name || currentUser.login || '—';
+    }
+  }
 }
 
-async function moveReq(id, dir) {
-  await fetch(`${API}/admin/queue/${id}/move`, {
-    method: 'POST',
-    body: JSON.stringify({ dir }),
-    headers: { 'Content-Type': 'application/json' },
-    credentials: 'include'
-  });
-  fetchQueue();
+function applyBotConfig(config) {
+  currentBotConfig = config;
+  const hasConfig = Boolean(config);
+  const scopes = hasConfig && Array.isArray(config.scopes) ? config.scopes : getDefaultBotScopes();
+  ensureScopeCatalog(scopes);
+  suspendBotInputs = true;
+  try {
+    if (botAccountInput) {
+      botAccountInput.disabled = !hasConfig;
+      botAccountInput.value = hasConfig ? (config.login || '') : '';
+    }
+    if (botEnabledInput) {
+      botEnabledInput.disabled = !hasConfig;
+      botEnabledInput.checked = Boolean(hasConfig && config.enabled);
+    }
+    renderBotScopes(scopes, { disabled: !hasConfig });
+    if (botScopeAddBtn) {
+      botScopeAddBtn.disabled = !hasConfig;
+    }
+    if (botScopeCustomInput) {
+      botScopeCustomInput.disabled = !hasConfig;
+    }
+    if (botScopeResetBtn) {
+      botScopeResetBtn.disabled = !hasConfig;
+    }
+  } finally {
+    suspendBotInputs = false;
+  }
+  if (botAccountEl) {
+    if (!hasConfig || !config.login) {
+      botAccountEl.textContent = 'Not connected';
+    } else {
+      const display = config.display_name && config.display_name !== config.login
+        ? `${config.display_name} (${config.login})`
+        : (config.display_name || config.login);
+      botAccountEl.textContent = display || 'Not connected';
+    }
+  }
+  if (botExpiryEl) {
+    botExpiryEl.textContent = hasConfig && config.expires_at ? formatDateTime(config.expires_at) : '—';
+  }
+  if (botAuthorizeBtn) {
+    botAuthorizeBtn.textContent = hasConfig && config && config.expires_at
+      ? 'Refresh Bot Token'
+      : 'Generate Bot Token';
+  }
 }
 
-async function bumpReq(id) {
-  await fetch(`${API}/admin/queue/${id}/bump`, { method: 'POST', credentials: 'include' });
-  fetchQueue();
+async function loadBotConfig() {
+  if (!currentUser) {
+    applyBotConfig(null);
+    return;
+  }
+  try {
+    const response = await fetch(`${API}/bot/config`, { credentials: 'include' });
+    if (!response.ok) {
+      throw new Error(`status ${response.status}`);
+    }
+    const data = await response.json();
+    applyBotConfig(data);
+  } catch (err) {
+    console.error('failed to load bot config', err);
+    applyBotConfig(null);
+    showBotAlert('Unable to load bot configuration. Check your permissions and try again.', 'error');
+  }
 }
 
-async function skipReq(id) {
-  await fetch(`${API}/admin/queue/${id}/skip`, { method: 'POST', credentials: 'include' });
-  fetchQueue();
+async function updateBotConfig(patch) {
+  if (!currentUser) return;
+  const previous = currentBotConfig;
+  try {
+    const response = await fetch(`${API}/bot/config`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify(patch),
+    });
+    if (!response.ok) {
+      throw new Error(`status ${response.status}`);
+    }
+    const data = await response.json();
+    applyBotConfig(data);
+    showBotAlert('', 'info');
+  } catch (err) {
+    console.error('failed to update bot config', err);
+    showBotAlert('Failed to update bot settings. Please try again.', 'error');
+    if (previous) {
+      applyBotConfig(previous);
+    }
+  }
 }
 
-async function markPlayed(id) {
-  await fetch(`${API}/admin/queue/${id}/played`, { method: 'POST', credentials: 'include' });
-  fetchQueue();
+function handleScopeChange() {
+  if (!currentUser) return;
+  const scopes = collectSelectedScopes();
+  updateBotConfig({ scopes });
 }
 
-qs('archive-btn').onclick = () => fetch(`${API}/channels/${channelName}/streams/archive`, { method: 'POST', credentials: 'include' });
-qs('mute-btn').onclick = () => fetch(`${API}/channels/${channelName}/settings`, {
-  method: 'POST',
-  body: JSON.stringify({ queue_closed: 1 }),
-  headers: { 'Content-Type': 'application/json' },
-  credentials: 'include'
-});
-
-// ===== Users view =====
-async function fetchUsers() {
-  const resp = await fetch(`${API}/channels/${channelName}/users`, { credentials: 'include' });
-  if (!resp.ok) { return; }
-  const data = await resp.json();
-  const u = qs('users');
-  u.innerHTML = '';
-  data.forEach(user => {
-    const row = document.createElement('div');
-    row.className = 'req';
-    row.innerHTML = `<span>${user.username} (${user.prio_points})</span>
-      <span class="ctrl"><button onclick="modPoints(${user.id},1)">+1</button><button onclick="modPoints(${user.id},-1)">-1</button></span>`;
-    u.appendChild(row);
-  });
-}
-async function modPoints(uid, delta) {
-  await fetch(`${API}/channels/${channelName}/users/${uid}/prio`, {
-    method: 'POST',
-    body: JSON.stringify({ delta }),
-    headers: { 'Content-Type': 'application/json' },
-    credentials: 'include'
-  });
-  fetchUsers();
+function addCustomScope() {
+  if (!botScopeCustomInput || !currentUser) return;
+  const scope = botScopeCustomInput.value.trim();
+  if (!scope) return;
+  botScopeCustomInput.value = '';
+  botScopeCatalog.add(scope);
+  const selected = new Set(collectSelectedScopes());
+  selected.add(scope);
+  renderBotScopes(Array.from(selected));
+  updateBotConfig({ scopes: Array.from(selected) });
 }
 
-// ===== Settings view =====
-async function fetchSettings() {
-  const resp = await fetch(`${API}/channels/${channelName}/settings`, { credentials: 'include' });
-  if (!resp.ok) { return; }
-  const data = await resp.json();
-  const s = qs('settings');
-  s.innerHTML = '';
-  Object.entries(data).forEach(([k,v])=>{
-    const row = document.createElement('div');
-    row.className = 'req';
-    row.innerHTML = `<label>${k}<input value="${v}" onchange="updateSetting('${k}', this.value)"/></label>`;
-    s.appendChild(row);
-  });
-}
-async function updateSetting(key, value) {
-  await fetch(`${API}/channels/${channelName}/settings`, {
-    method: 'POST',
-    body: JSON.stringify({ [key]: value }),
-    headers: { 'Content-Type': 'application/json' },
-    credentials: 'include'
-  });
-}
-
-// ===== Landing page & login =====
 function buildLoginScopes() {
-  const configured = (window.TWITCH_SCOPES || '').split(/\s+/).filter(Boolean);
+  const configured = (window.TWITCH_SCOPES || '')
+    .split(/\s+/)
+    .map(scope => scope.trim())
+    .filter(Boolean);
   const scopes = configured.length ? configured : ['chat:read', 'chat:edit', 'channel:bot'];
   if (!scopes.includes('user:read:email')) {
     scopes.push('user:read:email');
@@ -200,132 +673,185 @@ function buildLoginScopes() {
   return scopes;
 }
 
-qs('login-btn').onclick = () => {
+function startOwnerLogin() {
   const client = window.TWITCH_CLIENT_ID || '';
   if (!client) {
     alert('Twitch OAuth is not configured.');
     return;
   }
+  const redirect = new URL(window.location.href);
+  redirect.hash = '';
   const scopes = buildLoginScopes();
-  const redirectUri = encodeURIComponent(window.location.href.split('#')[0]);
   const scopeParam = encodeURIComponent(scopes.join(' '));
-  const url = `https://id.twitch.tv/oauth2/authorize?response_type=token&client_id=${client}&redirect_uri=${redirectUri}&scope=${scopeParam}&force_verify=true`;
-  location.href = url;
-};
+  const url = `https://id.twitch.tv/oauth2/authorize?response_type=token&client_id=${encodeURIComponent(client)}`
+    + `&redirect_uri=${encodeURIComponent(redirect.toString())}&scope=${scopeParam}&force_verify=true`;
+  window.location.href = url;
+}
 
-async function updateRegButton() {
-  const btn = qs('reg-btn');
-  if (!userLogin) { btn.style.display = 'none'; return; }
+async function handleAuthHash() {
+  if (!window.location.hash.startsWith('#access_token')) {
+    return;
+  }
+  const params = new URLSearchParams(window.location.hash.slice(1));
+  const token = params.get('access_token');
+  history.replaceState({}, document.title, window.location.pathname + window.location.search);
+  if (!token) return;
   try {
-    const resp = await fetch(`${API}/channels`, { credentials: 'include' });
-    if (!resp.ok) { btn.style.display = 'none'; return; }
-    const list = await resp.json();
-    const found = list.find(ch => ch.channel_name.toLowerCase() === userLogin.toLowerCase());
-    if (found) {
-      btn.textContent = 'unregister your channel';
-      btn.onclick = async () => {
-        await fetch(`${API}/channels/${userLogin}`, {method:'DELETE', credentials: 'include'});
-        location.reload();
-      };
+    await fetch(`${API}/auth/session`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+      credentials: 'include',
+    });
+  } catch (err) {
+    console.error('failed to establish admin session', err);
+    showBotAlert('Failed to establish session with Twitch. Please try again.', 'error');
+  }
+}
+
+async function refreshCurrentUser() {
+  try {
+    const response = await fetch(`${API}/me`, { credentials: 'include' });
+    if (response.ok) {
+      currentUser = await response.json();
     } else {
-      btn.textContent = 'register your channel';
-      btn.onclick = async () => {
-        const returnUrl = window.location.href.split('#')[0];
-        try {
-          const resp = await fetch(
-            `${API}/auth/login?channel=${encodeURIComponent(userLogin)}&return_url=${encodeURIComponent(returnUrl)}`
-          );
-          if (!resp.ok) {
-            throw new Error(`failed with status ${resp.status}`);
-          }
-          const data = await resp.json();
-          if (!data || !data.auth_url) {
-            throw new Error('missing auth URL');
-          }
-          location.href = data.auth_url;
-        } catch (e) {
-          console.error('Failed to start channel registration', e);
-          alert('Failed to start the channel registration flow. Please try again.');
-        }
-      };
+      currentUser = null;
     }
-    btn.style.display = '';
-  } catch (e) {
-    btn.style.display = 'none';
+  } catch (err) {
+    currentUser = null;
+  }
+  updateBotAuthUI();
+  if (currentUser) {
+    await loadBotConfig();
+    connectBotConsole();
+  } else {
+    applyBotConfig(null);
+    disconnectBotConsole();
   }
 }
 
-function selectChannel(ch) {
-  channelName = ch;
-  qs('ch-badge').textContent = `channel: ${channelName}`;
-  updateLoginStatus();
-  qs('landing').style.display = 'none';
-  qs('app').style.display = '';
-  fetchQueue();
-  fetchUsers();
-  fetchSettings();
-}
-
-async function initToken() {
-  if (location.hash.startsWith('#access_token')) {
-    const params = new URLSearchParams(location.hash.slice(1));
-    const oauthToken = params.get('access_token');
-    history.replaceState({}, document.title, location.pathname);
-    if (oauthToken) {
-      try {
-        await fetch(`${API}/auth/session`, {
-          method: 'POST',
-          headers: { Authorization: `Bearer ${oauthToken}` },
-          credentials: 'include'
-        });
-      } catch (e) {
-        console.error('Failed to establish admin session', e);
-      }
-    }
-  }
-
+async function startBotOAuthFlow() {
+  if (!currentUser || !botAuthorizeBtn) return;
+  botAuthorizeBtn.disabled = true;
   try {
-    const meResp = await fetch(`${API}/me`, { credentials: 'include' });
-    if (meResp.ok) {
-      const info = await meResp.json();
-      userLogin = info.login || '';
-      userInfo = info;
-      updateLoginStatus();
-      updateRegButton();
-    } else {
-      userLogin = '';
-      userInfo = null;
-      updateLoginStatus();
+    const response = await fetch(`${API}/bot/config/oauth`, {
+      method: 'POST',
+      credentials: 'include',
+    });
+    if (!response.ok) {
+      throw new Error(`status ${response.status}`);
     }
-  } catch (e) {
-    // ignore
-    userInfo = null;
-    updateLoginStatus();
-  }
-
-  try {
-    const channelsResp = await fetch(`${API}/me/channels`, { credentials: 'include' });
-    if (channelsResp.ok) {
-      const list = await channelsResp.json();
-      if (list.length === 1) {
-        selectChannel(list[0].channel_name);
-      } else if (list.length > 1) {
-        const container = qs('channel-list');
-        container.innerHTML = '';
-        list.forEach(c => {
-          const b = document.createElement('button');
-          b.textContent = c.channel_name;
-          b.onclick = () => selectChannel(c.channel_name);
-          container.appendChild(b);
-        });
-      } else {
-        qs('landing').style.display = 'none';
-        qs('app').style.display = '';
-      }
+    const data = await response.json();
+    applyBotConfig(data);
+    showBotAlert('Bot app access token generated.', 'info');
+  } catch (err) {
+    console.error('failed to start bot oauth', err);
+    showBotAlert('Failed to generate the bot token. Please try again.', 'error');
+  } finally {
+    if (botAuthorizeBtn) {
+      botAuthorizeBtn.disabled = !currentUser;
     }
-  } catch (e) {
-    // ignore
   }
 }
 
-initToken();
+async function logoutOwner() {
+  try {
+    await fetch(`${API}/auth/logout`, { method: 'POST', credentials: 'include' });
+  } catch (err) {
+    console.error('failed to log out', err);
+  } finally {
+    currentUser = null;
+    updateBotAuthUI();
+    applyBotConfig(null);
+    disconnectBotConsole();
+    clearBotConsole();
+    showBotAlert('');
+  }
+}
+
+async function initBotControls() {
+  if (!botPanelEl || !botGuardEl) return;
+  botScopeCatalog = new Set(getDefaultBotScopes());
+  renderBotScopes(getDefaultBotScopes(), { disabled: true });
+
+  if (botLoginBtn) {
+    botLoginBtn.addEventListener('click', startOwnerLogin);
+  }
+  if (botLogoutBtn) {
+    botLogoutBtn.addEventListener('click', logoutOwner);
+  }
+  if (botAuthorizeBtn) {
+    botAuthorizeBtn.addEventListener('click', startBotOAuthFlow);
+  }
+  if (botAccountInput) {
+    botAccountInput.addEventListener('change', () => {
+      if (suspendBotInputs || !currentUser) return;
+      const value = botAccountInput.value.trim();
+      updateBotConfig({ login: value, display_name: value });
+    });
+  }
+  if (botEnabledInput) {
+    botEnabledInput.addEventListener('change', () => {
+      if (suspendBotInputs || !currentUser) return;
+      updateBotConfig({ enabled: Boolean(botEnabledInput.checked) });
+    });
+  }
+  if (botScopeResetBtn) {
+    botScopeResetBtn.addEventListener('click', () => {
+      if (!currentUser) return;
+      const defaults = getDefaultBotScopes();
+      botScopeCatalog = new Set(defaults);
+      renderBotScopes(defaults);
+      updateBotConfig({ scopes: defaults });
+    });
+  }
+  if (botScopeAddBtn) {
+    botScopeAddBtn.addEventListener('click', addCustomScope);
+  }
+  if (botScopeCustomInput) {
+    botScopeCustomInput.addEventListener('keydown', event => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        addCustomScope();
+      }
+    });
+  }
+  if (botConsoleClearBtn) {
+    botConsoleClearBtn.addEventListener('click', clearBotConsole);
+  }
+
+  await handleAuthHash();
+  await refreshCurrentUser();
+}
+
+async function init() {
+  setStatus('status: loading…');
+  try {
+    const channels = await fetchJson('/channels');
+    channels.sort((a, b) => a.channel_name.localeCompare(b.channel_name));
+    const oauthEntries = await Promise.all(channels.map(ch => fetchChannelOAuth(ch.channel_name)));
+    const oauthMap = new Map();
+    oauthEntries.forEach((info, idx) => {
+      if (info) {
+        oauthMap.set(channels[idx].channel_name, info);
+      }
+    });
+    renderChannelList(channels, oauthMap);
+    await renderChannelTree(channels, oauthMap);
+    setStatus('status: ok', 'ok');
+  } catch (err) {
+    console.error('failed to load channel data', err);
+    setStatus('status: error', 'error');
+    treeEl.innerHTML = '';
+    const error = document.createElement('div');
+    error.className = 'error';
+    error.textContent = 'Unable to load statistics from the backend.';
+    treeEl.appendChild(error);
+  }
+}
+
+window.addEventListener('DOMContentLoaded', () => {
+  init();
+  initBotControls().catch(err => {
+    console.error('failed to initialize bot controls', err);
+  });
+});

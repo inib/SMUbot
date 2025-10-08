@@ -44,6 +44,21 @@ services:
     restart: unless-stopped
     volumes:
       - ./web:/web
+  queue_manager:
+    build:
+      context: .
+      dockerfile: queue_manager/Dockerfile
+    container_name: songqueue-queue-manager
+    environment:
+      BACKEND_URL: ${BACKEND_URL:-http://api:7070}
+      TWITCH_CLIENT_ID: ${TWITCH_CLIENT_ID}
+    env_file:
+      - stack.env
+    ports:
+      - "${QUEUE_MANAGER_PORT:-7100}:80"
+    restart: unless-stopped
+    volumes:
+      - ./queue_manager:/queue_manager
   admin:
     build:
       context: .
@@ -51,25 +66,10 @@ services:
     container_name: songqueue-admin
     environment:
       BACKEND_URL: ${BACKEND_URL:-http://api:7070}
-      TWITCH_CLIENT_ID: ${TWITCH_CLIENT_ID}
     env_file:
       - stack.env
     ports:
-      - "${ADMIN_PORT:-7100}:80"
+      - "${ADMIN_PORT:-7171}:80"
     restart: unless-stopped
     volumes:
       - ./admin:/admin
-  stats:
-    build:
-      context: .
-      dockerfile: stats/Dockerfile
-    container_name: songqueue-stats
-    environment:
-      BACKEND_URL: ${BACKEND_URL:-http://api:7070}
-    env_file:
-      - stack.env
-    ports:
-      - "${STATS_PORT:-7171}:80"
-    restart: unless-stopped
-    volumes:
-      - ./stats:/stats

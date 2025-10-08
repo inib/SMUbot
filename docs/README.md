@@ -9,8 +9,8 @@ Songbot is a Twitch song request platform composed of three main parts:
 
 Additional directories include:
 
-- **cs_admin/** – a C# admin application.
-- **html/** – static HTML assets.
+- **queue_manager/** – static assets served by the channel-facing Queue Manager UI.
+- **admin/** – static assets for the Admin control panel used to manage the shared bot account and view channel stats.
 - **data/** – persistent SQLite database storage.
 
 ## Running with Docker
@@ -47,16 +47,24 @@ Additional directories include:
 The web container hosts files in `web/public/`, including a simple `index.html`, `app.js`, and `style.css` for viewing the queue.
 
 ## Authentication & Channel Access
-Songbot now integrates with Twitch OAuth. Channel owners must authenticate via the
-`/auth/login` endpoint to grant the bot the required scopes (including `channel:bot`).
-Once authenticated, the bot is allowed to join the channel and an EventSub
-subscription for `channel.chat.message` is created using an App Access Token.
-This registration is required for Twitch to recognize the bot as a verified chat bot.
-The backend only creates channel records during this OAuth handshake, ensuring the
-bot joins channels explicitly approved through the admin panel.
-Owners can invite other moderators by registering their Twitch accounts, and
-authenticated users who manage multiple channels can switch between them using
-`/me/channels`.
+Songbot relies on two distinct OAuth flows that map to the two management panels:
+
+1. **Bot account authorization (Admin panel)** – The Admin control panel triggers a
+   client credentials grant using the scopes `user:read:chat user:write:chat user:bot`.
+   The resulting app access token is stored through `/bot/config` and allows the
+   backend and bot worker to act as the shared bot account when calling the API.
+   Because this panel is meant for internal use, it is typically protected outside
+   of the application stack (for example via HTTP basic auth).
+
+2. **Channel authorization (Queue Manager)** – Channel owners sign in through the
+   Queue Manager UI and complete the authorization code grant with the
+   `channel:bot` scope. The backend records the channel during this handshake and
+   subscribes to chat events using the previously obtained app access token. Only
+   channels that complete this flow are joined by the bot.
+
+Owners can invite moderators by adding their Twitch accounts inside the Queue
+Manager, and authenticated users who manage multiple channels can switch between
+them via `/me/channels`.
 
 ## Development Tips
 - Install Python dependencies from `requirements.txt` for local development.
