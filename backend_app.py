@@ -51,6 +51,7 @@ ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "change-me")
 TWITCH_CLIENT_ID = os.getenv("TWITCH_CLIENT_ID")
 TWITCH_CLIENT_SECRET = os.getenv("TWITCH_CLIENT_SECRET")
 TWITCH_REDIRECT_URI = os.getenv("TWITCH_REDIRECT_URI")
+BOT_TWITCH_REDIRECT_URI = os.getenv("BOT_TWITCH_REDIRECT_URI")
 TWITCH_SCOPES = os.getenv("TWITCH_SCOPES", "channel:bot").split()
 TWITCH_EVENTSUB_CALLBACK = os.getenv("TWITCH_EVENTSUB_CALLBACK", "http://localhost:8000/eventsub/callback")
 TWITCH_EVENTSUB_SECRET = os.getenv("TWITCH_EVENTSUB_SECRET", "change-me")
@@ -640,6 +641,12 @@ def _normalize_return_url(value: Optional[str]) -> Optional[str]:
     return urlunparse(sanitized)
 
 
+def _bot_redirect_uri(request: FastAPIRequest) -> str:
+    if BOT_TWITCH_REDIRECT_URI:
+        return BOT_TWITCH_REDIRECT_URI
+    return str(request.url_for("bot_oauth_callback"))
+
+
 def _cleanup_bot_oauth_states() -> None:
     cutoff = time.time() - 600
     stale = [key for key, meta in _bot_oauth_states.items() if meta.get("created_at", 0) < cutoff]
@@ -1131,7 +1138,7 @@ def bot_oauth_start(
             scopes.append(scope_value)
     if not scopes:
         scopes = BOT_APP_SCOPES[:]
-    redirect_uri = TWITCH_REDIRECT_URI or str(request.url_for("bot_oauth_callback"))
+    redirect_uri = _bot_redirect_uri(request)
     nonce = secrets.token_urlsafe(24)
     _cleanup_bot_oauth_states()
     return_url = _normalize_return_url(payload.return_url) if payload else None
@@ -1180,7 +1187,7 @@ def bot_oauth_callback(
             raise HTTPException(status_code=400, detail="state expired or invalid")
         redirect_url = pending.get("return_url") if pending else None
         expected_scopes = pending.get("scopes") or BOT_APP_SCOPES
-        redirect_uri = TWITCH_REDIRECT_URI or str(request.url_for("bot_oauth_callback"))
+        redirect_uri = _bot_redirect_uri(request)
         try:
             token_response = requests.post(
                 "https://id.twitch.tv/oauth2/token",

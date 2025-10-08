@@ -20,6 +20,7 @@ class BotConfigApiTests(unittest.TestCase):
         self._client_id = backend_app.TWITCH_CLIENT_ID
         self._client_secret = backend_app.TWITCH_CLIENT_SECRET
         self._redirect_uri = backend_app.TWITCH_REDIRECT_URI
+        self._bot_redirect_uri = backend_app.BOT_TWITCH_REDIRECT_URI
         self._bot_nick = backend_app.BOT_NICK
         self._bot_user_id = backend_app.BOT_USER_ID
         db = backend_app.SessionLocal()
@@ -38,6 +39,7 @@ class BotConfigApiTests(unittest.TestCase):
         backend_app.TWITCH_CLIENT_ID = self._client_id
         backend_app.TWITCH_CLIENT_SECRET = self._client_secret
         backend_app.TWITCH_REDIRECT_URI = self._redirect_uri
+        backend_app.BOT_TWITCH_REDIRECT_URI = self._bot_redirect_uri
         backend_app.BOT_NICK = self._bot_nick
         backend_app.BOT_USER_ID = self._bot_user_id
         backend_app._bot_oauth_states.clear()
@@ -65,7 +67,8 @@ class BotConfigApiTests(unittest.TestCase):
     def test_bot_oauth_start_returns_authorize_url(self) -> None:
         backend_app.TWITCH_CLIENT_ID = "client"
         backend_app.TWITCH_CLIENT_SECRET = "secret"
-        backend_app.TWITCH_REDIRECT_URI = None
+        backend_app.TWITCH_REDIRECT_URI = "https://irrelevant.example/old"
+        backend_app.BOT_TWITCH_REDIRECT_URI = None
 
         response = self.client.post(
             "/bot/config/oauth",
@@ -81,6 +84,8 @@ class BotConfigApiTests(unittest.TestCase):
         params = parse_qs(parsed.query)
         self.assertEqual(params.get("response_type", [None])[0], "code")
         self.assertEqual(params.get("client_id", [None])[0], "client")
+        redirect_param = params.get("redirect_uri", [None])[0]
+        self.assertEqual(redirect_param, "http://testserver/bot/config/oauth/callback")
         scope_param = params.get("scope", [""])[0]
         for scope in backend_app.BOT_APP_SCOPES:
             self.assertIn(scope, scope_param)
@@ -98,6 +103,19 @@ class BotConfigApiTests(unittest.TestCase):
         backend_app.TWITCH_CLIENT_ID = "client"
         backend_app.TWITCH_CLIENT_SECRET = "secret"
         backend_app.TWITCH_REDIRECT_URI = None
+        backend_app.BOT_TWITCH_REDIRECT_URI = None
+
+        start_response = self.client.post(
+            "/bot/config/oauth",
+            headers={"X-Admin-Token": backend_app.ADMIN_TOKEN},
+        )
+        self.assertEqual(start_response.status_code, 200)
+        start_data = start_response.json()
+        params = parse_qs(urlparse(start_data["auth_url"]).query)
+        state_value = params.get("state", [None])[0]
+        self.assertIsNotNone(state_value)
+        state_payload = json.loads(unquote(state_value))
+        nonce = state_payload["nonce"]
 
         start_response = self.client.post(
             "/bot/config/oauth",
@@ -167,6 +185,21 @@ class BotConfigApiTests(unittest.TestCase):
         _, kwargs = mock_post.call_args
         self.assertEqual(kwargs["data"]["grant_type"], "authorization_code")
         mock_get.assert_called_once()
+
+    def test_bot_oauth_start_respects_override_redirect(self) -> None:
+        backend_app.TWITCH_CLIENT_ID = "client"
+        backend_app.TWITCH_CLIENT_SECRET = "secret"
+        backend_app.BOT_TWITCH_REDIRECT_URI = "https://admin.example.com/bot/callback"
+
+        response = self.client.post(
+            "/bot/config/oauth",
+            headers={"X-Admin-Token": backend_app.ADMIN_TOKEN},
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        params = parse_qs(urlparse(data["auth_url"]).query)
+        redirect_param = params.get("redirect_uri", [None])[0]
+        self.assertEqual(redirect_param, "https://admin.example.com/bot/callback")
 
 
 if __name__ == "__main__":
