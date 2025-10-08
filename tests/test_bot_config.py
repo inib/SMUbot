@@ -117,18 +117,6 @@ class BotConfigApiTests(unittest.TestCase):
         state_payload = json.loads(unquote(state_value))
         nonce = state_payload["nonce"]
 
-        start_response = self.client.post(
-            "/bot/config/oauth",
-            headers={"X-Admin-Token": backend_app.ADMIN_TOKEN},
-        )
-        self.assertEqual(start_response.status_code, 200)
-        start_data = start_response.json()
-        params = parse_qs(urlparse(start_data["auth_url"]).query)
-        state_value = params.get("state", [None])[0]
-        self.assertIsNotNone(state_value)
-        state_payload = json.loads(unquote(state_value))
-        nonce = state_payload["nonce"]
-
         class FakeTokenResponse:
             status_code = 200
 
@@ -200,6 +188,49 @@ class BotConfigApiTests(unittest.TestCase):
         params = parse_qs(urlparse(data["auth_url"]).query)
         redirect_param = params.get("redirect_uri", [None])[0]
         self.assertEqual(redirect_param, "https://admin.example.com/bot/callback")
+
+    def test_bot_oauth_start_uses_forwarded_proto_and_host(self) -> None:
+        backend_app.TWITCH_CLIENT_ID = "client"
+        backend_app.TWITCH_CLIENT_SECRET = "secret"
+        backend_app.BOT_TWITCH_REDIRECT_URI = None
+
+        response = self.client.post(
+            "/bot/config/oauth",
+            headers={
+                "X-Admin-Token": backend_app.ADMIN_TOKEN,
+                "X-Forwarded-Proto": "https",
+                "X-Forwarded-Host": "qapi.alpen.bot",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        params = parse_qs(urlparse(response.json()["auth_url"]).query)
+        redirect_param = params.get("redirect_uri", [None])[0]
+        self.assertEqual(
+            redirect_param,
+            "https://qapi.alpen.bot/bot/config/oauth/callback",
+        )
+
+    def test_bot_oauth_start_honors_forwarded_header(self) -> None:
+        backend_app.TWITCH_CLIENT_ID = "client"
+        backend_app.TWITCH_CLIENT_SECRET = "secret"
+        backend_app.BOT_TWITCH_REDIRECT_URI = None
+
+        response = self.client.post(
+            "/bot/config/oauth",
+            headers={
+                "X-Admin-Token": backend_app.ADMIN_TOKEN,
+                "Forwarded": 'proto=https;host=secure.example.com',
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        params = parse_qs(urlparse(response.json()["auth_url"]).query)
+        redirect_param = params.get("redirect_uri", [None])[0]
+        self.assertEqual(
+            redirect_param,
+            "https://secure.example.com/bot/config/oauth/callback",
+        )
 
 
 if __name__ == "__main__":

@@ -29,6 +29,7 @@ from fastapi import (
     Body,
 )
 from fastapi.responses import RedirectResponse, HTMLResponse
+from starlette.datastructures import URL
 from pydantic import BaseModel, Field
 from sqlalchemy import (
     create_engine, Column, Integer, String, Text, DateTime, Boolean,
@@ -641,10 +642,85 @@ def _normalize_return_url(value: Optional[str]) -> Optional[str]:
     return urlunparse(sanitized)
 
 
+_FORWARDED_PAIR_RE = re.compile(r"(?P<key>[a-zA-Z-]+)=(?P<value>\"[^\"]*\"|[^;]+)")
+_FORWARDED_HOST_RE = re.compile(r"^[A-Za-z0-9_.-]+(:\d+)?$")
+
+
+def _parse_forwarded_header(raw_value: str) -> dict[str, str]:
+    result: dict[str, str] = {}
+    if not raw_value:
+        return result
+    first_value = raw_value.split(",", 1)[0]
+    for match in _FORWARDED_PAIR_RE.finditer(first_value):
+        key = match.group("key").strip().lower()
+        value = match.group("value").strip()
+        if value.startswith("\"") and value.endswith("\""):
+            value = value[1:-1]
+        result[key] = value
+    return result
+
+
+def _apply_forwarded_headers(request: FastAPIRequest, url: URL) -> URL:
+    forwarded = _parse_forwarded_header(request.headers.get("forwarded", ""))
+    proto = forwarded.get("proto")
+    host = forwarded.get("host")
+    port = forwarded.get("port")
+
+    xf_proto = request.headers.get("x-forwarded-proto")
+    xf_host = request.headers.get("x-forwarded-host")
+    xf_port = request.headers.get("x-forwarded-port")
+
+    if xf_proto:
+        proto = proto or xf_proto.split(",", 1)[0].strip()
+    if xf_host:
+        host = host or xf_host.split(",", 1)[0].strip()
+    if xf_port:
+        port = port or xf_port.split(",", 1)[0].strip()
+
+    if proto:
+        proto = proto.lower()
+        if proto in ("http", "https"):
+            url = url.replace(scheme=proto)
+
+    hostname: Optional[str] = None
+    if host and _FORWARDED_HOST_RE.match(host):
+        hostname = host
+    if hostname and ":" in hostname and not port:
+        hostname, _, port_candidate = hostname.partition(":")
+        if port_candidate:
+            port = port_candidate
+    if hostname:
+        url = url.replace(hostname=hostname)
+
+    if port:
+        try:
+            port_int = int(port)
+        except ValueError:
+            port_int = None
+        if port_int:
+            url = url.replace(port=port_int)
+        else:
+            url = url.replace(port=None)
+
+    prefix = request.headers.get("x-forwarded-prefix") or ""
+    if prefix:
+        prefix = prefix.split(",", 1)[0].strip()
+        if prefix:
+            if not prefix.startswith("/"):
+                prefix = "/" + prefix
+            prefix = prefix.rstrip("/")
+            if prefix and not url.path.startswith(prefix):
+                url = url.replace(path=prefix + url.path)
+
+    return url
+
+
 def _bot_redirect_uri(request: FastAPIRequest) -> str:
     if BOT_TWITCH_REDIRECT_URI:
         return BOT_TWITCH_REDIRECT_URI
-    return str(request.url_for("bot_oauth_callback"))
+    url = URL(str(request.url_for("bot_oauth_callback")))
+    adjusted = _apply_forwarded_headers(request, url)
+    return str(adjusted)
 
 
 def _cleanup_bot_oauth_states() -> None:
