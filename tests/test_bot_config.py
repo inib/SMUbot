@@ -1,9 +1,10 @@
 import os
-import os
+import json
 import sys
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from urllib.parse import parse_qs, unquote, urlparse
 
 from fastapi.testclient import TestClient
 
@@ -29,6 +30,7 @@ class BotConfigApiTests(unittest.TestCase):
             db.close()
         backend_app.BOT_NICK = None
         backend_app.BOT_USER_ID = None
+        backend_app._bot_oauth_states.clear()
         self.client = TestClient(backend_app.app)
 
     def tearDown(self) -> None:
@@ -38,6 +40,7 @@ class BotConfigApiTests(unittest.TestCase):
         backend_app.TWITCH_REDIRECT_URI = self._redirect_uri
         backend_app.BOT_NICK = self._bot_nick
         backend_app.BOT_USER_ID = self._bot_user_id
+        backend_app._bot_oauth_states.clear()
 
     def test_fetch_default_config(self) -> None:
         response = self.client.get("/bot/config", headers={"X-Admin-Token": backend_app.ADMIN_TOKEN})
@@ -59,10 +62,54 @@ class BotConfigApiTests(unittest.TestCase):
         self.assertTrue(data["enabled"])
         self.assertEqual(data["scopes"], payload["scopes"])
 
-    def test_client_credentials_flow_persists_tokens(self) -> None:
+    def test_bot_oauth_start_returns_authorize_url(self) -> None:
         backend_app.TWITCH_CLIENT_ID = "client"
         backend_app.TWITCH_CLIENT_SECRET = "secret"
         backend_app.TWITCH_REDIRECT_URI = None
+
+        response = self.client.post(
+            "/bot/config/oauth",
+            headers={"X-Admin-Token": backend_app.ADMIN_TOKEN},
+            json={"return_url": "https://admin.example.com/dashboard"},
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn("auth_url", data)
+        parsed = urlparse(data["auth_url"])
+        self.assertEqual(parsed.scheme, "https")
+        self.assertEqual(parsed.netloc, "id.twitch.tv")
+        params = parse_qs(parsed.query)
+        self.assertEqual(params.get("response_type", [None])[0], "code")
+        self.assertEqual(params.get("client_id", [None])[0], "client")
+        scope_param = params.get("scope", [""])[0]
+        for scope in backend_app.BOT_APP_SCOPES:
+            self.assertIn(scope, scope_param)
+        state_value = params.get("state", [None])[0]
+        self.assertIsNotNone(state_value)
+        state_payload = json.loads(unquote(state_value))
+        nonce = state_payload["nonce"]
+        self.assertIn(nonce, backend_app._bot_oauth_states)
+        self.assertEqual(
+            backend_app._bot_oauth_states[nonce]["return_url"],
+            "https://admin.example.com/dashboard",
+        )
+
+    def test_bot_oauth_callback_persists_tokens(self) -> None:
+        backend_app.TWITCH_CLIENT_ID = "client"
+        backend_app.TWITCH_CLIENT_SECRET = "secret"
+        backend_app.TWITCH_REDIRECT_URI = None
+
+        start_response = self.client.post(
+            "/bot/config/oauth",
+            headers={"X-Admin-Token": backend_app.ADMIN_TOKEN},
+        )
+        self.assertEqual(start_response.status_code, 200)
+        start_data = start_response.json()
+        params = parse_qs(urlparse(start_data["auth_url"]).query)
+        state_value = params.get("state", [None])[0]
+        self.assertIsNotNone(state_value)
+        state_payload = json.loads(unquote(state_value))
+        nonce = state_payload["nonce"]
 
         class FakeTokenResponse:
             status_code = 200
@@ -72,35 +119,54 @@ class BotConfigApiTests(unittest.TestCase):
 
             def json(self) -> dict[str, object]:
                 return {
-                    "access_token": "access",
+                    "access_token": "bot-access",
+                    "refresh_token": "bot-refresh",
                     "expires_in": 3600,
+                    "scope": backend_app.BOT_APP_SCOPES,
                 }
 
-        with patch.object(backend_app.requests, "post", return_value=FakeTokenResponse()) as mock_post:
-            auth_start = self.client.post(
-            "/bot/config/oauth",
-            headers={"X-Admin-Token": backend_app.ADMIN_TOKEN},
-        )
-        self.assertEqual(auth_start.status_code, 200)
-        mock_post.assert_called_once()
-        args, kwargs = mock_post.call_args
-        self.assertEqual(args[0], "https://id.twitch.tv/oauth2/token")
-        self.assertEqual(kwargs["data"]["grant_type"], "client_credentials")
-        data = auth_start.json()
-        self.assertTrue(data["enabled"])
-        self.assertEqual(data["scopes"], backend_app.BOT_APP_SCOPES)
+        class FakeUserResponse:
+            status_code = 200
 
-        data = self.client.get(
-            "/bot/config",
-            headers={"X-Admin-Token": backend_app.ADMIN_TOKEN},
-        ).json()
-        self.assertTrue(data["enabled"])
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> dict[str, object]:
+                return {
+                    "data": [
+                        {
+                            "id": "1234",
+                            "login": "botaccount",
+                            "display_name": "BotAccount",
+                        }
+                    ]
+                }
+
+        with patch.object(backend_app.requests, "post", return_value=FakeTokenResponse()) as mock_post, patch.object(
+            backend_app.requests, "get", return_value=FakeUserResponse()
+        ) as mock_get:
+            callback = self.client.get(
+                "/bot/config/oauth/callback",
+                params={"code": "abc123", "state": state_value},
+            )
+
+        self.assertEqual(callback.status_code, 200)
+        self.assertIn("bot-oauth-complete", callback.text)
         db = backend_app.SessionLocal()
         try:
             cfg = backend_app._get_bot_config(db)
-            self.assertEqual(cfg.access_token, "access")
+            self.assertEqual(cfg.login, "botaccount")
+            self.assertEqual(cfg.display_name, "BotAccount")
+            self.assertEqual(cfg.access_token, "bot-access")
+            self.assertEqual(cfg.refresh_token, "bot-refresh")
+            self.assertTrue(cfg.enabled)
         finally:
             db.close()
+        self.assertNotIn(nonce, backend_app._bot_oauth_states)
+        mock_post.assert_called_once()
+        _, kwargs = mock_post.call_args
+        self.assertEqual(kwargs["data"]["grant_type"], "authorization_code")
+        mock_get.assert_called_once()
 
 
 if __name__ == "__main__":
