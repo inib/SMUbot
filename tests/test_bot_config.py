@@ -117,6 +117,18 @@ class BotConfigApiTests(unittest.TestCase):
         state_payload = json.loads(unquote(state_value))
         nonce = state_payload["nonce"]
 
+        start_response = self.client.post(
+            "/bot/config/oauth",
+            headers={"X-Admin-Token": backend_app.ADMIN_TOKEN},
+        )
+        self.assertEqual(start_response.status_code, 200)
+        start_data = start_response.json()
+        params = parse_qs(urlparse(start_data["auth_url"]).query)
+        state_value = params.get("state", [None])[0]
+        self.assertIsNotNone(state_value)
+        state_payload = json.loads(unquote(state_value))
+        nonce = state_payload["nonce"]
+
         class FakeTokenResponse:
             status_code = 200
 
