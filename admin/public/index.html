@@ -3,68 +3,92 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>ALPEN.BOT SONGQ</title>
+  <title>ALPEN.BOT SONGQ — Admin Control</title>
   <link rel="stylesheet" href="style.css"/>
 </head>
 <body>
-<div id="login-status" class="status-bar" style="display:none">
-  <div class="status-user">
-    <div id="login-avatar" class="status-avatar" aria-hidden="true"></div>
-    <div class="status-info">
-      <span id="login-name" class="status-name"></span>
-      <span id="login-channel" class="status-channel"></span>
-    </div>
-  </div>
-  <div class="status-actions">
-    <button id="logout-btn" class="status-action">log out</button>
-    <button id="logout-perm-btn" class="status-action danger">forget &amp; log out</button>
-  </div>
-</div>
-<div id="landing" class="landing">
-  <h1>ALPEN.BOT SONGQ</h1>
-  <button id="login-btn">log in with Twitch</button>
-  <div id="channel-list" class="channel-list"></div>
-</div>
-
-<div id="app" style="display:none">
   <div class="wrap">
-    <div class="header">
-      <div class="brand">Admin Console</div>
-      <span id="ch-badge" class="badge">channel: ?</span>
-      <button id="reg-btn" style="display:none"></button>
-    </div>
+    <header class="header">
+      <div class="brand">Admin Control Panel</div>
+      <span id="status" class="badge">status: loading…</span>
+    </header>
 
-    <div class="grid">
-      <div class="card">
-        <div class="tabs">
-          <button id="tab-queue" class="tab active">Queue</button>
-          <button id="tab-users" class="tab">Users</button>
-          <button id="tab-settings" class="tab">Settings</button>
-        </div>
+    <section class="card">
+      <h2>Registered Channels</h2>
+      <div id="channel-list" class="channel-list"></div>
+    </section>
 
-        <div id="queue-view">
-          <h2>Active Queue</h2>
-          <div id="queue" class="queue"></div>
-          <div class="footer">
-            <button id="archive-btn">Archive Stream</button>
-            <button id="mute-btn">Toggle Requests</button>
-          </div>
-        </div>
+    <section class="card">
+      <h2>Channel Overview</h2>
+      <div id="channel-tree" class="tree"></div>
+    </section>
 
-        <div id="users-view" style="display:none">
-          <h2>Users</h2>
-          <div id="users" class="queue"></div>
-        </div>
-
-        <div id="settings-view" style="display:none">
-          <h2>Settings</h2>
-          <div id="settings"></div>
+    <section class="card bot-card" id="bot-card">
+      <div class="card-head">
+        <h2>Bot Control</h2>
+        <div class="bot-actions">
+          <button type="button" id="bot-login-btn">Sign in</button>
+          <button type="button" id="bot-logout-btn" hidden>Sign out</button>
+          <button type="button" id="bot-authorize-btn" disabled>Generate Bot Token</button>
         </div>
       </div>
-    </div>
+      <div id="bot-guard" class="bot-guard">
+        <p>Sign in with Twitch to manage the bot configuration.</p>
+      </div>
+      <div id="bot-panel" class="bot-panel" hidden>
+        <div class="bot-meta">
+          <div class="bot-meta-block">
+            <span class="label">Signed in as</span>
+            <span id="bot-owner" class="value">—</span>
+          </div>
+          <div class="bot-meta-block">
+            <span class="label">Authorized bot</span>
+            <span id="bot-account" class="value">Not connected</span>
+          </div>
+          <div class="bot-meta-block">
+            <span class="label">Token expires</span>
+            <span id="bot-expiry" class="value">—</span>
+          </div>
+        </div>
+        <div id="bot-alert" class="bot-alert" hidden></div>
+        <div class="bot-settings">
+          <label class="field">
+            <span>Bot account login</span>
+            <input type="text" id="bot-account-login" placeholder="Login" autocomplete="off"/>
+          </label>
+          <label class="toggle">
+            <input type="checkbox" id="bot-enabled"/>
+            <span>Enable bot</span>
+          </label>
+          <div class="scope-picker">
+            <div class="scope-head">
+              <span>Scopes</span>
+              <div class="scope-actions">
+                <button type="button" id="bot-scope-reset">Reset</button>
+              </div>
+            </div>
+            <div id="bot-scope-list" class="scope-list"></div>
+            <div class="scope-add">
+              <input type="text" id="bot-scope-custom" placeholder="Add scope" autocomplete="off"/>
+              <button type="button" id="bot-scope-add">Add</button>
+            </div>
+          </div>
+        </div>
+        <div class="bot-console">
+          <div class="bot-console-head">
+            <h3>Console</h3>
+            <div class="console-actions">
+              <span id="bot-console-status" class="badge">status: idle</span>
+              <button type="button" id="bot-console-clear">Clear</button>
+            </div>
+          </div>
+          <div id="bot-console-log" class="bot-console-log"></div>
+        </div>
+      </div>
+    </section>
   </div>
-</div>
-<script src="config.js"></script>
-<script src="admin.js"></script>
+
+  <script src="config.js"></script>
+  <script src="admin.js"></script>
 </body>
 </html>

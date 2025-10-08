@@ -7,7 +7,6 @@ import hmac
 import hashlib
 import logging
 import re
-import secrets
 from urllib.parse import quote, urlparse
 from datetime import datetime, timedelta
 import asyncio
@@ -49,19 +48,20 @@ ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "change-me")
 TWITCH_CLIENT_ID = os.getenv("TWITCH_CLIENT_ID")
 TWITCH_CLIENT_SECRET = os.getenv("TWITCH_CLIENT_SECRET")
 TWITCH_REDIRECT_URI = os.getenv("TWITCH_REDIRECT_URI")
-TWITCH_SCOPES = os.getenv("TWITCH_SCOPES", "chat:read chat:edit channel:bot").split()
+TWITCH_SCOPES = os.getenv("TWITCH_SCOPES", "channel:bot").split()
 TWITCH_EVENTSUB_CALLBACK = os.getenv("TWITCH_EVENTSUB_CALLBACK", "http://localhost:8000/eventsub/callback")
 TWITCH_EVENTSUB_SECRET = os.getenv("TWITCH_EVENTSUB_SECRET", "change-me")
 BOT_NICK = os.getenv("BOT_NICK")
+
+BOT_APP_SCOPES = os.getenv(
+    "BOT_APP_SCOPES", "user:read:chat user:write:chat user:bot"
+).split()
 
 ADMIN_SESSION_COOKIE = "admin_oauth_token"
 
 APP_ACCESS_TOKEN: Optional[str] = None
 APP_TOKEN_EXPIRES = 0
 BOT_USER_ID: Optional[str] = None
-
-BOT_OAUTH_STATE_TTL = 600
-_bot_oauth_states: dict[str, tuple[float, Optional[str]]] = {}
 
 _bot_log_listeners: set[asyncio.Queue[str]] = set()
 
@@ -399,10 +399,7 @@ class BotConfigUpdate(BaseModel):
     enabled: Optional[bool] = None
     scopes: Optional[List[str]] = None
     display_name: Optional[str] = None
-
-
-class BotOAuthStartIn(BaseModel):
-    return_url: Optional[str] = None
+    login: Optional[str] = None
 
 
 class BotLogEventIn(BaseModel):
@@ -602,30 +599,6 @@ def _broker(channel_pk: int) -> asyncio.Queue[str]:
     return _brokers.setdefault(channel_pk, asyncio.Queue(maxsize=1000))
 
 
-def _cleanup_bot_oauth_states() -> None:
-    now = time.time()
-    expired = [key for key, (expires_at, _) in _bot_oauth_states.items() if expires_at <= now]
-    for key in expired:
-        _bot_oauth_states.pop(key, None)
-
-
-def _create_bot_oauth_state(return_url: Optional[str]) -> str:
-    _cleanup_bot_oauth_states()
-    state = secrets.token_urlsafe(16)
-    _bot_oauth_states[state] = (time.time() + BOT_OAUTH_STATE_TTL, return_url)
-    return state
-
-
-def _consume_bot_oauth_state(state: str) -> tuple[bool, Optional[str]]:
-    data = _bot_oauth_states.pop(state, None)
-    if not data:
-        return False, None
-    expires_at, return_url = data
-    if expires_at <= time.time():
-        return False, None
-    return True, return_url
-
-
 def _json_default(value: Any) -> Any:
     if isinstance(value, datetime):
         return value.isoformat()
@@ -655,7 +628,7 @@ def get_db() -> Session:
 def _get_bot_config(db: Session) -> BotConfig:
     cfg = db.query(BotConfig).order_by(BotConfig.id.asc()).first()
     if not cfg:
-        scopes = " ".join(TWITCH_SCOPES) if TWITCH_SCOPES else ""
+        scopes = " ".join(BOT_APP_SCOPES) if BOT_APP_SCOPES else ""
         cfg = BotConfig(scopes=scopes or None, enabled=False)
         db.add(cfg)
         db.commit()
@@ -1046,9 +1019,20 @@ def update_bot_config(payload: BotConfigUpdate, db: Session = Depends(get_db)):
         if cfg.scopes != scopes_value:
             cfg.scopes = scopes_value
             changed = True
-    if "display_name" in data and cfg.display_name != data["display_name"]:
-        cfg.display_name = data["display_name"]
-        changed = True
+    if "display_name" in data:
+        display_val = data["display_name"]
+        if isinstance(display_val, str):
+            display_val = display_val.strip() or None
+        if cfg.display_name != display_val:
+            cfg.display_name = display_val
+            changed = True
+    if "login" in data:
+        login_val = data["login"]
+        if isinstance(login_val, str):
+            login_val = login_val.strip() or None
+        if cfg.login != login_val:
+            cfg.login = login_val
+            changed = True
     if changed:
         cfg.updated_at = datetime.utcnow()
         db.commit()
@@ -1056,114 +1040,57 @@ def update_bot_config(payload: BotConfigUpdate, db: Session = Depends(get_db)):
     return _serialize_bot_config(cfg)
 
 
-@app.post("/bot/config/oauth", response_model=AuthUrlOut, dependencies=[Depends(require_token)])
-def bot_oauth_start(
-    request: FastAPIRequest,
-    payload: Optional[BotOAuthStartIn] = None,
-    db: Session = Depends(get_db),
-):
+@app.post("/bot/config/oauth", response_model=BotConfigOut, dependencies=[Depends(require_token)])
+def bot_oauth_start(db: Session = Depends(get_db)):
     if not TWITCH_CLIENT_ID or not TWITCH_CLIENT_SECRET:
         raise HTTPException(status_code=500, detail="Twitch OAuth not configured")
     cfg = _get_bot_config(db)
-    scopes = (cfg.scopes or "").split() or TWITCH_SCOPES
-    scope_param = "+".join(scopes)
-    redirect_uri = TWITCH_REDIRECT_URI or str(request.url_for("bot_oauth_callback"))
-    return_url: Optional[str] = None
-    if payload is None:
-        payload = BotOAuthStartIn()
-    if payload.return_url:
-        parsed = urlparse(payload.return_url)
-        if parsed.scheme in {"http", "https"} and parsed.netloc:
-            return_url = payload.return_url
-    state = _create_bot_oauth_state(return_url)
-    url = (
-        "https://id.twitch.tv/oauth2/authorize"
-        f"?response_type=code&client_id={TWITCH_CLIENT_ID}"
-        f"&redirect_uri={redirect_uri}&scope={scope_param}&state={state}"
-    )
-    return {"auth_url": url}
-
-
-@app.get("/bot/config/oauth/callback", response_model=AuthCallbackOut)
-def bot_oauth_callback(
-    code: str,
-    state: str,
-    request: FastAPIRequest,
-    db: Session = Depends(get_db),
-):
-    if not TWITCH_CLIENT_ID or not TWITCH_CLIENT_SECRET:
-        raise HTTPException(status_code=500, detail="Twitch OAuth not configured")
-    valid, return_to = _consume_bot_oauth_state(state)
-    if not valid:
-        raise HTTPException(status_code=400, detail="invalid state")
-    redirect_uri = TWITCH_REDIRECT_URI or str(request.url_for("bot_oauth_callback"))
+    scopes = (cfg.scopes or "").split() or BOT_APP_SCOPES
+    scope_param = " ".join(scopes)
     try:
         response = requests.post(
             "https://id.twitch.tv/oauth2/token",
             data={
                 "client_id": TWITCH_CLIENT_ID,
                 "client_secret": TWITCH_CLIENT_SECRET,
-                "code": code,
-                "grant_type": "authorization_code",
-                "redirect_uri": redirect_uri,
+                "grant_type": "client_credentials",
+                "scope": scope_param,
             },
             timeout=5,
         )
         response.raise_for_status()
         token_resp = response.json()
     except requests.RequestException as exc:
-        raise HTTPException(status_code=502, detail="token exchange failed") from exc
+        raise HTTPException(status_code=502, detail="token request failed") from exc
     access_token = token_resp.get("access_token")
     if not access_token:
         raise HTTPException(status_code=502, detail="missing access_token")
-    refresh_token = token_resp.get("refresh_token")
-    scopes = token_resp.get("scope") or []
     expires_at: Optional[datetime] = None
     expires_in = token_resp.get("expires_in")
     if isinstance(expires_in, (int, float)) and expires_in > 0:
         expires_at = datetime.utcnow() + timedelta(seconds=int(expires_in))
-    headers = {"Authorization": f"Bearer {access_token}", "Client-Id": TWITCH_CLIENT_ID}
-    try:
-        user_resp = requests.get(
-            "https://api.twitch.tv/helix/users",
-            headers=headers,
-            timeout=5,
-        )
-        user_resp.raise_for_status()
-        user_data = user_resp.json().get("data") or []
-    except requests.RequestException as exc:
-        raise HTTPException(status_code=502, detail="failed to fetch user info") from exc
-    if not user_data:
-        raise HTTPException(status_code=502, detail="missing user info")
-    info = user_data[0]
-    cfg = _get_bot_config(db)
-    cfg.login = info.get("login")
-    cfg.display_name = info.get("display_name") or info.get("login")
     cfg.access_token = access_token
-    cfg.refresh_token = refresh_token
-    cfg.scopes = " ".join(scopes) if scopes else None
+    cfg.refresh_token = None
+    cfg.scopes = scope_param or None
     cfg.expires_at = expires_at
     cfg.enabled = True
     cfg.updated_at = datetime.utcnow()
     db.commit()
     db.refresh(cfg)
-    global BOT_USER_ID, BOT_NICK
-    BOT_USER_ID = info.get("id")
-    if cfg.login:
-        BOT_NICK = cfg.login
     _broadcast_bot_log(
         {
             "type": "oauth_complete",
             "level": "info",
-            "message": f"Bot authorized as {cfg.display_name or cfg.login}",
+            "message": "Bot app access token acquired",
             "timestamp": datetime.utcnow(),
         }
     )
-    if return_to:
-        parsed = urlparse(return_to)
-        if parsed.scheme in {"http", "https"} and parsed.netloc:
-            return RedirectResponse(return_to)
-    return {"success": True}
+    return _serialize_bot_config(cfg)
+
+
+@app.get("/bot/config/oauth/callback", response_model=AuthCallbackOut)
+def bot_oauth_callback():
+    raise HTTPException(status_code=410, detail="bot oauth callback deprecated")
 
 
 @app.post("/bot/logs", response_model=BotLogAckOut, dependencies=[Depends(require_token)])
