@@ -738,14 +738,36 @@ async function startBotOAuthFlow() {
       credentials: 'include',
     });
     if (!response.ok) {
-      throw new Error(`status ${response.status}`);
+      let errorMessage = `status ${response.status}`;
+      try {
+        const payload = await response.json();
+        if (payload && typeof payload.detail === 'string' && payload.detail.trim()) {
+          errorMessage = payload.detail.trim();
+        } else if (payload && typeof payload.message === 'string' && payload.message.trim()) {
+          errorMessage = payload.message.trim();
+        }
+      } catch (parseErr) {
+        try {
+          const text = await response.text();
+          if (text) {
+            errorMessage = text;
+          }
+        } catch (_) {
+          // ignore parsing errors and use the default message
+        }
+      }
+      throw new Error(errorMessage);
     }
     const data = await response.json();
     applyBotConfig(data);
     showBotAlert('Bot app access token generated.', 'info');
   } catch (err) {
     console.error('failed to start bot oauth', err);
-    showBotAlert('Failed to generate the bot token. Please try again.', 'error');
+    const message = err instanceof Error && err.message ? err.message : null;
+    const displayMessage = message
+      ? `Failed to generate the bot token: ${message}`
+      : 'Failed to generate the bot token. Please try again.';
+    showBotAlert(displayMessage, 'error');
   } finally {
     if (botAuthorizeBtn) {
       botAuthorizeBtn.disabled = !currentUser;
