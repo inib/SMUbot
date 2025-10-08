@@ -6,7 +6,7 @@ services:
       ADMIN_TOKEN: ${ADMIN_TOKEN}
       TWITCH_CLIENT_ID: ${TWITCH_CLIENT_ID}
       TWITCH_CLIENT_SECRET: ${TWITCH_CLIENT_SECRET}
-      - RESET_DB="0"
+      RESET_DB: "0"
     env_file:
       - stack.env
     ports:
