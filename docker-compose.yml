@@ -3,8 +3,10 @@ services:
     build: .
     container_name: twitch-q-backend
     environment:
-      - ADMIN_TOKEN=${ADMIN_TOKEN}
-      - RESET_DB="0"
+      ADMIN_TOKEN: ${ADMIN_TOKEN}
+      TWITCH_CLIENT_ID: ${TWITCH_CLIENT_ID}
+      TWITCH_CLIENT_SECRET: ${TWITCH_CLIENT_SECRET}
+      RESET_DB: "0"
     env_file:
       - stack.env
     ports:
@@ -66,6 +68,7 @@ services:
     container_name: songqueue-admin
     environment:
       BACKEND_URL: ${BACKEND_URL:-http://api:7070}
+      TWITCH_CLIENT_ID: ${TWITCH_CLIENT_ID}
     env_file:
       - stack.env
     ports:
