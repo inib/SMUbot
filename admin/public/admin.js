@@ -19,6 +19,14 @@ function resolveBackendBase(value) {
 }
 
 const API = resolveBackendBase(window.BACKEND_URL);
+const API_ORIGIN = (() => {
+  try {
+    return new URL(API).origin;
+  } catch (err) {
+    console.warn('failed to determine API origin', err);
+    return null;
+  }
+})();
 const statusEl = document.getElementById('status');
 const channelListEl = document.getElementById('channel-list');
 const treeEl = document.getElementById('channel-tree');
@@ -48,6 +56,9 @@ let currentBotConfig = null;
 let botConsoleSource = null;
 let botScopeCatalog = new Set();
 let suspendBotInputs = false;
+let botOAuthWindow = null;
+let botOAuthPending = false;
+let botOAuthListenerAttached = false;
 
 function setStatus(text, variant) {
   if (!statusEl) return;
@@ -733,23 +744,95 @@ async function startBotOAuthFlow() {
   if (!currentUser || !botAuthorizeBtn) return;
   botAuthorizeBtn.disabled = true;
   try {
+    const redirect = new URL(window.location.href);
+    redirect.hash = '';
     const response = await fetch(`${API}/bot/config/oauth`, {
       method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
+      body: JSON.stringify({ return_url: redirect.toString() }),
     });
     if (!response.ok) {
-      throw new Error(`status ${response.status}`);
+      let errorMessage = `status ${response.status}`;
+      try {
+        const payload = await response.json();
+        if (payload && typeof payload.detail === 'string' && payload.detail.trim()) {
+          errorMessage = payload.detail.trim();
+        } else if (payload && typeof payload.message === 'string' && payload.message.trim()) {
+          errorMessage = payload.message.trim();
+        }
+      } catch (parseErr) {
+        try {
+          const text = await response.text();
+          if (text) {
+            errorMessage = text;
+          }
+        } catch (_) {
+          // ignore parsing errors and use the default message
+        }
+      }
+      throw new Error(errorMessage);
     }
     const data = await response.json();
-    applyBotConfig(data);
-    showBotAlert('Bot app access token generated.', 'info');
+    if (!data || typeof data.auth_url !== 'string' || !data.auth_url) {
+      throw new Error('Invalid authorization response');
+    }
+    botOAuthPending = true;
+    const popup = window.open(
+      data.auth_url,
+      'botOAuth',
+      'width=540,height=720,menubar=no,status=no,toolbar=no'
+    );
+    if (popup) {
+      botOAuthWindow = popup;
+      popup.focus();
+      showBotAlert('Complete the Twitch authorization in the opened window.', 'info');
+    } else {
+      botOAuthWindow = null;
+      window.location.href = data.auth_url;
+    }
   } catch (err) {
     console.error('failed to start bot oauth', err);
-    showBotAlert('Failed to generate the bot token. Please try again.', 'error');
+    const message = err instanceof Error && err.message ? err.message : null;
+    const displayMessage = message
+      ? `Failed to generate the bot token: ${message}`
+      : 'Failed to generate the bot token. Please try again.';
+    showBotAlert(displayMessage, 'error');
   } finally {
-    if (botAuthorizeBtn) {
+    if (!botOAuthPending && botAuthorizeBtn) {
       botAuthorizeBtn.disabled = !currentUser;
     }
+  }
+}
+
+function handleBotOAuthMessage(event) {
+  if (!event || !event.data || event.data.type !== 'bot-oauth-complete') {
+    return;
+  }
+  if (API_ORIGIN && event.origin !== API_ORIGIN) {
+    return;
+  }
+  botOAuthPending = false;
+  if (botOAuthWindow && !botOAuthWindow.closed) {
+    try {
+      botOAuthWindow.close();
+    } catch (_) {
+      // ignore errors closing popup
+    }
+  }
+  botOAuthWindow = null;
+  if (botAuthorizeBtn) {
+    botAuthorizeBtn.disabled = !currentUser;
+  }
+  const payload = event.data || {};
+  if (payload.success) {
+    showBotAlert('Bot authorization completed successfully.', 'info');
+    loadBotConfig();
+  } else {
+    const errorMessage = typeof payload.error === 'string' && payload.error.trim()
+      ? payload.error.trim()
+      : 'Bot authorization failed. Please try again.';
+    showBotAlert(errorMessage, 'error');
   }
 }
 
@@ -803,6 +886,10 @@ async function initBotControls() {
       renderBotScopes(defaults);
       updateBotConfig({ scopes: defaults });
     });
+  }
+  if (!botOAuthListenerAttached) {
+    window.addEventListener('message', handleBotOAuthMessage);
+    botOAuthListenerAttached = true;
   }
   if (botScopeAddBtn) {
     botScopeAddBtn.addEventListener('click', addCustomScope);
