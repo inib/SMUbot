@@ -54,8 +54,6 @@ TWITCH_CLIENT_SECRET = os.getenv("TWITCH_CLIENT_SECRET")
 TWITCH_REDIRECT_URI = os.getenv("TWITCH_REDIRECT_URI")
 BOT_TWITCH_REDIRECT_URI = os.getenv("BOT_TWITCH_REDIRECT_URI")
 TWITCH_SCOPES = os.getenv("TWITCH_SCOPES", "channel:bot").split()
-TWITCH_EVENTSUB_CALLBACK = os.getenv("TWITCH_EVENTSUB_CALLBACK", "http://localhost:8000/eventsub/callback")
-TWITCH_EVENTSUB_SECRET = os.getenv("TWITCH_EVENTSUB_SECRET", "change-me")
 BOT_NICK = os.getenv("BOT_NICK")
 
 BOT_APP_SCOPES = os.getenv(
@@ -137,102 +135,6 @@ def get_bot_user_id() -> Optional[str]:
     if data:
         BOT_USER_ID = data[0]["id"]
     return BOT_USER_ID
-
-
-def subscribe_chat_eventsub(broadcaster_id: str) -> None:
-    if not TWITCH_CLIENT_ID or not TWITCH_CLIENT_SECRET:
-        logger.info(
-            "Skipping chat EventSub subscription for %s due to missing client credentials",
-            broadcaster_id,
-        )
-        return
-
-    db = SessionLocal()
-    try:
-        cfg = _get_bot_config(db)
-        access_token = cfg.access_token
-        scopes = set((cfg.scopes or "").split())
-        expires_at = cfg.expires_at
-    finally:
-        db.close()
-
-    if not access_token:
-        logger.info(
-            "Skipping chat EventSub subscription for %s due to missing bot access token",
-            broadcaster_id,
-        )
-        return
-
-    if expires_at and expires_at <= datetime.utcnow():
-        logger.warning(
-            "Bot access token expired; cannot subscribe %s to chat EventSub",
-            broadcaster_id,
-        )
-        return
-
-    required_scopes = {"user:read:chat", "user:write:chat", "user:bot"}
-    missing_scopes = sorted(scope for scope in required_scopes if scope not in scopes)
-    if missing_scopes:
-        logger.warning(
-            "Bot OAuth scopes missing %s; cannot subscribe %s to chat EventSub",
-            ", ".join(missing_scopes),
-            broadcaster_id,
-        )
-        return
-
-    try:
-        bot_id = get_bot_user_id()
-    except requests.RequestException as exc:
-        logger.warning("Failed to resolve bot user id for EventSub subscription: %s", exc)
-        return
-
-    if not bot_id:
-        logger.info(
-            "Skipping chat EventSub subscription for %s due to unknown bot user id",
-            broadcaster_id,
-        )
-        return
-
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Client-Id": TWITCH_CLIENT_ID,
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "type": "channel.chat.message",
-        "version": "1",
-        "condition": {
-            "broadcaster_user_id": broadcaster_id,
-            "user_id": bot_id,
-        },
-        "transport": {
-            "method": "webhook",
-            "callback": TWITCH_EVENTSUB_CALLBACK,
-            "secret": TWITCH_EVENTSUB_SECRET,
-        },
-    }
-
-    try:
-        response = requests.post(
-            "https://api.twitch.tv/helix/eventsub/subscriptions",
-            headers=headers,
-            data=json.dumps(payload),
-            timeout=5,
-        )
-        if not response.ok:
-            logger.warning(
-                "Chat EventSub subscription for broadcaster %s returned %s: %s",
-                broadcaster_id,
-                response.status_code,
-                response.text,
-            )
-    except requests.RequestException as exc:
-        logger.warning(
-            "Failed to subscribe bot %s to chat messages for broadcaster %s: %s",
-            bot_id,
-            broadcaster_id,
-            exc,
-        )
 
 
 # =====================================
@@ -486,6 +388,13 @@ class BotConfigUpdate(BaseModel):
     scopes: Optional[List[str]] = None
     display_name: Optional[str] = None
     login: Optional[str] = None
+
+
+class BotTokenUpdateIn(BaseModel):
+    access_token: str
+    refresh_token: str
+    expires_at: Optional[datetime] = None
+    scopes: List[str] = Field(default_factory=list)
 
 
 class BotLogEventIn(BaseModel):
@@ -910,6 +819,12 @@ def _serialize_bot_config(cfg: BotConfig, *, include_tokens: bool = False) -> Di
     if include_tokens:
         data["access_token"] = cfg.access_token
         data["refresh_token"] = cfg.refresh_token
+        data["client_id"] = TWITCH_CLIENT_ID
+        data["client_secret"] = TWITCH_CLIENT_SECRET
+        try:
+            data["bot_user_id"] = get_bot_user_id()
+        except requests.RequestException:
+            data["bot_user_id"] = None
     return data
 
 def _resolve_user_from_token(
@@ -1039,7 +954,6 @@ def _auto_register_channel_from_token(user: TwitchUser, data: dict[str, Any], db
         db.commit()
         db.refresh(channel)
         get_or_create_settings(db, channel.id)
-    subscribe_chat_eventsub(channel_id)
 
 
 def get_current_user(
@@ -1201,7 +1115,6 @@ def auth_callback(
         ch.owner_id = user.id
         ch.authorized = True
     db.commit()
-    subscribe_chat_eventsub(user_info["id"])
     if return_to:
         parsed = urlparse(return_to)
         if parsed.scheme in {"http", "https"} and parsed.netloc:
@@ -1323,6 +1236,32 @@ def update_bot_config(
         db.refresh(cfg)
     include_tokens = x_admin_token == ADMIN_TOKEN
     return _serialize_bot_config(cfg, include_tokens=include_tokens)
+
+
+@app.post(
+    "/bot/config/tokens",
+    response_model=BotConfigOut,
+    response_model_exclude_none=True,
+    dependencies=[Depends(require_token)],
+)
+def update_bot_tokens(
+    payload: BotTokenUpdateIn,
+    db: Session = Depends(get_db),
+    x_admin_token: Optional[str] = Header(None),
+):
+    if x_admin_token != ADMIN_TOKEN:
+        raise HTTPException(status_code=401, detail="invalid admin token")
+    cfg = _get_bot_config(db)
+    cfg.access_token = payload.access_token
+    cfg.refresh_token = payload.refresh_token
+    cfg.expires_at = payload.expires_at
+    scopes_value = " ".join(_normalize_scope_list(payload.scopes)) or None
+    if scopes_value:
+        cfg.scopes = scopes_value
+    cfg.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(cfg)
+    return _serialize_bot_config(cfg, include_tokens=True)
 
 
 @app.post("/bot/config/oauth", response_model=AuthUrlOut, dependencies=[Depends(require_token)])
@@ -1577,28 +1516,6 @@ async def stream_bot_logs():
         },
     )
 
-
-@app.post("/eventsub/callback")
-async def eventsub_callback(
-    request: FastAPIRequest,
-    twitch_eventsub_message_type: str = Header(None),
-    twitch_eventsub_message_id: str = Header(None),
-    twitch_eventsub_message_timestamp: str = Header(None),
-    twitch_eventsub_message_signature: str = Header(None),
-):
-    body = await request.body()
-    if twitch_eventsub_message_type == "webhook_callback_verification":
-        data = json.loads(body)
-        return Response(content=data.get("challenge", ""))
-    message = (
-        twitch_eventsub_message_id + twitch_eventsub_message_timestamp + body.decode()
-    )
-    sig = hmac.new(
-        TWITCH_EVENTSUB_SECRET.encode(), message.encode(), hashlib.sha256
-    ).hexdigest()
-    if twitch_eventsub_message_signature != f"sha256={sig}":
-        raise HTTPException(status_code=403, detail="invalid signature")
-    return {"ok": True}
 
 @app.get("/me", response_model=MeOut)
 def me(current: TwitchUser = Depends(get_current_user)):
