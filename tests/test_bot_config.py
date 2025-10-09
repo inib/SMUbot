@@ -53,6 +53,30 @@ class BotConfigApiTests(unittest.TestCase):
         self.assertFalse(data["enabled"])
         self.assertEqual(data["scopes"], backend_app.BOT_APP_SCOPES)
 
+    def test_existing_config_missing_required_scopes_is_healed(self) -> None:
+        db = backend_app.SessionLocal()
+        try:
+            cfg = backend_app.BotConfig(scopes="chat:read chat:edit channel:bot")
+            db.add(cfg)
+            db.commit()
+        finally:
+            db.close()
+
+        response = self.client.get("/bot/config", headers={"X-Admin-Token": backend_app.ADMIN_TOKEN})
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        for scope in backend_app.BOT_APP_SCOPES:
+            self.assertIn(scope, data["scopes"])
+
+        db = backend_app.SessionLocal()
+        try:
+            cfg = backend_app._get_bot_config(db)
+            stored_scopes = (cfg.scopes or "").split()
+            for scope in backend_app.BOT_APP_SCOPES:
+                self.assertIn(scope, stored_scopes)
+        finally:
+            db.close()
+
     def test_update_config_scope_and_enabled(self) -> None:
         payload = {"enabled": True, "scopes": ["chat:read", "channel:bot"]}
         response = self.client.put(
