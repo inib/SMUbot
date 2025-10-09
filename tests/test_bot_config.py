@@ -104,14 +104,20 @@ class BotConfigApiTests(unittest.TestCase):
         finally:
             db.close()
 
-        response = self.client.get(
-            "/bot/config",
-            headers={"X-Admin-Token": backend_app.ADMIN_TOKEN},
-        )
+        backend_app.TWITCH_CLIENT_ID = "client"
+        backend_app.TWITCH_CLIENT_SECRET = "secret"
+        with patch.object(backend_app, "get_bot_user_id", return_value="1234"):
+            response = self.client.get(
+                "/bot/config",
+                headers={"X-Admin-Token": backend_app.ADMIN_TOKEN},
+            )
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertEqual(data["access_token"], "stored-access")
         self.assertEqual(data["refresh_token"], "stored-refresh")
+        self.assertEqual(data["client_id"], "client")
+        self.assertEqual(data["client_secret"], "secret")
+        self.assertEqual(data["bot_user_id"], "1234")
 
     def test_fetch_config_hides_tokens_for_admin_session(self) -> None:
         db = backend_app.SessionLocal()
@@ -141,6 +147,9 @@ class BotConfigApiTests(unittest.TestCase):
         data = response.json()
         self.assertNotIn("access_token", data)
         self.assertNotIn("refresh_token", data)
+        self.assertNotIn("client_id", data)
+        self.assertNotIn("client_secret", data)
+        self.assertNotIn("bot_user_id", data)
 
     def test_bot_oauth_start_returns_authorize_url(self) -> None:
         backend_app.TWITCH_CLIENT_ID = "client"
