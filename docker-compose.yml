@@ -12,7 +12,7 @@ services:
     ports:
       - "7070:7070"
     volumes:
-      - ./data:/data
+      - /mnt/alpenbot/data:/data
   bot:
     build:
       context: .
