@@ -13,8 +13,6 @@ from twitchio.ext import commands
 BACKEND_URL = os.getenv('BACKEND_URL', 'http://api:7070')
 # Token used for privileged requests to the backend.
 ADMIN_TOKEN = os.getenv('ADMIN_TOKEN', 'change-me')
-ENV_BOT_TOKEN = os.getenv('TWITCH_BOT_TOKEN')  # token without 'oauth:'
-ENV_BOT_NICK = os.getenv('BOT_NICK')
 MESSAGES_PATH = Path(os.getenv("BOT_MESSAGES_PATH", "/bot/messages.yml"))
 
 COMMANDS_FILE = os.getenv('COMMANDS_FILE', '/bot/commands.yml')
@@ -188,6 +186,7 @@ class BotSettings:
     refresh_token: Optional[str]
     login: Optional[str]
     enabled: bool
+    error: Optional[str] = None
 
 
 def _format_token(token: str) -> str:
@@ -276,13 +275,17 @@ class SongBot(commands.Bot):
         self.joined: set[str] = set()
         self._sync_lock = asyncio.Lock()
         self.enabled = enabled
-        self.nick = nick
+        self._configured_login = nick
 
     async def event_ready(self):
         if self.enabled:
             await self.sync_channels()
         asyncio.create_task(self.channel_refresher())
         self.ready_event.set()
+
+    @property
+    def configured_login(self) -> Optional[str]:
+        return getattr(self, "_configured_login", None)
 
     async def channel_refresher(self):
         while True:
@@ -506,10 +509,12 @@ class BotService:
     async def apply_settings(self, settings: BotSettings):
         if not settings.token or not settings.login:
             if self._credentials_available is not False:
+                error_details = settings.error or 'unknown reason'
                 await push_console_event(
                     'error',
-                    'Bot credentials are unavailable; idling worker',
+                    f'Bot credentials are unavailable; idling worker ({error_details})',
                     event='startup',
+                    metadata={'error': settings.error} if settings.error else None,
                 )
             self._credentials_available = False
             self._last_enabled = None
@@ -593,21 +598,42 @@ class BotService:
 
     def _settings_from_config(self, data: Dict[str, object]) -> BotSettings:
         config = data or {}
-        if isinstance(config, dict):
-            token = config.get('access_token') or config.get('token')
-            refresh = config.get('refresh_token')
-            login = config.get('login') or config.get('bot_login')
-        else:
-            token = None
-            refresh = None
-            login = None
-        complete = bool(token and refresh and login)
-        if not complete:
-            token = None
-            refresh = None
-            login = None
-        enabled = bool(config.get('enabled')) if complete else False
-        return BotSettings(token=token, refresh_token=refresh, login=login, enabled=enabled)
+        if not isinstance(config, dict):
+            return BotSettings(
+                token=None,
+                refresh_token=None,
+                login=None,
+                enabled=False,
+                error='Backend returned invalid bot configuration payload',
+            )
+
+        token = config.get('access_token') or config.get('token')
+        login = config.get('login') or config.get('bot_login')
+        refresh = config.get('refresh_token')
+        enabled_flag = config.get('enabled') if 'enabled' in config else None
+
+        missing: List[str] = []
+        if not token:
+            missing.append('access_token')
+        if not login:
+            missing.append('login')
+        if missing:
+            reason = 'Missing bot credentials: ' + ', '.join(missing)
+            return BotSettings(
+                token=None,
+                refresh_token=None,
+                login=None,
+                enabled=False,
+                error=reason,
+            )
+
+        enabled = bool(enabled_flag)
+        return BotSettings(
+            token=token,
+            refresh_token=refresh,
+            login=login,
+            enabled=enabled,
+        )
 
     async def event_message(self, message):
         if not self.enabled:

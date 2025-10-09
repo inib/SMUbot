@@ -96,6 +96,7 @@ class BotServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(settings.token)
         self.assertIsNone(settings.login)
         self.assertFalse(settings.enabled)
+        self.assertEqual(settings.error, "Missing bot credentials: access_token, login")
 
     async def test_missing_credentials_idle_bot(self) -> None:
         service = bot_app.BotService(
@@ -103,11 +104,17 @@ class BotServiceTests(unittest.IsolatedAsyncioTestCase):
             bot_factory=self.bot_factory,
             task_factory=asyncio.create_task,
         )
-        await service.apply_settings(
-            bot_app.BotSettings(token=None, refresh_token=None, login=None, enabled=False)
-        )
+        settings = service._settings_from_config({})
+        with patch.object(bot_app, "push_console_event", AsyncMock()) as push_event:
+            await service.apply_settings(settings)
+
         self.assertEqual(self.created_bots, [])
-        self.backend.push_bot_log.assert_awaited()
+        push_event.assert_awaited_once()
+        args, kwargs = push_event.call_args
+        self.assertEqual(args[0], "error")
+        self.assertIn("Missing bot credentials", args[1])
+        self.assertEqual(kwargs.get("event"), "startup")
+        self.assertEqual(kwargs.get("metadata"), {"error": settings.error})
 
     async def test_disable_stops_running_bot(self) -> None:
         service = bot_app.BotService(
@@ -199,6 +206,16 @@ class BotServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Foo", song_bot.joined)
         self.backend.set_bot_status.assert_awaited_once_with("Foo", False, "boom")
         song_bot._announce_joined.assert_not_called()
+
+    async def test_songbot_does_not_assign_readonly_nick(self) -> None:
+        commands_map = {k: ([v] if not isinstance(v, list) else v) for k, v in bot_app.DEFAULT_COMMANDS.items()}
+        with patch.object(bot_app.commands.Bot, "__init__", return_value=None):
+            with patch.object(bot_app, "load_commands", return_value=commands_map):
+                with patch.object(bot_app, "load_messages", return_value=bot_app.DEFAULT_MESSAGES):
+                    bot = bot_app.SongBot(token="abc", nick="botnick", enabled=True)
+
+        self.assertTrue(bot.enabled)
+        self.assertEqual(bot.configured_login, "botnick")
 
 
 if __name__ == "__main__":
