@@ -3,6 +3,7 @@ import re
 import sys
 import unittest
 import uuid
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -137,6 +138,15 @@ class AuthSessionCORSTest(unittest.TestCase):
         db.refresh(user)
         db.close()
 
+        cfg_db = backend_app.SessionLocal()
+        cfg = backend_app._get_bot_config(cfg_db)
+        cfg.login = "botnick"
+        cfg.access_token = "bot-access"
+        cfg.scopes = "user:read:chat user:write:chat user:bot"
+        cfg.expires_at = datetime.utcnow() + timedelta(hours=1)
+        cfg_db.commit()
+        cfg_db.close()
+
         data = {
             "login": "tester",
             "user_id": twitch_id,
@@ -176,6 +186,15 @@ class AuthSessionCORSTest(unittest.TestCase):
         db.commit()
         db.refresh(user)
         db.close()
+
+        cfg_db = backend_app.SessionLocal()
+        cfg = backend_app._get_bot_config(cfg_db)
+        cfg.login = "botnick"
+        cfg.access_token = "bot-access"
+        cfg.scopes = "user:read:chat user:write:chat user:bot"
+        cfg.expires_at = datetime.utcnow() + timedelta(hours=1)
+        cfg_db.commit()
+        cfg_db.close()
 
         data = {
             "login": "tester",

@@ -56,7 +56,7 @@ class BotConfigApiTests(unittest.TestCase):
     def test_existing_config_missing_required_scopes_is_healed(self) -> None:
         db = backend_app.SessionLocal()
         try:
-            cfg = backend_app.BotConfig(scopes="chat:read chat:edit channel:bot")
+            cfg = backend_app.BotConfig(scopes="user:bot channel:bot")
             db.add(cfg)
             db.commit()
         finally:
@@ -78,7 +78,10 @@ class BotConfigApiTests(unittest.TestCase):
             db.close()
 
     def test_update_config_scope_and_enabled(self) -> None:
-        payload = {"enabled": True, "scopes": ["chat:read", "channel:bot"]}
+        payload = {
+            "enabled": True,
+            "scopes": ["user:read:chat", "user:write:chat", "user:bot"],
+        }
         response = self.client.put(
             "/bot/config",
             headers={"X-Admin-Token": backend_app.ADMIN_TOKEN},

@@ -142,14 +142,42 @@ def get_bot_user_id() -> Optional[str]:
 def subscribe_chat_eventsub(broadcaster_id: str) -> None:
     if not TWITCH_CLIENT_ID or not TWITCH_CLIENT_SECRET:
         logger.info(
-            "Skipping chat EventSub subscription for %s due to missing app credentials",
+            "Skipping chat EventSub subscription for %s due to missing client credentials",
             broadcaster_id,
         )
         return
+
+    db = SessionLocal()
     try:
-        token = get_app_access_token()
-    except requests.RequestException as exc:
-        logger.warning("Failed to obtain app access token for EventSub subscription: %s", exc)
+        cfg = _get_bot_config(db)
+        access_token = cfg.access_token
+        scopes = set((cfg.scopes or "").split())
+        expires_at = cfg.expires_at
+    finally:
+        db.close()
+
+    if not access_token:
+        logger.info(
+            "Skipping chat EventSub subscription for %s due to missing bot access token",
+            broadcaster_id,
+        )
+        return
+
+    if expires_at and expires_at <= datetime.utcnow():
+        logger.warning(
+            "Bot access token expired; cannot subscribe %s to chat EventSub",
+            broadcaster_id,
+        )
+        return
+
+    required_scopes = {"user:read:chat", "user:write:chat", "user:bot"}
+    missing_scopes = sorted(scope for scope in required_scopes if scope not in scopes)
+    if missing_scopes:
+        logger.warning(
+            "Bot OAuth scopes missing %s; cannot subscribe %s to chat EventSub",
+            ", ".join(missing_scopes),
+            broadcaster_id,
+        )
         return
 
     try:
@@ -159,10 +187,14 @@ def subscribe_chat_eventsub(broadcaster_id: str) -> None:
         return
 
     if not bot_id:
+        logger.info(
+            "Skipping chat EventSub subscription for %s due to unknown bot user id",
+            broadcaster_id,
+        )
         return
 
     headers = {
-        "Authorization": f"Bearer {token}",
+        "Authorization": f"Bearer {access_token}",
         "Client-Id": TWITCH_CLIENT_ID,
         "Content-Type": "application/json",
     }
@@ -181,12 +213,19 @@ def subscribe_chat_eventsub(broadcaster_id: str) -> None:
     }
 
     try:
-        requests.post(
+        response = requests.post(
             "https://api.twitch.tv/helix/eventsub/subscriptions",
             headers=headers,
             data=json.dumps(payload),
             timeout=5,
         )
+        if not response.ok:
+            logger.warning(
+                "Chat EventSub subscription for broadcaster %s returned %s: %s",
+                broadcaster_id,
+                response.status_code,
+                response.text,
+            )
     except requests.RequestException as exc:
         logger.warning(
             "Failed to subscribe bot %s to chat messages for broadcaster %s: %s",
