@@ -215,39 +215,70 @@ qs('login-btn').onclick = () => {
 
 async function updateRegButton() {
   const btn = qs('reg-btn');
-  if (!userLogin) { btn.style.display = 'none'; return; }
+  if (!userLogin || !btn) { if (btn) { btn.style.display = 'none'; } return; }
   try {
     const resp = await fetch(`${API}/channels`, { credentials: 'include' });
     if (!resp.ok) { btn.style.display = 'none'; return; }
     const list = await resp.json();
     const found = list.find(ch => ch.channel_name.toLowerCase() === userLogin.toLowerCase());
-    if (found) {
-      btn.textContent = 'unregister your channel';
+    const startChannelAuth = async () => {
+      const returnUrl = window.location.href.split('#')[0];
+      try {
+        const resp = await fetch(
+          `${API}/auth/login?channel=${encodeURIComponent(userLogin)}&return_url=${encodeURIComponent(returnUrl)}`
+        );
+        if (!resp.ok) {
+          throw new Error(`failed with status ${resp.status}`);
+        }
+        const data = await resp.json();
+        if (!data || !data.auth_url) {
+          throw new Error('missing auth URL');
+        }
+        location.href = data.auth_url;
+      } catch (e) {
+        console.error('Failed to start channel authorization', e);
+        alert('Failed to start the channel authorization flow. Please try again.');
+      }
+    };
+
+    if (found && found.authorized) {
+      const channel = found.channel_name;
+      const joinActive = !!found.join_active;
+      btn.textContent = joinActive ? 'make the bot leave/mute' : 'join the bot to chat';
       btn.onclick = async () => {
-        await fetch(`${API}/channels/${userLogin}`, {method:'DELETE', credentials: 'include'});
-        location.reload();
-      };
-    } else {
-      btn.textContent = 'register your channel';
-      btn.onclick = async () => {
-        const returnUrl = window.location.href.split('#')[0];
+        btn.disabled = true;
+        const desired = joinActive ? 0 : 1;
+        const encodedChannel = encodeURIComponent(channel);
         try {
-          const resp = await fetch(
-            `${API}/auth/login?channel=${encodeURIComponent(userLogin)}&return_url=${encodeURIComponent(returnUrl)}`
-          );
-          if (!resp.ok) {
-            throw new Error(`failed with status ${resp.status}`);
+          const toggleResp = await fetch(`${API}/channels/${encodedChannel}?join_active=${desired}`, {
+            method: 'PUT',
+            credentials: 'include'
+          });
+          if (!toggleResp.ok) {
+            throw new Error(`toggle failed with status ${toggleResp.status}`);
           }
-          const data = await resp.json();
-          if (!data || !data.auth_url) {
-            throw new Error('missing auth URL');
+          const queueState = joinActive ? 1 : 0;
+          try {
+            await fetch(`${API}/channels/${encodedChannel}/settings`, {
+              method: 'POST',
+              body: JSON.stringify({ queue_closed: queueState }),
+              headers: { 'Content-Type': 'application/json' },
+              credentials: 'include'
+            });
+          } catch (e) {
+            console.warn('Failed to update queue mute state', e);
           }
-          location.href = data.auth_url;
         } catch (e) {
-          console.error('Failed to start channel registration', e);
-          alert('Failed to start the channel registration flow. Please try again.');
+          console.error('Failed to update bot join status', e);
+          alert('Unable to update the bot status. Please try again.');
+        } finally {
+          btn.disabled = false;
+          updateRegButton();
         }
       };
+    } else {
+      btn.textContent = found ? 'authorize the bot for your channel' : 'register your channel';
+      btn.onclick = startChannelAuth;
     }
     btn.style.display = '';
   } catch (e) {
