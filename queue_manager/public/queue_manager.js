@@ -133,7 +133,9 @@ qs('tab-settings').onclick = () => showTab('settings');
 
 // ===== Queue functions =====
 async function fetchQueue() {
-  const resp = await fetch(`${API}/admin/queue`, { credentials: 'include' });
+  if (!channelName) { return; }
+  const encodedChannel = encodeURIComponent(channelName);
+  const resp = await fetch(`${API}/channels/${encodedChannel}/queue`, { credentials: 'include' });
   if (!resp.ok) { return; }
   const data = await resp.json();
   const q = qs('queue');
@@ -141,7 +143,10 @@ async function fetchQueue() {
   data.forEach(item => {
     const row = document.createElement('div');
     row.className = 'req';
-    row.innerHTML = `<span class="title">${item.artist} - ${item.title}</span>
+    const artist = item.artist || (item.song && item.song.artist) || '';
+    const title = item.title || (item.song && item.song.title) || '';
+    const label = artist || title ? `${artist} - ${title}`.replace(/^ - | -$/g, '') : `request #${item.id}`;
+    row.innerHTML = `<span class="title">${label}</span>
       <span class="ctrl">
         <button onclick="moveReq(${item.id}, -1)">⬆️</button>
         <button onclick="moveReq(${item.id}, 1)">⬇️</button>
@@ -154,9 +159,12 @@ async function fetchQueue() {
 }
 
 async function moveReq(id, dir) {
-  await fetch(`${API}/admin/queue/${id}/move`, {
+  if (!channelName) { return; }
+  const encodedChannel = encodeURIComponent(channelName);
+  const direction = dir < 0 ? 'up' : 'down';
+  await fetch(`${API}/channels/${encodedChannel}/queue/${id}/move`, {
     method: 'POST',
-    body: JSON.stringify({ dir }),
+    body: JSON.stringify({ direction }),
     headers: { 'Content-Type': 'application/json' },
     credentials: 'include'
   });
@@ -164,17 +172,23 @@ async function moveReq(id, dir) {
 }
 
 async function bumpReq(id) {
-  await fetch(`${API}/admin/queue/${id}/bump`, { method: 'POST', credentials: 'include' });
+  if (!channelName) { return; }
+  const encodedChannel = encodeURIComponent(channelName);
+  await fetch(`${API}/channels/${encodedChannel}/queue/${id}/bump_admin`, { method: 'POST', credentials: 'include' });
   fetchQueue();
 }
 
 async function skipReq(id) {
-  await fetch(`${API}/admin/queue/${id}/skip`, { method: 'POST', credentials: 'include' });
+  if (!channelName) { return; }
+  const encodedChannel = encodeURIComponent(channelName);
+  await fetch(`${API}/channels/${encodedChannel}/queue/${id}/skip`, { method: 'POST', credentials: 'include' });
   fetchQueue();
 }
 
 async function markPlayed(id) {
-  await fetch(`${API}/admin/queue/${id}/played`, { method: 'POST', credentials: 'include' });
+  if (!channelName) { return; }
+  const encodedChannel = encodeURIComponent(channelName);
+  await fetch(`${API}/channels/${encodedChannel}/queue/${id}/played`, { method: 'POST', credentials: 'include' });
   fetchQueue();
 }
 
