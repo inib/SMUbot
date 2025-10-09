@@ -296,25 +296,25 @@ class SongBot(commands.Bot):
             allowed_keys = set(allowed.keys())
 
             removed = current_keys - allowed_keys
-        for key in removed:
-            info = self.channel_map.pop(key)
-            name = info['channel_name']
-            task = self.listeners.pop(name, None)
-            if task:
-                task.cancel()
-            if name in self.joined:
-                try:
-                    await self.part_channels([name])
-                except Exception:
-                    pass
-                self.joined.discard(name)
-                await push_console_event(
-                    'info',
-                    f'Parted channel {name}',
-                    event='part',
-                    metadata={'channel': name},
-                )
-            self.state.pop(name, None)
+            for key in removed:
+                info = self.channel_map.pop(key)
+                name = info['channel_name']
+                task = self.listeners.pop(name, None)
+                if task:
+                    task.cancel()
+                if name in self.joined:
+                    try:
+                        await self.part_channels([name])
+                    except Exception:
+                        pass
+                    self.joined.discard(name)
+                    await push_console_event(
+                        'info',
+                        f'Parted channel {name}',
+                        event='part',
+                        metadata={'channel': name},
+                    )
+                self.state.pop(name, None)
 
             for key, row in allowed.items():
                 self.channel_map[key] = row
