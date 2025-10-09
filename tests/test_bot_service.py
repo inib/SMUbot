@@ -15,6 +15,7 @@ class BotServiceTests(unittest.IsolatedAsyncioTestCase):
         self.backend = AsyncMock()
         self.backend.push_bot_log = AsyncMock()
         self.backend.get_bot_config = AsyncMock()
+        self.backend.set_bot_status = AsyncMock()
         bot_app.backend = self.backend
         self.created_bots: list[tuple[MagicMock, dict]] = []
 
@@ -22,6 +23,7 @@ class BotServiceTests(unittest.IsolatedAsyncioTestCase):
             bot = MagicMock()
             bot.start = AsyncMock()
             bot.close = AsyncMock()
+            bot.shutdown = AsyncMock()
             bot.update_enabled = AsyncMock()
             ready_event = asyncio.Event()
             ready_event.set()
@@ -84,18 +86,16 @@ class BotServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(settings.refresh_token, "fetched-refresh")
         self.assertTrue(settings.enabled)
 
-    async def test_settings_fall_back_to_environment(self) -> None:
-        with patch.object(bot_app, "ENV_BOT_TOKEN", "env-token"), \
-             patch.object(bot_app, "ENV_BOT_NICK", "envnick"):
-            service = bot_app.BotService(
-                self.backend,
-                bot_factory=self.bot_factory,
-                task_factory=asyncio.create_task,
-            )
-            settings = service._settings_from_config({})
-        self.assertEqual(settings.token, "env-token")
-        self.assertEqual(settings.login, "envnick")
-        self.assertTrue(settings.enabled)
+    async def test_settings_missing_credentials_disable_bot(self) -> None:
+        service = bot_app.BotService(
+            self.backend,
+            bot_factory=self.bot_factory,
+            task_factory=asyncio.create_task,
+        )
+        settings = service._settings_from_config({})
+        self.assertIsNone(settings.token)
+        self.assertIsNone(settings.login)
+        self.assertFalse(settings.enabled)
 
     async def test_missing_credentials_idle_bot(self) -> None:
         service = bot_app.BotService(
@@ -124,7 +124,8 @@ class BotServiceTests(unittest.IsolatedAsyncioTestCase):
         await service.apply_settings(
             bot_app.BotSettings(token="abc", refresh_token=None, login="nick", enabled=False)
         )
-        bot.close.assert_awaited()
+        bot.shutdown.assert_awaited()
+        bot.close.assert_not_awaited()
 
     async def test_sync_channels_joins_backend_channels(self) -> None:
         song_bot = bot_app.SongBot.__new__(bot_app.SongBot)
@@ -137,6 +138,8 @@ class BotServiceTests(unittest.IsolatedAsyncioTestCase):
         song_bot.join_channels = AsyncMock()
         song_bot.part_channels = AsyncMock()
         song_bot.listen_backend = AsyncMock()
+        song_bot._announce_joined = AsyncMock()
+        song_bot._announce_left = AsyncMock()
 
         channel_rows = [
             {"channel_name": "Foo", "authorized": True, "join_active": 1},
@@ -145,13 +148,9 @@ class BotServiceTests(unittest.IsolatedAsyncioTestCase):
         self.backend.get_channels = AsyncMock(return_value=channel_rows)
         self.backend.get_queue = AsyncMock(return_value=[])
 
-        created_tasks: list[MagicMock] = []
-
         def fake_create_task(coro):
-            task = MagicMock()
-            created_tasks.append(task)
             coro.close()
-            return task
+            return MagicMock()
 
         with patch.object(bot_app.asyncio, "create_task", side_effect=fake_create_task):
             await song_bot.sync_channels()
@@ -160,8 +159,12 @@ class BotServiceTests(unittest.IsolatedAsyncioTestCase):
         song_bot.join_channels.assert_any_await(["Bar"])
         self.assertIn("foo", song_bot.channel_map)
         self.assertIn("bar", song_bot.channel_map)
-        self.assertEqual(len(created_tasks), 2)
         self.backend.get_queue.assert_awaited()
+        self.assertEqual(song_bot.listen_backend.call_count, 2)
+        self.backend.set_bot_status.assert_any_await("Foo", True)
+        self.backend.set_bot_status.assert_any_await("Bar", True)
+        song_bot._announce_joined.assert_any_call("Foo")
+        song_bot._announce_joined.assert_any_call("Bar")
 
     async def test_sync_channels_logs_join_errors(self) -> None:
         song_bot = bot_app.SongBot.__new__(bot_app.SongBot)
@@ -174,6 +177,8 @@ class BotServiceTests(unittest.IsolatedAsyncioTestCase):
         song_bot.part_channels = AsyncMock()
         song_bot.listen_backend = AsyncMock()
         song_bot.join_channels = AsyncMock(side_effect=RuntimeError("boom"))
+        song_bot._announce_joined = AsyncMock()
+        song_bot._announce_left = AsyncMock()
 
         channel_rows = [
             {"channel_name": "Foo", "authorized": True, "join_active": 1},
@@ -192,6 +197,8 @@ class BotServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs.get("metadata"), {"channel": "Foo", "error": "boom"})
         self.assertEqual(kwargs.get("event"), "join_error")
         self.assertNotIn("Foo", song_bot.joined)
+        self.backend.set_bot_status.assert_awaited_once_with("Foo", False, "boom")
+        song_bot._announce_joined.assert_not_called()
 
 
 if __name__ == "__main__":
