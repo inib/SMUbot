@@ -1,18 +1,23 @@
 from __future__ import annotations
 import os, re, asyncio, json, yaml
-from typing import Optional, Dict, List, Tuple, Callable, Awaitable
+from typing import Optional, Dict, List, Tuple, Callable, Awaitable, Set
 from dataclasses import dataclass
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import aiohttp
+from twitchio import eventsub
 from twitchio.ext import commands
+from twitchio.payloads import TokenRefreshedPayload
 
 # ---- Env ----
 # Full URL of the backend API, defaulting to the docker-compose service name.
 BACKEND_URL = os.getenv('BACKEND_URL', 'http://api:7070')
 # Token used for privileged requests to the backend.
 ADMIN_TOKEN = os.getenv('ADMIN_TOKEN', 'change-me')
+TWITCH_CLIENT_ID_ENV = os.getenv('TWITCH_CLIENT_ID')
+TWITCH_CLIENT_SECRET_ENV = os.getenv('TWITCH_CLIENT_SECRET')
+BOT_USER_ID_ENV = os.getenv('BOT_USER_ID') or os.getenv('TWITCH_BOT_USER_ID')
 MESSAGES_PATH = Path(os.getenv("BOT_MESSAGES_PATH", "/bot/messages.yml"))
 
 COMMANDS_FILE = os.getenv('COMMANDS_FILE', '/bot/commands.yml')
@@ -162,6 +167,22 @@ class Backend:
     async def get_bot_config(self) -> Dict[str, object]:
         return await self._req('GET', "/bot/config")
 
+    async def update_bot_tokens(
+        self,
+        *,
+        access_token: str,
+        refresh_token: str,
+        expires_at: Optional[str],
+        scopes: List[str],
+    ) -> Dict[str, object]:
+        payload = {
+            'access_token': access_token,
+            'refresh_token': refresh_token,
+            'expires_at': expires_at,
+            'scopes': scopes,
+        }
+        return await self._req('POST', "/bot/config/tokens", payload)
+
     async def push_bot_log(
         self,
         *,
@@ -185,12 +206,16 @@ class BotSettings:
     token: Optional[str]
     refresh_token: Optional[str]
     login: Optional[str]
+    client_id: Optional[str]
+    client_secret: Optional[str]
+    bot_user_id: Optional[str]
+    scopes: List[str]
     enabled: bool
     error: Optional[str] = None
 
 
 def _format_token(token: str) -> str:
-    return token if token.startswith('oauth:') else f"oauth:{token}"
+    return token.removeprefix('oauth:') if token else token
 
 
 async def push_console_event(
@@ -259,199 +284,306 @@ def load_messages(path: Path) -> Dict[str, str]:
 
 # ---- bot ----
 class SongBot(commands.Bot):
-    def __init__(self, *, token: str, nick: str, enabled: bool = True):
-        if not token or not nick:
-            raise RuntimeError('token and nick required')
+    def __init__(
+        self,
+        *,
+        client_id: str,
+        client_secret: str,
+        bot_id: str,
+        token: str,
+        refresh_token: str,
+        login: str,
+        scopes: List[str],
+        enabled: bool = True,
+    ):
+        if not token or not refresh_token or not login or not bot_id:
+            raise RuntimeError('token, refresh_token, login, and bot_id are required')
         self.commands_map = load_commands(COMMANDS_FILE)
         self.messages = load_messages(MESSAGES_PATH)
         self.currency_singular = self.messages.get('currency_singular', 'point')
         self.currency_plural = self.messages.get('currency_plural', 'points')
         prefix = self.commands_map['prefix'][0]
-        super().__init__(token=token, prefix=prefix, initial_channels=[])
+        super().__init__(
+            client_id=client_id,
+            client_secret=client_secret,
+            bot_id=str(bot_id),
+            prefix=prefix,
+            fetch_client_user=False,
+        )
         self.channel_map: Dict[str, Dict] = {}
-        self.ready_event = asyncio.Event()
-        self.state: Dict[str, Dict] = {}
         self.listeners: Dict[str, asyncio.Task] = {}
-        self.joined: set[str] = set()
+        self.state: Dict[str, Dict] = {}
+        self.joined: Set[str] = set()
         self._sync_lock = asyncio.Lock()
+        self.ready_event = asyncio.Event()
         self.enabled = enabled
-        self._configured_login = nick
+        self._configured_login = login
+        self.bot_user_id = str(bot_id)
+        self._user_token = token
+        self._refresh_token = refresh_token
+        self._scopes = list(scopes or [])
+        self._subscription_ids: Dict[str, str] = {}
 
-    async def event_ready(self):
+    @property
+    def configured_login(self) -> Optional[str]:
+        return self._configured_login
+
+    async def load_tokens(self, path: Optional[str] = None) -> None:
+        if not self._user_token or not self._refresh_token:
+            raise RuntimeError('Bot credentials are unavailable')
+        payload = await super().add_token(self._user_token, self._refresh_token)
+        self._scopes = list(payload.scopes)
+        await self._persist_tokens(
+            access_token=self._user_token,
+            refresh_token=self._refresh_token,
+            expires_in=payload.expires_in,
+            scopes=self._scopes,
+        )
+
+    async def save_tokens(self, path: Optional[str] = None) -> None:
+        # Tokens are persisted to the backend, so skip file writes.
+        return None
+
+    async def _persist_tokens(
+        self,
+        *,
+        access_token: str,
+        refresh_token: str,
+        expires_in: Optional[int],
+        scopes: List[str],
+    ) -> None:
+        expires_at_str: Optional[str] = None
+        if expires_in is not None:
+            try:
+                expires_at = datetime.utcnow() + timedelta(seconds=int(expires_in))
+                expires_at_str = expires_at.isoformat()
+            except Exception:
+                expires_at_str = None
+        try:
+            await backend.update_bot_tokens(
+                access_token=access_token,
+                refresh_token=refresh_token,
+                expires_at=expires_at_str,
+                scopes=scopes,
+            )
+        except Exception:
+            # Persisting tokens should not crash the bot if the backend is unavailable.
+            pass
+
+    async def event_token_refreshed(self, payload: TokenRefreshedPayload) -> None:
+        self._user_token = payload.token
+        self._refresh_token = payload.refresh_token
+        self._scopes = list(payload.scopes)
+        await self._persist_tokens(
+            access_token=payload.token,
+            refresh_token=payload.refresh_token,
+            expires_in=payload.expires_in,
+            scopes=self._scopes,
+        )
+
+    async def event_ready(self) -> None:
         if self.enabled:
             await self.sync_channels()
         asyncio.create_task(self.channel_refresher())
         self.ready_event.set()
 
-    @property
-    def configured_login(self) -> Optional[str]:
-        return getattr(self, "_configured_login", None)
-
-    async def channel_refresher(self):
+    async def channel_refresher(self) -> None:
         while True:
             await asyncio.sleep(60)
             if self.enabled:
                 await self.sync_channels()
 
-    async def sync_channels(self):
+    def _channel_login(self, name: str) -> str:
+        return name.lower()
+
+    def _channel_info(self, login: str) -> Optional[Dict]:
+        return self.channel_map.get(self._channel_login(login))
+
+    async def sync_channels(self) -> None:
         if not self.enabled:
             await self._disable_all_channels()
             return
         async with self._sync_lock:
             rows = await backend.get_channels()
             allowed = {
-                r['channel_name'].lower(): r
+                self._channel_login(r['channel_name']): r
                 for r in rows
                 if r.get('authorized') and r.get('join_active')
             }
-
             current_keys = set(self.channel_map.keys())
             allowed_keys = set(allowed.keys())
 
             removed = current_keys - allowed_keys
             for key in removed:
-                info = self.channel_map.pop(key)
-                name = info['channel_name']
-                task = self.listeners.pop(name, None)
+                row = self.channel_map.pop(key)
+                channel_name = row['channel_name']
+                broadcaster_id = str(row.get('channel_id') or '')
+                task = self.listeners.pop(key, None)
                 if task:
                     task.cancel()
-                if name in self.joined:
-                    await self._announce_left(name)
-                    try:
-                        await self.part_channels([name])
-                    except Exception:
-                        pass
-                    await backend.set_bot_status(name, False)
-                    self.joined.discard(name)
-                    await push_console_event(
-                        'info',
-                        f'Parted channel {name}',
-                        event='part',
-                        metadata={'channel': name},
-                    )
-                else:
-                    await backend.set_bot_status(name, False)
-                self.state.pop(name, None)
+                await self._unsubscribe_channel(broadcaster_id)
+                if key in self.joined:
+                    await self._announce_left(key)
+                    self.joined.discard(key)
+                await backend.set_bot_status(channel_name, False)
+                await push_console_event(
+                    'info',
+                    f'Parted channel {channel_name}',
+                    event='part',
+                    metadata={'channel': channel_name},
+                )
+                self.state.pop(key, None)
 
-            for key, row in allowed.items():
-                self.channel_map[key] = row
+            for key in allowed_keys & current_keys:
+                self.channel_map[key] = allowed[key]
 
             new_keys = allowed_keys - current_keys
             for key in new_keys:
                 row = allowed[key]
-                name = row['channel_name']
+                channel_name = row['channel_name']
+                broadcaster_id = str(row.get('channel_id') or '')
                 try:
-                    await self.join_channels([name])
+                    await self._subscribe_for_channel(broadcaster_id)
                 except Exception as exc:
-                    await backend.set_bot_status(name, False, str(exc))
+                    await backend.set_bot_status(channel_name, False, str(exc))
                     await push_console_event(
                         'error',
-                        f'Failed to join channel {name}: {exc}',
+                        f'Failed to subscribe channel {channel_name}: {exc}',
                         event='join_error',
-                        metadata={'channel': name, 'error': str(exc)},
+                        metadata={'channel': channel_name, 'error': str(exc)},
                     )
+                    self.channel_map.pop(key, None)
                     continue
-                self.joined.add(name)
-                await backend.set_bot_status(name, True)
+                await backend.set_bot_status(channel_name, True)
                 await push_console_event(
                     'info',
-                    f'Joined channel {name}',
+                    f'Subscribed channel {channel_name}',
                     event='join',
-                    metadata={'channel': name},
+                    metadata={'channel': channel_name},
                 )
-                asyncio.create_task(self._announce_joined(name))
-                initial_queue = await backend.get_queue(name, include_played=True)
-                self.state[name] = {
+                self.joined.add(key)
+                asyncio.create_task(self._announce_joined(key))
+                initial_queue = await backend.get_queue(channel_name, include_played=True)
+                self.state[key] = {
+                    'channel_name': channel_name,
                     'queue': initial_queue,
                     'last_event': datetime.utcnow().isoformat(),
                 }
-                self.listeners[name] = asyncio.create_task(self.listen_backend(name))
+                self.channel_map[key] = row
+                self.listeners[key] = asyncio.create_task(self.listen_backend(channel_name))
 
-            # Ensure listeners exist for channels that persisted through refresh.
             for key, row in self.channel_map.items():
-                name = row['channel_name']
-                if name not in self.listeners:
-                    self.listeners[name] = asyncio.create_task(self.listen_backend(name))
-                if name not in self.state:
-                    initial_queue = await backend.get_queue(name, include_played=True)
-                    self.state[name] = {
+                channel_name = row['channel_name']
+                if key not in self.listeners:
+                    self.listeners[key] = asyncio.create_task(self.listen_backend(channel_name))
+                if key not in self.state:
+                    initial_queue = await backend.get_queue(channel_name, include_played=True)
+                    self.state[key] = {
+                        'channel_name': channel_name,
                         'queue': initial_queue,
                         'last_event': datetime.utcnow().isoformat(),
                     }
+                await self._subscribe_for_channel(str(row.get('channel_id') or ''))
 
-    async def shutdown(self):
-        await self._disable_all_channels()
-        await super().close()
+    async def _subscribe_for_channel(self, broadcaster_id: str) -> None:
+        if not broadcaster_id:
+            raise RuntimeError('Channel missing broadcaster id')
+        if broadcaster_id in self._subscription_ids:
+            return
+        payload = eventsub.ChatMessageSubscription(
+            broadcaster_user_id=broadcaster_id,
+            user_id=self.bot_user_id,
+        )
+        response = await self.subscribe_websocket(payload=payload, as_bot=True)
+        subscription = getattr(response, 'subscription', None)
+        sub_id = getattr(subscription, 'id', None)
+        if not sub_id:
+            raise RuntimeError('Subscription id unavailable')
+        self._subscription_ids[broadcaster_id] = sub_id
 
-    async def _disable_all_channels(self):
+    async def _unsubscribe_channel(self, broadcaster_id: str) -> None:
+        sub_id = self._subscription_ids.pop(broadcaster_id, None)
+        if not sub_id:
+            return
+        try:
+            await self.delete_websocket_subscription(sub_id, force=True)
+        except Exception:
+            pass
+
+    async def _disable_all_channels(self) -> None:
         for task in self.listeners.values():
             task.cancel()
         self.listeners.clear()
-        for name in list(self.joined):
-            await self._announce_left(name)
-            try:
-                await self.part_channels([name])
-            except Exception:
-                pass
-            await backend.set_bot_status(name, False)
-            await push_console_event(
-                'info',
-                f'Parted channel {name}',
-                event='part',
-                metadata={'channel': name},
-            )
-        self.joined.clear()
-        self.state.clear()
+        for key, row in list(self.channel_map.items()):
+            await self._unsubscribe_channel(str(row.get('channel_id') or ''))
+            if key in self.joined:
+                await self._announce_left(key)
+                self.joined.discard(key)
+            await backend.set_bot_status(row['channel_name'], False)
         self.channel_map.clear()
+        self.state.clear()
 
-    async def _await_channel(self, name: str, attempts: int = 5, delay: float = 1.0):
-        lower = name.lower()
-        channel = self.get_channel(lower)
-        if channel:
-            return channel
-        for _ in range(attempts):
-            await asyncio.sleep(delay)
-            channel = self.get_channel(lower)
-            if channel:
-                return channel
-        return None
-
-    async def _announce_joined(self, name: str):
+    async def _announce_joined(self, login: str) -> None:
         message = self.messages.get('bot_joined')
         if not message:
             return
-        channel = await self._await_channel(name)
-        if not channel:
-            return
-        await self._send_message(
-            channel,
-            message,
-            metadata={'channel': name, 'event': 'bot_join'},
-        )
+        info = self._channel_info(login)
+        channel_label = info.get('channel_name') if info else login
+        await self._send_message(login, message, metadata={'channel': channel_label, 'event': 'bot_join'})
 
-    async def _announce_left(self, name: str):
+    async def _announce_left(self, login: str) -> None:
         message = self.messages.get('bot_left')
         if not message:
             return
-        channel = self.get_channel(name.lower())
-        if not channel:
+        info = self._channel_info(login)
+        channel_label = info.get('channel_name') if info else login
+        await self._send_message(login, message, metadata={'channel': channel_label, 'event': 'bot_part'})
+
+    async def _send_message(
+        self,
+        channel_login: str,
+        message: str,
+        *,
+        metadata: Optional[Dict[str, object]] = None,
+        reply_to: Optional[str] = None,
+        fallback_partial: Optional[object] = None,
+    ) -> None:
+        info = self._channel_info(channel_login)
+        partial = None
+        channel_label = channel_login
+        if info:
+            channel_label = info.get('channel_name') or channel_login
+            try:
+                partial = self.create_partialuser(info.get('channel_id'), info.get('channel_name'))
+            except Exception:
+                partial = None
+        if partial is None and fallback_partial is not None:
+            partial = fallback_partial
+            channel_label = getattr(fallback_partial, 'display_name', None) or getattr(fallback_partial, 'name', channel_login)
+        if partial is None:
             return
-        await self._send_message(
-            channel,
-            message,
-            metadata={'channel': name, 'event': 'bot_part'},
-        )
+        try:
+            await partial.send_message(
+                message,
+                sender=self.bot_user_id,
+                token_for=self.bot_user_id,
+                reply_to_message_id=reply_to,
+            )
+            await push_console_event(
+                'info',
+                f'Sent message to {channel_label}',
+                event='message',
+                metadata={**(metadata or {}), 'sent_text': message, 'channel': channel_label},
+            )
+        except Exception as exc:
+            await push_console_event(
+                'error',
+                f'Failed to send message to {channel_label}: {exc}',
+                event='message',
+                metadata={**(metadata or {}), 'channel': channel_label, 'error': str(exc)},
+            )
 
-    async def _send_message(self, channel, message: str, *, metadata: Optional[Dict[str, object]] = None):
-        await channel.send(message)
-        await push_console_event(
-            'info',
-            f'Sent message to {channel.name}',
-            event='message',
-            metadata={**(metadata or {}), 'sent_text': message, 'channel': channel.name},
-        )
-
-    async def update_enabled(self, enabled: bool):
+    async def update_enabled(self, enabled: bool) -> None:
         if self.enabled == enabled:
             return
         self.enabled = enabled
@@ -463,7 +595,449 @@ class SongBot(commands.Bot):
             await push_console_event('info', 'Enabling bot', event='lifecycle')
             await self.sync_channels()
 
+    async def event_message(self, message) -> None:
+        if not self.enabled:
+            return
+        if getattr(message.chatter, 'id', None) == self.bot_user_id:
+            return
+        content = (message.text or '').strip()
+        prefix = self.commands_map['prefix'][0]
+        if not content.startswith(prefix):
+            return
+        cmd, *rest = content[len(prefix):].split(' ', 1)
+        args = rest[0] if rest else ''
+        cmd_lower = cmd.lower()
+        if cmd_lower in self.commands_map['request']:
+            await self.handle_request(message, args)
+        elif cmd_lower in self.commands_map['prioritize']:
+            await self.handle_prioritize(message, args)
+        elif cmd_lower in self.commands_map['points']:
+            await self.handle_points(message)
+        elif cmd_lower in self.commands_map['remove']:
+            await self.handle_remove(message)
+        elif cmd_lower in self.commands_map['archive']:
+            await self.handle_archive(message)
 
+    async def handle_request(self, msg, arg: str) -> None:
+        login = self._channel_login(msg.broadcaster.name)
+        row = self.channel_map.get(login)
+        if not row:
+            await self._send_message(
+                login,
+                self.messages['channel_not_registered'],
+                metadata={'channel': msg.broadcaster.name, 'command': 'request'},
+                reply_to=msg.id,
+                fallback_partial=msg.broadcaster,
+            )
+            return
+        channel = row['channel_name']
+        display_name = getattr(msg.chatter, 'display_name', None) or msg.chatter.name
+        user_id = await backend.find_or_create_user(channel, str(msg.chatter.id), display_name)
+
+        ylink = extract_youtube_url(arg)
+        song = None
+        if ylink:
+            song = await backend.song_by_link(channel, ylink)
+            if not song:
+                if backend.session is None:
+                    await backend.start()
+                title_text = await fetch_youtube_oembed_title(backend.session, ylink)
+                artist, title = parse_artist_title(title_text) if title_text else ("YouTube", ylink)
+                song_id = await backend.add_song(channel, artist, title, ylink)
+                song = {'id': song_id, 'artist': artist, 'title': title, 'youtube_link': ylink}
+        else:
+            artist, title = parse_artist_title(arg)
+            found = await backend.search_song(channel, f"{artist} - {title}")
+            if not found:
+                song_id = await backend.add_song(channel, artist, title, None)
+                song = {'id': song_id, 'artist': artist, 'title': title}
+            else:
+                song = found
+
+        try:
+            await backend.add_request(
+                channel,
+                song['id'],
+                user_id,
+                want_priority=False,
+                prefer_sub_free=True,
+                is_subscriber=bool(msg.chatter.subscriber),
+            )
+            await self._send_message(
+                login,
+                self.messages['request_added'].format(
+                    artist=song.get('artist', ''),
+                    title=song.get('title', ''),
+                ),
+                metadata={'channel': channel, 'command': 'request'},
+                reply_to=msg.id,
+                fallback_partial=msg.broadcaster,
+            )
+        except Exception as exc:
+            await push_console_event(
+                'error',
+                f'Failed to add request for {msg.chatter.name}: {exc}',
+                metadata={'channel': channel, 'command': 'request'},
+            )
+            await self._send_message(
+                login,
+                self.messages['failed'].format(error=exc),
+                metadata={'channel': channel, 'command': 'request'},
+                reply_to=msg.id,
+                fallback_partial=msg.broadcaster,
+            )
+
+    async def handle_prioritize(self, msg, arg: str) -> None:
+        login = self._channel_login(msg.broadcaster.name)
+        row = self.channel_map.get(login)
+        if not row:
+            await self._send_message(
+                login,
+                self.messages['channel_not_registered'],
+                metadata={'channel': msg.broadcaster.name, 'command': 'prioritize'},
+                reply_to=msg.id,
+                fallback_partial=msg.broadcaster,
+            )
+            return
+        channel = row['channel_name']
+        display_name = getattr(msg.chatter, 'display_name', None) or msg.chatter.name
+        user_id = await backend.find_or_create_user(channel, str(msg.chatter.id), display_name)
+
+        queue = await backend.get_queue(channel)
+        my_prio = [q for q in queue if q['user_id'] == user_id and q['is_priority'] == 1]
+        if len(my_prio) >= 3:
+            await self._send_message(
+                login,
+                self.messages['prioritize_limit'],
+                metadata={'channel': channel, 'command': 'prioritize'},
+                reply_to=msg.id,
+                fallback_partial=msg.broadcaster,
+            )
+            return
+
+        target = None
+        if arg.strip().isdigit():
+            rid = int(arg.strip())
+            target = next((q for q in queue if q['id'] == rid and q['user_id'] == user_id and q['played'] == 0), None)
+        if not target:
+            mine = [q for q in queue if q['user_id'] == user_id and q['played'] == 0 and q['is_priority'] == 0]
+            target = mine[-1] if mine else None
+        if not target:
+            await self._send_message(
+                login,
+                self.messages['prioritize_no_target'],
+                metadata={'channel': channel, 'command': 'prioritize'},
+                reply_to=msg.id,
+                fallback_partial=msg.broadcaster,
+            )
+            return
+
+        try:
+            await backend.add_request(
+                channel,
+                target['song_id'],
+                user_id,
+                want_priority=True,
+                prefer_sub_free=True,
+                is_subscriber=bool(msg.chatter.subscriber),
+            )
+            await backend.delete_request(channel, target['id'])
+            await self._send_message(
+                login,
+                self.messages['prioritize_success'].format(request_id=target['id']),
+                metadata={'channel': channel, 'command': 'prioritize'},
+                reply_to=msg.id,
+                fallback_partial=msg.broadcaster,
+            )
+        except Exception as exc:
+            await push_console_event(
+                'error',
+                f'Failed to prioritize for {msg.chatter.name}: {exc}',
+                metadata={'channel': channel, 'command': 'prioritize'},
+            )
+            await self._send_message(
+                login,
+                self.messages['failed'].format(error=exc),
+                metadata={'channel': channel, 'command': 'prioritize'},
+                reply_to=msg.id,
+                fallback_partial=msg.broadcaster,
+            )
+
+    async def handle_points(self, msg) -> None:
+        login = self._channel_login(msg.broadcaster.name)
+        row = self.channel_map.get(login)
+        if not row:
+            await self._send_message(
+                login,
+                self.messages['channel_not_registered'],
+                metadata={'channel': msg.broadcaster.name, 'command': 'points'},
+                reply_to=msg.id,
+                fallback_partial=msg.broadcaster,
+            )
+            return
+        channel = row['channel_name']
+        display_name = getattr(msg.chatter, 'display_name', None) or msg.chatter.name
+        user_id = await backend.find_or_create_user(channel, str(msg.chatter.id), display_name)
+        u = await backend.get_user(channel, user_id)
+        await self._send_message(
+            login,
+            self.messages['points'].format(
+                username=display_name,
+                points=u.get('prio_points', 0),
+                currency_plural=self.currency_plural,
+            ),
+            metadata={'channel': channel, 'command': 'points'},
+            reply_to=msg.id,
+            fallback_partial=msg.broadcaster,
+        )
+
+    async def handle_remove(self, msg) -> None:
+        login = self._channel_login(msg.broadcaster.name)
+        row = self.channel_map.get(login)
+        if not row:
+            await self._send_message(
+                login,
+                self.messages['channel_not_registered'],
+                metadata={'channel': msg.broadcaster.name, 'command': 'remove'},
+                reply_to=msg.id,
+                fallback_partial=msg.broadcaster,
+            )
+            return
+        channel = row['channel_name']
+        display_name = getattr(msg.chatter, 'display_name', None) or msg.chatter.name
+        user_id = await backend.find_or_create_user(channel, str(msg.chatter.id), display_name)
+        queue = await backend.get_queue(channel)
+        mine = [q for q in queue if q['user_id'] == user_id and q['played'] == 0]
+        if not mine:
+            await self._send_message(
+                login,
+                self.messages['remove_no_pending'],
+                metadata={'channel': channel, 'command': 'remove'},
+                reply_to=msg.id,
+                fallback_partial=msg.broadcaster,
+            )
+            return
+        latest = mine[-1]
+        try:
+            await backend.delete_request(channel, latest['id'])
+            await self._send_message(
+                login,
+                self.messages['remove_success'].format(request_id=latest['id']),
+                metadata={'channel': channel, 'command': 'remove'},
+                reply_to=msg.id,
+                fallback_partial=msg.broadcaster,
+            )
+        except Exception as exc:
+            await push_console_event(
+                'error',
+                f'Failed to remove request for {msg.chatter.name}: {exc}',
+                metadata={'channel': channel, 'command': 'remove'},
+            )
+            await self._send_message(
+                login,
+                self.messages['failed'].format(error=exc),
+                metadata={'channel': channel, 'command': 'remove'},
+                reply_to=msg.id,
+                fallback_partial=msg.broadcaster,
+            )
+
+    async def handle_archive(self, msg) -> None:
+        if not (msg.chatter.moderator or msg.chatter.broadcaster):
+            await self._send_message(
+                self._channel_login(msg.broadcaster.name),
+                self.messages['archive_denied'],
+                metadata={'channel': msg.broadcaster.name, 'command': 'archive'},
+                reply_to=msg.id,
+                fallback_partial=msg.broadcaster,
+            )
+            return
+        login = self._channel_login(msg.broadcaster.name)
+        row = self.channel_map.get(login)
+        if not row:
+            await self._send_message(
+                login,
+                self.messages['channel_not_registered'],
+                metadata={'channel': msg.broadcaster.name, 'command': 'archive'},
+                reply_to=msg.id,
+                fallback_partial=msg.broadcaster,
+            )
+            return
+        channel = row['channel_name']
+        try:
+            await backend.archive_stream(channel)
+            await self.process_backend_update(channel)
+            await self._send_message(
+                login,
+                self.messages['archive_success'],
+                metadata={'channel': channel, 'command': 'archive'},
+                reply_to=msg.id,
+                fallback_partial=msg.broadcaster,
+            )
+        except Exception as exc:
+            await push_console_event(
+                'error',
+                f'Failed to archive queue for {msg.chatter.name}: {exc}',
+                metadata={'channel': channel, 'command': 'archive'},
+            )
+            await self._send_message(
+                login,
+                self.messages['failed'].format(error=exc),
+                metadata={'channel': channel, 'command': 'archive'},
+                reply_to=msg.id,
+                fallback_partial=msg.broadcaster,
+            )
+
+    async def listen_backend(self, ch_name: str) -> None:
+        url = f"{backend.base}/channels/{ch_name}/queue/stream"
+        while True:
+            try:
+                if backend.session is None:
+                    await backend.start()
+                async with backend.session.get(url) as resp:
+                    async for line in resp.content:
+                        line = line.decode().strip()
+                        if line.startswith('data:'):
+                            await self.process_backend_update(ch_name)
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                await push_console_event(
+                    'error',
+                    f'Queue stream error for {ch_name}: {exc}',
+                    event='backend',
+                    metadata={'channel': ch_name},
+                )
+                await asyncio.sleep(5)
+
+    async def process_backend_update(self, ch_name: str) -> None:
+        login = self._channel_login(ch_name)
+        state = self.state.get(login, {})
+        prev_queue = state.get('queue', [])
+        last_event = state.get('last_event')
+        new_queue = await backend.get_queue(ch_name, include_played=True)
+
+        await self.check_played(login, ch_name, prev_queue, new_queue)
+        await self.check_bumps(login, ch_name, prev_queue, new_queue)
+
+        events = await backend.get_events(ch_name, since=last_event) if last_event else await backend.get_events(ch_name)
+        if events:
+            for ev in reversed(events):
+                ev_time = ev['event_time']
+                if last_event and ev_time <= last_event:
+                    continue
+                await self.announce_event(login, ch_name, ev)
+            state['last_event'] = max(ev['event_time'] for ev in events)
+        state['queue'] = new_queue
+        state['channel_name'] = ch_name
+        self.state[login] = state
+
+    async def check_played(
+        self,
+        login: str,
+        channel: str,
+        prev_queue: List[dict],
+        new_queue: List[dict],
+    ) -> None:
+        if login not in self.joined:
+            return
+        prev_map = {q['id']: q for q in prev_queue}
+        for req in new_queue:
+            old = prev_map.get(req['id'])
+            if old and old['played'] == 0 and req['played'] == 1:
+                song = await backend.get_song(channel, req['song_id'])
+                user = await backend.get_user(channel, req['user_id'])
+                pending_prio = [q for q in new_queue if q['played'] == 0 and q['is_priority'] == 1]
+                if pending_prio:
+                    next_req = pending_prio[0]
+                    next_song = await backend.get_song(channel, next_req['song_id'])
+                    next_user = await backend.get_user(channel, next_req['user_id'])
+                    msg = self.messages['played_next'].format(
+                        artist=song.get('artist', '?'),
+                        title=song.get('title', '?'),
+                        user=user.get('username', '?'),
+                        next_artist=next_song.get('artist', '?'),
+                        next_title=next_song.get('title', '?'),
+                        next_user=next_user.get('username', '?'),
+                    )
+                else:
+                    msg = self.messages['played_last'].format(
+                        artist=song.get('artist', '?'),
+                        title=song.get('title', '?'),
+                        user=user.get('username', '?'),
+                        channel=channel,
+                    )
+                await self._send_message(
+                    login,
+                    msg,
+                    metadata={'channel': channel, 'event': 'played'},
+                )
+
+    async def check_bumps(
+        self,
+        login: str,
+        channel: str,
+        prev_queue: List[dict],
+        new_queue: List[dict],
+    ) -> None:
+        if login not in self.joined:
+            return
+        prev_map = {q['id']: q for q in prev_queue}
+        for req in new_queue:
+            old = prev_map.get(req['id'])
+            new_prio = req['is_priority'] == 1 and req.get('priority_source') == 'admin'
+            was_prio = old and old['is_priority'] == 1 if old else False
+            if new_prio and not was_prio:
+                song = await backend.get_song(channel, req['song_id'])
+                user = await backend.get_user(channel, req['user_id'])
+                await self._send_message(
+                    login,
+                    self.messages['bump_free'].format(
+                        artist=song.get('artist', '?'),
+                        title=song.get('title', '?'),
+                        user=user.get('username', '?'),
+                    ),
+                    metadata={'channel': channel, 'event': 'bump'},
+                )
+
+    async def announce_event(self, login: str, channel: str, ev: dict) -> None:
+        if login not in self.joined:
+            return
+        user = None
+        if ev.get('user_id'):
+            user = await backend.get_user(channel, ev['user_id'])
+        if not user:
+            return
+        meta = json.loads(ev.get('meta') or '{}')
+        etype = ev['type']
+        delta = 1
+        extra: Dict[str, int] = {}
+        if etype == 'gift_sub':
+            count = int(meta.get('count', 1))
+            delta = count
+            extra['count'] = count
+        elif etype == 'bits':
+            amount = int(meta.get('amount', 0))
+            extra['amount'] = amount
+        elif etype not in ('follow', 'raid'):
+            return
+        word = (
+            f"this {self.currency_singular}"
+            if delta == 1
+            else f"these {delta} {self.currency_plural}"
+        )
+        template = self.messages.get(f"award_{etype}")
+        if template:
+            await self._send_message(
+                login,
+                template.format(
+                    username=user.get('username', ''),
+                    word=word,
+                    points=user.get('prio_points', 0),
+                    currency_plural=self.currency_plural,
+                    **extra,
+                ),
+                metadata={'channel': channel, 'event': etype},
+            )
 class BotService:
     def __init__(
         self,
@@ -481,6 +1055,11 @@ class BotService:
         self._bot_task: Optional[asyncio.Task] = None
         self._current_token: Optional[str] = None
         self._current_login: Optional[str] = None
+        self._current_refresh: Optional[str] = None
+        self._current_client_id: Optional[str] = None
+        self._current_client_secret: Optional[str] = None
+        self._current_bot_id: Optional[str] = None
+        self._current_scopes: List[str] = []
         self._credentials_available: Optional[bool] = None
         self._last_enabled: Optional[bool] = None
 
@@ -507,14 +1086,23 @@ class BotService:
             await asyncio.sleep(self.poll_interval)
 
     async def apply_settings(self, settings: BotSettings):
-        if not settings.token or not settings.login:
+        required_fields = {
+            'access_token': settings.token,
+            'refresh_token': settings.refresh_token,
+            'login': settings.login,
+            'client_id': settings.client_id,
+            'client_secret': settings.client_secret,
+            'bot_user_id': settings.bot_user_id,
+        }
+        missing = [name for name, value in required_fields.items() if not value]
+        if missing:
             if self._credentials_available is not False:
-                error_details = settings.error or 'unknown reason'
+                error_details = settings.error or f"missing {', '.join(missing)}"
                 await push_console_event(
                     'error',
                     f'Bot credentials are unavailable; idling worker ({error_details})',
                     event='startup',
-                    metadata={'error': settings.error} if settings.error else None,
+                    metadata={'error': settings.error or error_details},
                 )
             self._credentials_available = False
             self._last_enabled = None
@@ -543,27 +1131,68 @@ class BotService:
         self._last_enabled = True
 
         token = _format_token(settings.token)
+        refresh = settings.refresh_token or ''
+        scopes_sorted = sorted(settings.scopes or [])
         requires_restart = (
             self._bot is None
             or token != self._current_token
+            or refresh != self._current_refresh
             or settings.login != self._current_login
+            or settings.client_id != self._current_client_id
+            or settings.client_secret != self._current_client_secret
+            or settings.bot_user_id != self._current_bot_id
+            or scopes_sorted != self._current_scopes
         )
         if requires_restart:
-            await self._restart_bot(token=token, login=settings.login, enabled=settings.enabled)
+            await self._restart_bot(
+                token=token,
+                refresh_token=refresh,
+                login=settings.login,
+                enabled=settings.enabled,
+                client_id=settings.client_id,
+                client_secret=settings.client_secret,
+                bot_user_id=settings.bot_user_id,
+                scopes=settings.scopes or [],
+            )
         elif self._bot:
             await self._bot.update_enabled(settings.enabled)
 
-    async def _restart_bot(self, *, token: str, login: str, enabled: bool):
+    async def _restart_bot(
+        self,
+        *,
+        token: str,
+        refresh_token: str,
+        login: str,
+        enabled: bool,
+        client_id: str,
+        client_secret: str,
+        bot_user_id: str,
+        scopes: List[str],
+    ):
         await self._stop_bot(reason='restarting')
         await push_console_event(
             'info',
             f'Connecting bot as {login}',
             event='lifecycle',
         )
-        bot = self.bot_factory(token=token, nick=login, enabled=enabled)
+        bot = self.bot_factory(
+            client_id=client_id,
+            client_secret=client_secret,
+            bot_id=bot_user_id,
+            token=token,
+            refresh_token=refresh_token,
+            login=login,
+            scopes=scopes,
+            enabled=enabled,
+        )
         self._bot = bot
         self._current_token = token
         self._current_login = login
+        self._current_refresh = refresh_token
+        self._current_client_id = client_id
+        self._current_client_secret = client_secret
+        self._current_bot_id = bot_user_id
+        self._current_scopes = sorted(scopes)
         self._bot_task = self._create_task(bot.start())
 
     async def _stop_bot(self, *, reason: Optional[str] = None):
@@ -589,6 +1218,11 @@ class BotService:
         self._bot_task = None
         self._current_token = None
         self._current_login = None
+        self._current_refresh = None
+        self._current_client_id = None
+        self._current_client_secret = None
+        self._current_bot_id = None
+        self._current_scopes = []
         if reason:
             await push_console_event(
                 'info',
@@ -603,26 +1237,56 @@ class BotService:
                 token=None,
                 refresh_token=None,
                 login=None,
+                client_id=None,
+                client_secret=None,
+                bot_user_id=None,
+                scopes=[],
                 enabled=False,
                 error='Backend returned invalid bot configuration payload',
             )
 
         token = config.get('access_token') or config.get('token')
-        login = config.get('login') or config.get('bot_login')
         refresh = config.get('refresh_token')
+        login = config.get('login') or config.get('bot_login')
+        client_id = config.get('client_id') or TWITCH_CLIENT_ID_ENV
+        client_secret = config.get('client_secret') or TWITCH_CLIENT_SECRET_ENV
+        bot_user_id = (
+            config.get('bot_user_id')
+            or config.get('bot_id')
+            or BOT_USER_ID_ENV
+        )
+        raw_scopes = config.get('scopes') or []
+        if isinstance(raw_scopes, str):
+            scopes = [scope for scope in raw_scopes.split() if scope]
+        elif isinstance(raw_scopes, list):
+            scopes = [str(scope) for scope in raw_scopes if scope]
+        else:
+            scopes = []
         enabled_flag = config.get('enabled') if 'enabled' in config else None
 
         missing: List[str] = []
         if not token:
             missing.append('access_token')
+        if not refresh:
+            missing.append('refresh_token')
         if not login:
             missing.append('login')
+        if not client_id:
+            missing.append('client_id')
+        if not client_secret:
+            missing.append('client_secret')
+        if not bot_user_id:
+            missing.append('bot_user_id')
         if missing:
             reason = 'Missing bot credentials: ' + ', '.join(missing)
             return BotSettings(
                 token=None,
                 refresh_token=None,
                 login=None,
+                client_id=None,
+                client_secret=None,
+                bot_user_id=None,
+                scopes=[],
                 enabled=False,
                 error=reason,
             )
@@ -632,6 +1296,10 @@ class BotService:
             token=token,
             refresh_token=refresh,
             login=login,
+            client_id=client_id,
+            client_secret=client_secret,
+            bot_user_id=bot_user_id,
+            scopes=scopes,
             enabled=enabled,
         )
 
