@@ -399,6 +399,8 @@ class BotConfigOut(BaseModel):
     scopes: List[str] = Field(default_factory=list)
     enabled: bool
     expires_at: Optional[datetime]
+    access_token: Optional[str] = None
+    refresh_token: Optional[str] = None
 
 
 class BotConfigUpdate(BaseModel):
@@ -791,15 +793,19 @@ def _get_bot_config(db: Session) -> BotConfig:
     return cfg
 
 
-def _serialize_bot_config(cfg: BotConfig) -> Dict[str, Any]:
+def _serialize_bot_config(cfg: BotConfig, *, include_tokens: bool = False) -> Dict[str, Any]:
     scopes = (cfg.scopes or "").split()
-    return {
+    data: Dict[str, Any] = {
         "login": cfg.login,
         "display_name": cfg.display_name,
         "scopes": scopes,
         "enabled": bool(cfg.enabled),
         "expires_at": cfg.expires_at,
     }
+    if include_tokens:
+        data["access_token"] = cfg.access_token
+        data["refresh_token"] = cfg.refresh_token
+    return data
 
 def _resolve_user_from_token(
     token: str,
@@ -1146,14 +1152,32 @@ def auth_session_delete(
     return {"success": True}
 
 
-@app.get("/bot/config", response_model=BotConfigOut, dependencies=[Depends(require_token)])
-def bot_config(db: Session = Depends(get_db)):
+@app.get(
+    "/bot/config",
+    response_model=BotConfigOut,
+    response_model_exclude_none=True,
+    dependencies=[Depends(require_token)],
+)
+def bot_config(
+    db: Session = Depends(get_db),
+    x_admin_token: Optional[str] = Header(None),
+):
     cfg = _get_bot_config(db)
-    return _serialize_bot_config(cfg)
+    include_tokens = x_admin_token == ADMIN_TOKEN
+    return _serialize_bot_config(cfg, include_tokens=include_tokens)
 
 
-@app.put("/bot/config", response_model=BotConfigOut, dependencies=[Depends(require_token)])
-def update_bot_config(payload: BotConfigUpdate, db: Session = Depends(get_db)):
+@app.put(
+    "/bot/config",
+    response_model=BotConfigOut,
+    response_model_exclude_none=True,
+    dependencies=[Depends(require_token)],
+)
+def update_bot_config(
+    payload: BotConfigUpdate,
+    db: Session = Depends(get_db),
+    x_admin_token: Optional[str] = Header(None),
+):
     cfg = _get_bot_config(db)
     data = payload.model_dump(exclude_none=True)
     changed = False
@@ -1192,7 +1216,8 @@ def update_bot_config(payload: BotConfigUpdate, db: Session = Depends(get_db)):
         cfg.updated_at = datetime.utcnow()
         db.commit()
         db.refresh(cfg)
-    return _serialize_bot_config(cfg)
+    include_tokens = x_admin_token == ADMIN_TOKEN
+    return _serialize_bot_config(cfg, include_tokens=include_tokens)
 
 
 @app.post("/bot/config/oauth", response_model=AuthUrlOut, dependencies=[Depends(require_token)])

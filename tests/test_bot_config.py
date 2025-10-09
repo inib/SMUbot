@@ -26,6 +26,7 @@ class BotConfigApiTests(unittest.TestCase):
         db = backend_app.SessionLocal()
         try:
             db.query(backend_app.BotConfig).delete()
+            db.query(backend_app.TwitchUser).delete()
             db.commit()
         finally:
             db.close()
@@ -48,7 +49,7 @@ class BotConfigApiTests(unittest.TestCase):
         response = self.client.get("/bot/config", headers={"X-Admin-Token": backend_app.ADMIN_TOKEN})
         self.assertEqual(response.status_code, 200)
         data = response.json()
-        self.assertIsNone(data["login"])
+        self.assertIsNone(data.get("login"))
         self.assertFalse(data["enabled"])
         self.assertEqual(data["scopes"], backend_app.BOT_APP_SCOPES)
 
@@ -63,6 +64,56 @@ class BotConfigApiTests(unittest.TestCase):
         data = response.json()
         self.assertTrue(data["enabled"])
         self.assertEqual(data["scopes"], payload["scopes"])
+
+    def test_fetch_config_includes_tokens_for_admin_header(self) -> None:
+        db = backend_app.SessionLocal()
+        try:
+            cfg = backend_app._get_bot_config(db)
+            cfg.login = "botnick"
+            cfg.access_token = "stored-access"
+            cfg.refresh_token = "stored-refresh"
+            cfg.enabled = True
+            db.commit()
+        finally:
+            db.close()
+
+        response = self.client.get(
+            "/bot/config",
+            headers={"X-Admin-Token": backend_app.ADMIN_TOKEN},
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["access_token"], "stored-access")
+        self.assertEqual(data["refresh_token"], "stored-refresh")
+
+    def test_fetch_config_hides_tokens_for_admin_session(self) -> None:
+        db = backend_app.SessionLocal()
+        try:
+            cfg = backend_app._get_bot_config(db)
+            cfg.login = "botnick"
+            cfg.access_token = "stored-access"
+            cfg.refresh_token = "stored-refresh"
+            cfg.enabled = True
+            user = backend_app.TwitchUser(
+                twitch_id="u1",
+                username="owner",
+                access_token="session-token",
+                refresh_token="",
+                scopes="",
+            )
+            db.add(user)
+            db.commit()
+        finally:
+            db.close()
+
+        response = self.client.get(
+            "/bot/config",
+            cookies={backend_app.ADMIN_SESSION_COOKIE: "session-token"},
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertNotIn("access_token", data)
+        self.assertNotIn("refresh_token", data)
 
     def test_bot_oauth_start_returns_authorize_url(self) -> None:
         backend_app.TWITCH_CLIENT_ID = "client"
