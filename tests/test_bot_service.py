@@ -126,6 +126,43 @@ class BotServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         bot.close.assert_awaited()
 
+    async def test_sync_channels_joins_backend_channels(self) -> None:
+        song_bot = bot_app.SongBot.__new__(bot_app.SongBot)
+        song_bot.channel_map = {}
+        song_bot.state = {}
+        song_bot.listeners = {}
+        song_bot.joined = set()
+        song_bot._sync_lock = asyncio.Lock()
+        song_bot.enabled = True
+        song_bot.join_channels = AsyncMock()
+        song_bot.part_channels = AsyncMock()
+        song_bot.listen_backend = AsyncMock()
+
+        channel_rows = [
+            {"channel_name": "Foo", "authorized": True, "join_active": 1},
+            {"channel_name": "Bar", "authorized": True, "join_active": 1},
+        ]
+        self.backend.get_channels = AsyncMock(return_value=channel_rows)
+        self.backend.get_queue = AsyncMock(return_value=[])
+
+        created_tasks: list[MagicMock] = []
+
+        def fake_create_task(coro):
+            task = MagicMock()
+            created_tasks.append(task)
+            coro.close()
+            return task
+
+        with patch.object(bot_app.asyncio, "create_task", side_effect=fake_create_task):
+            await song_bot.sync_channels()
+
+        song_bot.join_channels.assert_any_await(["Foo"])
+        song_bot.join_channels.assert_any_await(["Bar"])
+        self.assertIn("foo", song_bot.channel_map)
+        self.assertIn("bar", song_bot.channel_map)
+        self.assertEqual(len(created_tasks), 2)
+        self.backend.get_queue.assert_awaited()
+
 
 if __name__ == "__main__":
     unittest.main()
