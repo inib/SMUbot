@@ -719,7 +719,7 @@ function buildLoginScopes() {
     .split(/\s+/)
     .map(scope => scope.trim())
     .filter(Boolean);
-  const scopes = configured.length ? configured : ['chat:read', 'chat:edit', 'channel:bot'];
+  const scopes = configured.length ? configured : ['user:read:chat', 'user:write:chat', 'channel:bot'];
   if (!scopes.includes('user:read:email')) {
     scopes.push('user:read:email');
   }
