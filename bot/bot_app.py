@@ -55,6 +55,13 @@ DEFAULT_MESSAGES = {
     'bot_left': 'Song queue bot disconnected from chat.',
 }
 
+# Channels that should never trigger Twitch joins/subscriptions even if they
+# appear in the backend (e.g. seeded test data).
+EXCLUDED_CHANNEL_LOGINS = {
+    "example channel",
+    "example_channel",
+}
+
 YOUTUBE_PATTERNS = [
     re.compile(r"https?://(www\.)?youtube\.com/watch\?v=([\w-]{11})", re.I),
     re.compile(r"https?://(music\.)?youtube\.com/watch\?v=([\w-]{11})", re.I),
@@ -405,11 +412,13 @@ class SongBot(commands.Bot):
             return
         async with self._sync_lock:
             rows = await backend.get_channels()
-            allowed = {
-                self._channel_login(r['channel_name']): r
-                for r in rows
-                if r.get('authorized') and r.get('join_active')
-            }
+            allowed: Dict[str, Dict] = {}
+            for row in rows:
+                login = self._channel_login(row['channel_name'])
+                if login in EXCLUDED_CHANNEL_LOGINS:
+                    continue
+                if row.get('authorized') and row.get('join_active'):
+                    allowed[login] = row
             current_keys = set(self.channel_map.keys())
             allowed_keys = set(allowed.keys())
 
@@ -485,6 +494,56 @@ class SongBot(commands.Bot):
                     }
                 await self._subscribe_for_channel(str(row.get('channel_id') or ''))
 
+    def _extract_subscription_id(self, response: object) -> Optional[str]:
+        if not response:
+            return None
+        if isinstance(response, dict):
+            data = response.get('data')
+            if isinstance(data, list) and data:
+                first = data[0]
+                if isinstance(first, dict):
+                    sub_id = first.get('id')
+                    if sub_id:
+                        return str(sub_id)
+        subscription = getattr(response, 'subscription', None)
+        sub_id = getattr(subscription, 'id', None)
+        if sub_id:
+            return str(sub_id)
+        sub_id = getattr(response, 'id', None)
+        if sub_id:
+            return str(sub_id)
+        return None
+
+    async def _find_existing_subscription_id(self, broadcaster_id: str) -> Optional[str]:
+        for existing_id, details in self.websocket_subscriptions().items():
+            condition = getattr(details, 'condition', {}) or {}
+            sub_type = getattr(details, 'type', None)
+            if (
+                sub_type == eventsub.SubscriptionType.ChannelChatMessage
+                and condition.get('broadcaster_user_id') == broadcaster_id
+                and condition.get('user_id') == self.bot_user_id
+            ):
+                return str(existing_id)
+        try:
+            events = await self.fetch_eventsub_subscriptions(
+                token_for=self.bot_user_id,
+                type=eventsub.SubscriptionType.ChannelChatMessage.value,
+            )
+        except Exception:
+            return None
+        if not events:
+            return None
+        async for subscription in events.subscriptions:
+            condition = getattr(subscription, 'condition', {}) or {}
+            if (
+                condition.get('broadcaster_user_id') == broadcaster_id
+                and condition.get('user_id') == self.bot_user_id
+            ):
+                sub_id = getattr(subscription, 'id', None)
+                if sub_id:
+                    return str(sub_id)
+        return None
+
     async def _subscribe_for_channel(self, broadcaster_id: str) -> None:
         if not broadcaster_id:
             raise RuntimeError('Channel missing broadcaster id')
@@ -495,8 +554,9 @@ class SongBot(commands.Bot):
             user_id=self.bot_user_id,
         )
         response = await self.subscribe_websocket(payload=payload, as_bot=True)
-        subscription = getattr(response, 'subscription', None)
-        sub_id = getattr(subscription, 'id', None)
+        sub_id = self._extract_subscription_id(response)
+        if not sub_id:
+            sub_id = await self._find_existing_subscription_id(broadcaster_id)
         if not sub_id:
             raise RuntimeError('Subscription id unavailable')
         self._subscription_ids[broadcaster_id] = sub_id
