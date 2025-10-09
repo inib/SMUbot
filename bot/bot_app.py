@@ -325,7 +325,13 @@ class SongBot(commands.Bot):
                 name = row['channel_name']
                 try:
                     await self.join_channels([name])
-                except Exception:
+                except Exception as exc:
+                    await push_console_event(
+                        'error',
+                        f'Failed to join channel {name}: {exc}',
+                        event='join_error',
+                        metadata={'channel': name, 'error': str(exc)},
+                    )
                     continue
                 self.joined.add(name)
                 await push_console_event(
