@@ -118,6 +118,35 @@ class BotServiceTests(unittest.IsolatedAsyncioTestCase):
             "Missing bot credentials: access_token, refresh_token, login, client_id, client_secret, bot_user_id",
         )
 
+    async def test_settings_fall_back_to_env_credentials(self) -> None:
+        original_client_id = bot_app.TWITCH_CLIENT_ID_ENV
+        original_client_secret = bot_app.TWITCH_CLIENT_SECRET_ENV
+        original_bot_user_id = bot_app.BOT_USER_ID_ENV
+        bot_app.TWITCH_CLIENT_ID_ENV = "env-client"
+        bot_app.TWITCH_CLIENT_SECRET_ENV = "env-secret"
+        bot_app.BOT_USER_ID_ENV = "42"
+        try:
+            service = bot_app.BotService(
+                self.backend,
+                bot_factory=self.bot_factory,
+                task_factory=asyncio.create_task,
+            )
+            config = {
+                "access_token": "token",
+                "refresh_token": "refresh",
+                "login": "botnick",
+                "enabled": True,
+            }
+            settings = service._settings_from_config(config)
+            self.assertEqual(settings.client_id, "env-client")
+            self.assertEqual(settings.client_secret, "env-secret")
+            self.assertEqual(settings.bot_user_id, "42")
+            self.assertTrue(settings.enabled)
+        finally:
+            bot_app.TWITCH_CLIENT_ID_ENV = original_client_id
+            bot_app.TWITCH_CLIENT_SECRET_ENV = original_client_secret
+            bot_app.BOT_USER_ID_ENV = original_bot_user_id
+
     async def test_missing_credentials_idle_bot(self) -> None:
         service = bot_app.BotService(
             self.backend,
