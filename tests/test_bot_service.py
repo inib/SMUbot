@@ -56,6 +56,34 @@ class BotServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(kwargs["enabled"])
         bot.start.assert_called()
 
+    async def test_run_fetches_backend_credentials(self) -> None:
+        service = bot_app.BotService(
+            self.backend,
+            bot_factory=self.bot_factory,
+            task_factory=asyncio.create_task,
+        )
+        config = {
+            "access_token": "fetched-token",
+            "refresh_token": "fetched-refresh",
+            "login": "botnick",
+            "enabled": True,
+        }
+        self.backend.get_bot_config = AsyncMock(return_value=config)
+        service.apply_settings = AsyncMock()
+        sleep_mock = AsyncMock(side_effect=asyncio.CancelledError())
+
+        with patch.object(bot_app.asyncio, "sleep", sleep_mock):
+            with self.assertRaises(asyncio.CancelledError):
+                await service.run()
+
+        service.apply_settings.assert_awaited_once()
+        args, kwargs = service.apply_settings.call_args
+        settings = args[0]
+        self.assertIsInstance(settings, bot_app.BotSettings)
+        self.assertEqual(settings.token, "fetched-token")
+        self.assertEqual(settings.refresh_token, "fetched-refresh")
+        self.assertTrue(settings.enabled)
+
     async def test_settings_fall_back_to_environment(self) -> None:
         with patch.object(bot_app, "ENV_BOT_TOKEN", "env-token"), \
              patch.object(bot_app, "ENV_BOT_NICK", "envnick"):
