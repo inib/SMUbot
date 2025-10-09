@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Optional, List, Any, Dict, Mapping
+from typing import Optional, List, Any, Dict, Mapping, Iterable
 import os
 import json
 import time
@@ -821,14 +821,41 @@ def get_db() -> Session:
         db.close()
 
 
+def _normalize_scope_list(scopes: Iterable[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for scope in scopes:
+        scope_value = scope.strip()
+        if scope_value and scope_value not in seen:
+            seen.add(scope_value)
+            result.append(scope_value)
+    return result
+
+
+def _ensure_bot_config_scopes(cfg: "BotConfig") -> bool:
+    current = _normalize_scope_list((cfg.scopes or "").split())
+    required = _normalize_scope_list(BOT_APP_SCOPES)
+    missing = [scope for scope in required if scope not in current]
+    if missing:
+        current.extend(missing)
+        cfg.scopes = " ".join(current) if current else None
+        return True
+    return False
+
+
 def _get_bot_config(db: Session) -> BotConfig:
     cfg = db.query(BotConfig).order_by(BotConfig.id.asc()).first()
     if not cfg:
-        scopes = " ".join(BOT_APP_SCOPES) if BOT_APP_SCOPES else ""
+        default_scopes = _normalize_scope_list(BOT_APP_SCOPES)
+        scopes = " ".join(default_scopes) if default_scopes else ""
         cfg = BotConfig(scopes=scopes or None, enabled=False)
         db.add(cfg)
         db.commit()
         db.refresh(cfg)
+    else:
+        if _ensure_bot_config_scopes(cfg):
+            db.commit()
+            db.refresh(cfg)
     return cfg
 
 
