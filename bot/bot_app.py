@@ -275,13 +275,17 @@ class SongBot(commands.Bot):
         self.joined: set[str] = set()
         self._sync_lock = asyncio.Lock()
         self.enabled = enabled
-        self.nick = nick
+        self._configured_login = nick
 
     async def event_ready(self):
         if self.enabled:
             await self.sync_channels()
         asyncio.create_task(self.channel_refresher())
         self.ready_event.set()
+
+    @property
+    def configured_login(self) -> Optional[str]:
+        return getattr(self, "_configured_login", None)
 
     async def channel_refresher(self):
         while True:

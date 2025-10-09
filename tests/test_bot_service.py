@@ -207,6 +207,16 @@ class BotServiceTests(unittest.IsolatedAsyncioTestCase):
         self.backend.set_bot_status.assert_awaited_once_with("Foo", False, "boom")
         song_bot._announce_joined.assert_not_called()
 
+    async def test_songbot_does_not_assign_readonly_nick(self) -> None:
+        commands_map = {k: ([v] if not isinstance(v, list) else v) for k, v in bot_app.DEFAULT_COMMANDS.items()}
+        with patch.object(bot_app.commands.Bot, "__init__", return_value=None):
+            with patch.object(bot_app, "load_commands", return_value=commands_map):
+                with patch.object(bot_app, "load_messages", return_value=bot_app.DEFAULT_MESSAGES):
+                    bot = bot_app.SongBot(token="abc", nick="botnick", enabled=True)
+
+        self.assertTrue(bot.enabled)
+        self.assertEqual(bot.configured_login, "botnick")
+
 
 if __name__ == "__main__":
     unittest.main()
