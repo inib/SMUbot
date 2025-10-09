@@ -78,7 +78,10 @@ class BotConfigApiTests(unittest.TestCase):
             db.close()
 
     def test_update_config_scope_and_enabled(self) -> None:
-        payload = {"enabled": True, "scopes": ["user:read:chat", "channel:bot"]}
+        payload = {
+            "enabled": True,
+            "scopes": ["user:read:chat", "user:write:chat", "user:bot"],
+        }
         response = self.client.put(
             "/bot/config",
             headers={"X-Admin-Token": backend_app.ADMIN_TOKEN},

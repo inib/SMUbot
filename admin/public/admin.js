@@ -715,11 +715,13 @@ function addCustomScope() {
 }
 
 function buildLoginScopes() {
-  const configured = (window.TWITCH_SCOPES || '')
+  const configured = (window.BOT_APP_SCOPES || window.TWITCH_SCOPES || '')
     .split(/\s+/)
     .map(scope => scope.trim())
     .filter(Boolean);
-  const scopes = configured.length ? configured : ['user:read:chat', 'user:write:chat', 'channel:bot'];
+  const scopes = configured.length
+    ? configured
+    : ['user:read:chat', 'user:write:chat', 'user:bot'];
   if (!scopes.includes('user:read:email')) {
     scopes.push('user:read:email');
   }

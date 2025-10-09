@@ -142,7 +142,7 @@ class AuthSessionCORSTest(unittest.TestCase):
         cfg = backend_app._get_bot_config(cfg_db)
         cfg.login = "botnick"
         cfg.access_token = "bot-access"
-        cfg.scopes = "user:read:chat user:bot"
+        cfg.scopes = "user:read:chat user:write:chat user:bot"
         cfg.expires_at = datetime.utcnow() + timedelta(hours=1)
         cfg_db.commit()
         cfg_db.close()
@@ -191,7 +191,7 @@ class AuthSessionCORSTest(unittest.TestCase):
         cfg = backend_app._get_bot_config(cfg_db)
         cfg.login = "botnick"
         cfg.access_token = "bot-access"
-        cfg.scopes = "user:read:chat user:bot"
+        cfg.scopes = "user:read:chat user:write:chat user:bot"
         cfg.expires_at = datetime.utcnow() + timedelta(hours=1)
         cfg_db.commit()
         cfg_db.close()

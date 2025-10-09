@@ -170,9 +170,12 @@ def subscribe_chat_eventsub(broadcaster_id: str) -> None:
         )
         return
 
-    if "user:read:chat" not in scopes:
+    required_scopes = {"user:read:chat", "user:write:chat", "user:bot"}
+    missing_scopes = sorted(scope for scope in required_scopes if scope not in scopes)
+    if missing_scopes:
         logger.warning(
-            "Bot OAuth scopes missing user:read:chat; cannot subscribe %s to chat EventSub",
+            "Bot OAuth scopes missing %s; cannot subscribe %s to chat EventSub",
+            ", ".join(missing_scopes),
             broadcaster_id,
         )
         return
