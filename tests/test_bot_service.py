@@ -163,6 +163,36 @@ class BotServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(created_tasks), 2)
         self.backend.get_queue.assert_awaited()
 
+    async def test_sync_channels_logs_join_errors(self) -> None:
+        song_bot = bot_app.SongBot.__new__(bot_app.SongBot)
+        song_bot.channel_map = {}
+        song_bot.state = {}
+        song_bot.listeners = {}
+        song_bot.joined = set()
+        song_bot._sync_lock = asyncio.Lock()
+        song_bot.enabled = True
+        song_bot.part_channels = AsyncMock()
+        song_bot.listen_backend = AsyncMock()
+        song_bot.join_channels = AsyncMock(side_effect=RuntimeError("boom"))
+
+        channel_rows = [
+            {"channel_name": "Foo", "authorized": True, "join_active": 1},
+        ]
+        self.backend.get_channels = AsyncMock(return_value=channel_rows)
+        self.backend.get_queue = AsyncMock()
+
+        push_event = AsyncMock()
+        with patch.object(bot_app, "push_console_event", push_event):
+            await song_bot.sync_channels()
+
+        push_event.assert_awaited_once()
+        args, kwargs = push_event.call_args
+        self.assertEqual(args[0], "error")
+        self.assertIn("Failed to join channel Foo", args[1])
+        self.assertEqual(kwargs.get("metadata"), {"channel": "Foo", "error": "boom"})
+        self.assertEqual(kwargs.get("event"), "join_error")
+        self.assertNotIn("Foo", song_bot.joined)
+
 
 if __name__ == "__main__":
     unittest.main()
