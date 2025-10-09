@@ -381,6 +381,9 @@ class BotConfigOut(BaseModel):
     expires_at: Optional[datetime]
     access_token: Optional[str] = None
     refresh_token: Optional[str] = None
+    client_id: Optional[str] = None
+    client_secret: Optional[str] = None
+    bot_user_id: Optional[str] = None
 
 
 class BotConfigUpdate(BaseModel):
