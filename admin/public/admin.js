@@ -106,17 +106,38 @@ function renderChannelList(channels, oauthMap) {
     pill.appendChild(link);
 
     const oauth = oauthMap.get(ch.channel_name);
-    if (oauth) {
-      const badge = document.createElement('span');
-      badge.className = 'badge ' + (oauth.authorized ? 'ok' : 'warn');
-      if (oauth.authorized) {
-        const scopes = oauth.scopes && oauth.scopes.length ? oauth.scopes.join(', ') : 'connected';
-        badge.textContent = `oauth: ${scopes}`;
-      } else {
-        badge.textContent = 'oauth missing';
-      }
-      pill.appendChild(badge);
+    const authorized = oauth ? oauth.authorized : ch.authorized;
+
+    const authBadge = document.createElement('span');
+    authBadge.className = 'badge ' + (authorized ? 'ok' : 'warn');
+    authBadge.textContent = authorized ? 'auth ✓' : 'auth missing';
+    if (oauth && oauth.scopes && oauth.scopes.length) {
+      authBadge.title = `scopes: ${oauth.scopes.join(', ')}`;
     }
+    pill.appendChild(authBadge);
+
+    const botBadge = document.createElement('span');
+    let botClass = '';
+    let botText = '';
+    if (!authorized) {
+      botClass = 'warn';
+      botText = 'bot locked';
+    } else if (!ch.join_active) {
+      botClass = 'warn';
+      botText = 'bot paused';
+    } else if (ch.bot_active) {
+      botClass = 'ok';
+      botText = 'bot active';
+    } else {
+      botClass = 'error';
+      botText = 'bot offline';
+    }
+    botBadge.className = 'badge ' + botClass;
+    botBadge.textContent = botText;
+    if (ch.bot_last_error) {
+      botBadge.title = ch.bot_last_error;
+    }
+    pill.appendChild(botBadge);
 
     channelListEl.appendChild(pill);
   });
@@ -297,22 +318,43 @@ async function renderChannelTree(channels, oauthMap) {
     link.textContent = ch.channel_name;
     main.appendChild(link);
     const oauth = oauthMap.get(ch.channel_name);
-    if (oauth) {
-      const badge = document.createElement('span');
-      badge.className = 'badge ' + (oauth.authorized ? 'ok' : 'warn');
-      if (oauth.authorized) {
-        const scopes = oauth.scopes && oauth.scopes.length ? oauth.scopes.join(', ') : 'connected';
-        badge.textContent = `oauth: ${scopes}`;
-      } else {
-        badge.textContent = 'oauth missing';
-      }
-      main.appendChild(badge);
+    const authorized = oauth ? oauth.authorized : ch.authorized;
+    const authBadge = document.createElement('span');
+    authBadge.className = 'badge ' + (authorized ? 'ok' : 'warn');
+    authBadge.textContent = authorized ? 'auth ✓' : 'auth missing';
+    if (oauth && oauth.scopes && oauth.scopes.length) {
+      authBadge.title = `scopes: ${oauth.scopes.join(', ')}`;
     }
+    main.appendChild(authBadge);
+
+    const botBadge = document.createElement('span');
+    let botClass = '';
+    let botText = '';
+    if (!authorized) {
+      botClass = 'warn';
+      botText = 'bot locked';
+    } else if (!ch.join_active) {
+      botClass = 'warn';
+      botText = 'bot paused';
+    } else if (ch.bot_active) {
+      botClass = 'ok';
+      botText = 'bot active';
+    } else {
+      botClass = 'error';
+      botText = 'bot offline';
+    }
+    botBadge.className = 'badge ' + botClass;
+    botBadge.textContent = botText;
+    if (ch.bot_last_error) {
+      botBadge.title = ch.bot_last_error;
+    }
+    main.appendChild(botBadge);
     summary.appendChild(main);
     const meta = document.createElement('div');
     meta.className = 'summary-meta';
     const ownerInfo = oauth && oauth.owner_login ? ` • owner: ${oauth.owner_login}` : '';
-    meta.textContent = `join active: ${ch.join_active ? 'yes' : 'no'} • channel id: ${ch.channel_id}${ownerInfo}`;
+    const botMeta = ch.bot_active ? 'active' : (ch.join_active ? 'offline' : 'paused');
+    meta.textContent = `join active: ${ch.join_active ? 'yes' : 'no'} • bot: ${botMeta} • channel id: ${ch.channel_id}${ownerInfo}`;
     summary.appendChild(meta);
     details.appendChild(summary);
 

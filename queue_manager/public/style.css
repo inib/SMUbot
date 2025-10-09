@@ -22,6 +22,9 @@ a:hover{text-decoration:underline}
 .header{display:flex;gap:16px;align-items:center;margin-bottom:16px}
 .brand{font-weight:700;font-size:20px}
 .badge{display:inline-block;padding:.15rem .5rem;border-radius:999px;background:var(--panel);border:1px solid #24283b;color:var(--muted);font-size:12px}
+.badge.ok{border-color:var(--ok);color:var(--ok)}
+.badge.warn{border-color:var(--warn);color:var(--warn)}
+.badge.error{border-color:var(--danger);color:var(--danger)}
 .grid{display:grid;grid-template-columns:2fr 1fr;gap:16px}
 .card{background:var(--panel);border:1px solid #24283b;border-radius:12px;padding:14px}
 .card h2{margin:0 0 10px 0;font-size:16px}

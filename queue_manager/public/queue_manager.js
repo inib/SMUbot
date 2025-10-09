@@ -2,8 +2,52 @@ const API = window.BACKEND_URL;
 let channelName = '';
 let userLogin = '';
 let userInfo = null;
+let channelsCache = [];
 
 function qs(id) { return document.getElementById(id); }
+
+const botStatusEl = qs('bot-status');
+
+function getChannelInfo(name) {
+  if (!name) { return null; }
+  return channelsCache.find(ch => ch.channel_name.toLowerCase() === name.toLowerCase()) || null;
+}
+
+function updateBotStatusBadge(info) {
+  if (!botStatusEl) { return; }
+  botStatusEl.classList.remove('ok', 'warn', 'error');
+  if (!info) {
+    if (channelName) {
+      botStatusEl.hidden = false;
+      botStatusEl.textContent = 'bot: unknown';
+      botStatusEl.classList.add('warn');
+      botStatusEl.title = '';
+    } else {
+      botStatusEl.hidden = true;
+      botStatusEl.title = '';
+    }
+    return;
+  }
+  botStatusEl.hidden = false;
+  let text = '';
+  let cls = '';
+  if (!info.authorized) {
+    text = 'bot: auth required';
+    cls = 'error';
+  } else if (!info.join_active) {
+    text = 'bot: paused';
+    cls = 'warn';
+  } else if (info.bot_active) {
+    text = 'bot: connected';
+    cls = 'ok';
+  } else {
+    text = 'bot: offline';
+    cls = info.bot_last_error ? 'error' : 'warn';
+  }
+  botStatusEl.textContent = text;
+  if (cls) { botStatusEl.classList.add(cls); }
+  botStatusEl.title = info.bot_last_error ? `last error: ${info.bot_last_error}` : '';
+}
 
 function updateLoginStatus() {
   const bar = qs('login-status');
@@ -215,11 +259,24 @@ qs('login-btn').onclick = () => {
 
 async function updateRegButton() {
   const btn = qs('reg-btn');
-  if (!userLogin || !btn) { if (btn) { btn.style.display = 'none'; } return; }
+  if (!userLogin || !btn) {
+    if (btn) { btn.style.display = 'none'; }
+    channelsCache = [];
+    updateBotStatusBadge(null);
+    return;
+  }
   try {
     const resp = await fetch(`${API}/channels`, { credentials: 'include' });
-    if (!resp.ok) { btn.style.display = 'none'; return; }
-    const list = await resp.json();
+    if (!resp.ok) {
+      btn.style.display = 'none';
+      channelsCache = [];
+      updateBotStatusBadge(null);
+      return;
+    }
+    const rawList = await resp.json();
+    const list = Array.isArray(rawList) ? rawList : [];
+    channelsCache = list;
+    updateBotStatusBadge(getChannelInfo(channelName));
     const found = list.find(ch => ch.channel_name.toLowerCase() === userLogin.toLowerCase());
     const startChannelAuth = async () => {
       const returnUrl = window.location.href.split('#')[0];
@@ -283,12 +340,15 @@ async function updateRegButton() {
     btn.style.display = '';
   } catch (e) {
     btn.style.display = 'none';
+    channelsCache = [];
+    updateBotStatusBadge(null);
   }
 }
 
 function selectChannel(ch) {
   channelName = ch;
   qs('ch-badge').textContent = `channel: ${channelName}`;
+  updateBotStatusBadge(getChannelInfo(channelName));
   updateLoginStatus();
   qs('landing').style.display = 'none';
   qs('app').style.display = '';

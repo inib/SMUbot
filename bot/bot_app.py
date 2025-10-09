@@ -48,6 +48,8 @@ DEFAULT_MESSAGES = {
     'award_raid': 'Thx for raiding {username}, take {word} - you have now {points} {currency_plural}',
     'award_gift_sub': 'Thx for gifting {count} subs {username}, take {word} - you have now {points} {currency_plural}',
     'award_bits': 'Thx for cheering {amount} bits {username}, take {word} - you have now {points} {currency_plural}',
+    'bot_joined': 'Song queue bot connected to chat.',
+    'bot_left': 'Song queue bot disconnected from chat.',
 }
 
 YOUTUBE_PATTERNS = [
@@ -92,6 +94,14 @@ class Backend:
             'channel_id': channel_id,
             'join_active': join_active,
         })
+
+    async def set_bot_status(self, channel: str, active: bool, error: Optional[str] = None):
+        payload = {'active': bool(active), 'error': error}
+        try:
+            return await self._req('POST', f"/channels/{channel}/bot_status", payload)
+        except Exception:
+            # Status updates are advisory; swallow errors to avoid breaking runtime behaviour.
+            return None
 
     async def find_or_create_user(self, channel: str, twitch_id: str, username: str) -> int:
         users = await self._req('GET', f"/channels/{channel}/users?search={username}")
@@ -303,10 +313,12 @@ class SongBot(commands.Bot):
                 if task:
                     task.cancel()
                 if name in self.joined:
+                    await self._announce_left(name)
                     try:
                         await self.part_channels([name])
                     except Exception:
                         pass
+                    await backend.set_bot_status(name, False)
                     self.joined.discard(name)
                     await push_console_event(
                         'info',
@@ -314,6 +326,8 @@ class SongBot(commands.Bot):
                         event='part',
                         metadata={'channel': name},
                     )
+                else:
+                    await backend.set_bot_status(name, False)
                 self.state.pop(name, None)
 
             for key, row in allowed.items():
@@ -326,6 +340,7 @@ class SongBot(commands.Bot):
                 try:
                     await self.join_channels([name])
                 except Exception as exc:
+                    await backend.set_bot_status(name, False, str(exc))
                     await push_console_event(
                         'error',
                         f'Failed to join channel {name}: {exc}',
@@ -334,12 +349,14 @@ class SongBot(commands.Bot):
                     )
                     continue
                 self.joined.add(name)
+                await backend.set_bot_status(name, True)
                 await push_console_event(
                     'info',
                     f'Joined channel {name}',
                     event='join',
                     metadata={'channel': name},
                 )
+                asyncio.create_task(self._announce_joined(name))
                 initial_queue = await backend.get_queue(name, include_played=True)
                 self.state[name] = {
                     'queue': initial_queue,
@@ -359,15 +376,21 @@ class SongBot(commands.Bot):
                         'last_event': datetime.utcnow().isoformat(),
                     }
 
+    async def shutdown(self):
+        await self._disable_all_channels()
+        await super().close()
+
     async def _disable_all_channels(self):
         for task in self.listeners.values():
             task.cancel()
         self.listeners.clear()
         for name in list(self.joined):
+            await self._announce_left(name)
             try:
                 await self.part_channels([name])
             except Exception:
                 pass
+            await backend.set_bot_status(name, False)
             await push_console_event(
                 'info',
                 f'Parted channel {name}',
@@ -377,6 +400,44 @@ class SongBot(commands.Bot):
         self.joined.clear()
         self.state.clear()
         self.channel_map.clear()
+
+    async def _await_channel(self, name: str, attempts: int = 5, delay: float = 1.0):
+        lower = name.lower()
+        channel = self.get_channel(lower)
+        if channel:
+            return channel
+        for _ in range(attempts):
+            await asyncio.sleep(delay)
+            channel = self.get_channel(lower)
+            if channel:
+                return channel
+        return None
+
+    async def _announce_joined(self, name: str):
+        message = self.messages.get('bot_joined')
+        if not message:
+            return
+        channel = await self._await_channel(name)
+        if not channel:
+            return
+        await self._send_message(
+            channel,
+            message,
+            metadata={'channel': name, 'event': 'bot_join'},
+        )
+
+    async def _announce_left(self, name: str):
+        message = self.messages.get('bot_left')
+        if not message:
+            return
+        channel = self.get_channel(name.lower())
+        if not channel:
+            return
+        await self._send_message(
+            channel,
+            message,
+            metadata={'channel': name, 'event': 'bot_part'},
+        )
 
     async def _send_message(self, channel, message: str, *, metadata: Optional[Dict[str, object]] = None):
         await channel.send(message)
@@ -504,7 +565,10 @@ class BotService:
         if not self._bot:
             return
         try:
-            await self._bot.close()
+            if hasattr(self._bot, 'shutdown'):
+                await self._bot.shutdown()
+            else:
+                await self._bot.close()
         except Exception as exc:
             await push_console_event(
                 'error',
@@ -537,13 +601,12 @@ class BotService:
             token = None
             refresh = None
             login = None
-        has_stored_login = bool(login)
-        enabled = bool(config.get('enabled')) if has_stored_login else False
-        if not token or not login:
-            token = ENV_BOT_TOKEN
-            login = ENV_BOT_NICK
-            if token and login:
-                enabled = True
+        complete = bool(token and refresh and login)
+        if not complete:
+            token = None
+            refresh = None
+            login = None
+        enabled = bool(config.get('enabled')) if complete else False
         return BotSettings(token=token, refresh_token=refresh, login=login, enabled=enabled)
 
     async def event_message(self, message):

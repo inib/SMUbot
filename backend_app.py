@@ -213,6 +213,38 @@ class ActiveChannel(Base):
     songs = relationship("Song", back_populates="channel", cascade="all, delete-orphan")
     users = relationship("User", back_populates="channel", cascade="all, delete-orphan")
     moderators = relationship("ChannelModerator", back_populates="channel", cascade="all, delete-orphan")
+    bot_state = relationship(
+        "ChannelBotState",
+        back_populates="channel",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
+
+    @property
+    def bot_active(self) -> bool:
+        state = self.bot_state
+        return bool(state and state.active)
+
+    @property
+    def bot_last_error(self) -> Optional[str]:
+        state = self.bot_state
+        return state.last_error if state else None
+
+
+class ChannelBotState(Base):
+    __tablename__ = "channel_bot_state"
+    id = Column(Integer, primary_key=True)
+    channel_id = Column(
+        Integer,
+        ForeignKey("active_channels.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+    )
+    active = Column(Boolean, default=False, nullable=False)
+    last_error = Column(Text)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    channel = relationship("ActiveChannel", back_populates="bot_state")
 
 class ChannelSettings(Base):
     __tablename__ = "channel_settings"
@@ -344,6 +376,8 @@ class ChannelOut(BaseModel):
     channel_id: str
     join_active: int
     authorized: bool
+    bot_active: bool
+    bot_last_error: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -391,6 +425,11 @@ class ChannelAccessOut(BaseModel):
 class ModIn(BaseModel):
     twitch_id: str
     username: str
+
+
+class ChannelBotStatusIn(BaseModel):
+    active: bool
+    error: Optional[str] = None
 
 
 class BotConfigOut(BaseModel):
@@ -1583,6 +1622,20 @@ def get_or_create_settings(db: Session, channel_pk: int) -> ChannelSettings:
     return st
 
 
+def get_or_create_bot_state(db: Session, channel_pk: int) -> ChannelBotState:
+    state = (
+        db.query(ChannelBotState)
+        .filter(ChannelBotState.channel_id == channel_pk)
+        .one_or_none()
+    )
+    if not state:
+        state = ChannelBotState(channel_id=channel_pk, active=False)
+        db.add(state)
+        db.commit()
+        db.refresh(state)
+    return state
+
+
 def current_stream(db: Session, channel_pk: int) -> int:
     s = (
         db.query(StreamSession)
@@ -1794,7 +1847,11 @@ def health():
 # =====================================
 @app.get("/channels", response_model=List[ChannelOut])
 def list_channels(db: Session = Depends(get_db)):
-    return db.query(ActiveChannel).all()
+    channels = db.query(ActiveChannel).all()
+    for channel in channels:
+        if not channel.bot_state:
+            channel.bot_state = get_or_create_bot_state(db, channel.id)
+    return channels
 
 @app.post("/channels", response_model=ChannelOut, dependencies=[Depends(require_token)])
 def add_channel(payload: ChannelIn, db: Session = Depends(get_db)):
@@ -1803,6 +1860,8 @@ def add_channel(payload: ChannelIn, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(ch)
     get_or_create_settings(db, ch.id)
+    get_or_create_bot_state(db, ch.id)
+    channel_pk = ch.id
     try: _broker(channel_pk).put_nowait("changed")
     except: pass
     return ch
@@ -1814,6 +1873,21 @@ def update_channel_status(channel: str, join_active: int, db: Session = Depends(
     if not ch:
         raise HTTPException(404, "channel not found")
     ch.join_active = join_active
+    db.commit()
+    try: _broker(channel_pk).put_nowait("changed")
+    except: pass
+    return {"success": True}
+
+
+@app.post("/channels/{channel}/bot_status", dependencies=[Depends(require_token)])
+def set_channel_bot_status(channel: str, payload: ChannelBotStatusIn, db: Session = Depends(get_db)):
+    channel_pk = get_channel_pk(channel, db)
+    ch = db.get(ActiveChannel, channel_pk)
+    if not ch:
+        raise HTTPException(404, "channel not found")
+    state = get_or_create_bot_state(db, channel_pk)
+    state.active = bool(payload.active)
+    state.last_error = payload.error
     db.commit()
     try: _broker(channel_pk).put_nowait("changed")
     except: pass
