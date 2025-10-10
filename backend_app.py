@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Optional, List, Any, Dict, Mapping, Iterable
+from typing import Optional, List, Any, Dict, Mapping, Iterable, Literal
 import os
 import json
 import time
@@ -33,7 +33,7 @@ from starlette.datastructures import URL
 from pydantic import BaseModel, Field
 from sqlalchemy import (
     create_engine, Column, Integer, String, Text, DateTime, Boolean,
-    ForeignKey, UniqueConstraint, func, select, and_, text
+    ForeignKey, UniqueConstraint, func, select, and_
 )
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker, Session
 from sqlalchemy.exc import IntegrityError
@@ -491,6 +491,10 @@ class QueueItemFull(BaseModel):
     request: RequestOut
     song: SongOut
     user: UserWithRoles
+
+
+class MoveRequestIn(BaseModel):
+    direction: Literal["up", "down"]
 
 class EventIn(BaseModel):
     type: str
@@ -2464,10 +2468,9 @@ def _get_req(db, channel_pk: int, request_id: int):
     return req
 
 @app.post("/channels/{channel}/queue/{request_id}/move", dependencies=[Depends(require_token)])
-def move_request(channel: str, request_id: int, direction: str, db: Session = Depends(get_db)):
+def move_request(channel: str, request_id: int, payload: MoveRequestIn, db: Session = Depends(get_db)):
     channel_pk = get_channel_pk(channel, db)
-    if direction not in ("up", "down"):
-        raise HTTPException(400, "direction must be 'up' or 'down'")
+    direction = payload.direction
     req = _get_req(db, channel_pk, request_id)
     # find neighbor within same stream
     if direction == "up":
@@ -2501,11 +2504,16 @@ def skip_request(channel: str, request_id: int, db: Session = Depends(get_db)):
     channel_pk = get_channel_pk(channel, db)
     req = _get_req(db, channel_pk, request_id)
     # move to bottom of pending
-    max_pos = db.execute(
-        text("SELECT COALESCE(MAX(position), 0) FROM queue_requests WHERE channel_id=:c AND stream_id=:s AND played=0"),
-        {"c": channel_pk, "s": req.stream_id}
-    ).scalar_one()
-    req.position = max_pos + 1
+    max_pos = (
+        db.query(func.coalesce(func.max(Request.position), 0))
+        .filter(
+            Request.channel_id == channel_pk,
+            Request.stream_id == req.stream_id,
+            Request.played == 0,
+        )
+        .scalar()
+    )
+    req.position = (max_pos or 0) + 1
     db.commit()
     try: _broker(channel_pk).put_nowait("changed")
     except: pass

@@ -205,8 +205,15 @@ async function fetchQueue() {
   const data = await resp.json();
   const q = qs('queue');
   q.innerHTML = '';
+  let insertedPlayedSeparator = false;
   data.forEach(entry => {
     const { request: req, song, user } = entry;
+    if (req.played && !insertedPlayedSeparator) {
+      const sep = document.createElement('div');
+      sep.className = 'sep';
+      q.appendChild(sep);
+      insertedPlayedSeparator = true;
+    }
     const row = document.createElement('div');
     row.className = `item${req.is_priority ? ' prio' : ''}${req.played ? ' played' : ''}`;
 
@@ -322,7 +329,7 @@ async function markPlayed(id) {
 
 qs('archive-btn').onclick = () => fetch(`${API}/channels/${channelName}/streams/archive`, { method: 'POST', credentials: 'include' });
 qs('mute-btn').onclick = () => fetch(`${API}/channels/${channelName}/settings`, {
-  method: 'POST',
+  method: 'PUT',
   body: JSON.stringify({ queue_closed: 1 }),
   headers: { 'Content-Type': 'application/json' },
   credentials: 'include'
@@ -369,7 +376,7 @@ async function fetchSettings() {
 }
 async function updateSetting(key, value) {
   await fetch(`${API}/channels/${channelName}/settings`, {
-    method: 'POST',
+    method: 'PUT',
     body: JSON.stringify({ [key]: value }),
     headers: { 'Content-Type': 'application/json' },
     credentials: 'include'
