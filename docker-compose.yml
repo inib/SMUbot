@@ -69,6 +69,8 @@ services:
     environment:
       BACKEND_URL: ${BACKEND_URL:-http://api:7070}
       TWITCH_CLIENT_ID: ${TWITCH_CLIENT_ID}
+      ADMIN_BASIC_AUTH_USERNAME: ${ADMIN_BASIC_AUTH_USERNAME}
+      ADMIN_BASIC_AUTH_PASSWORD: ${ADMIN_BASIC_AUTH_PASSWORD}
     env_file:
       - stack.env
     ports:
