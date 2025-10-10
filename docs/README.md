@@ -15,10 +15,11 @@ Additional directories include:
 
 ## Running with Docker
 1. Copy `example.env` to `stack.env` and adjust values such as `ADMIN_TOKEN`,
-   `TWITCH_CLIENT_ID`, and `TWITCH_CLIENT_SECRET`. When exposing the stack
-   outside of Docker, set `BACKEND_URL` to the public URL of the API so the bot
-   and web UI can reach it. Bot credentials are now managed through the backend
-   at `/bot/config` instead of `.env` entries.
+   `ADMIN_BASIC_AUTH_USERNAME`, `ADMIN_BASIC_AUTH_PASSWORD`, `TWITCH_CLIENT_ID`,
+   and `TWITCH_CLIENT_SECRET`. When exposing the stack outside of Docker, set
+   `BACKEND_URL` to the public URL of the API so the bot and web UI can reach
+   it. Bot credentials are now managed through the backend at `/bot/config`
+   instead of `.env` entries.
 2. Start the stack:
    ```bash
    docker-compose --env-file stack.env up --build
@@ -53,8 +54,9 @@ Songbot relies on two distinct OAuth flows that map to the two management panels
    client credentials grant using the scopes `user:read:chat user:write:chat user:bot`.
    The resulting app access token is stored through `/bot/config` and allows the
    backend and bot worker to act as the shared bot account when calling the API.
-   Because this panel is meant for internal use, it is typically protected outside
-   of the application stack (for example via HTTP basic auth).
+   The Admin panel is protected with HTTP basic authentication configured via
+   the `ADMIN_BASIC_AUTH_USERNAME` and `ADMIN_BASIC_AUTH_PASSWORD` environment
+   variables.
 
 2. **Channel authorization (Queue Manager)** – Channel owners sign in through the
    Queue Manager UI and complete the authorization code grant with the
