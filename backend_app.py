@@ -53,7 +53,9 @@ TWITCH_CLIENT_ID = os.getenv("TWITCH_CLIENT_ID")
 TWITCH_CLIENT_SECRET = os.getenv("TWITCH_CLIENT_SECRET")
 TWITCH_REDIRECT_URI = os.getenv("TWITCH_REDIRECT_URI")
 BOT_TWITCH_REDIRECT_URI = os.getenv("BOT_TWITCH_REDIRECT_URI")
-TWITCH_SCOPES = os.getenv("TWITCH_SCOPES", "channel:bot").split()
+TWITCH_SCOPES = os.getenv(
+    "TWITCH_SCOPES", "channel:bot channel:read:subscriptions channel:read:vips"
+).split()
 BOT_NICK = os.getenv("BOT_NICK")
 
 BOT_APP_SCOPES = os.getenv(
@@ -452,6 +454,13 @@ class UserOut(BaseModel):
     class Config:
         from_attributes = True
 
+
+class UserWithRoles(UserOut):
+    is_vip: bool = False
+    is_subscriber: bool = False
+    subscriber_tier: Optional[str] = None
+
+
 class RequestCreate(BaseModel):
     song_id: int
     user_id: int
@@ -476,6 +485,12 @@ class RequestOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class QueueItemFull(BaseModel):
+    request: RequestOut
+    song: SongOut
+    user: UserWithRoles
 
 class EventIn(BaseModel):
     type: str
@@ -2089,6 +2104,134 @@ def set_points(channel: str, user_id: int, payload: dict, db: Session = Depends(
 # =====================================
 # Routes: Queue
 # =====================================
+
+
+def _iter_twitch_collection(url: str, headers: Mapping[str, str], params: dict[str, Any]) -> Iterable[dict[str, Any]]:
+    query: dict[str, Any] = dict(params)
+    while True:
+        try:
+            resp = requests.get(url, headers=headers, params=query, timeout=10)
+        except requests.RequestException as exc:
+            logger.warning("failed to fetch %s: %s", url, exc)
+            return
+        if resp.status_code in (401, 403):
+            logger.warning(
+                "twitch request to %s returned %s; channel authorization may be missing scopes",
+                url,
+                resp.status_code,
+            )
+            return
+        if not resp.ok:
+            logger.warning(
+                "twitch request to %s failed: status=%s body=%s",
+                url,
+                resp.status_code,
+                resp.text,
+            )
+            return
+        try:
+            payload = resp.json()
+        except ValueError as exc:
+            logger.warning("invalid JSON from twitch %s: %s", url, exc)
+            return
+        data = payload.get("data")
+        if isinstance(data, list):
+            for item in data:
+                if isinstance(item, dict):
+                    yield item
+        pagination = payload.get("pagination")
+        cursor = None
+        if isinstance(pagination, dict):
+            cursor = pagination.get("cursor")
+        if cursor:
+            query = dict(query)
+            query["after"] = cursor
+        else:
+            return
+
+
+def _collect_channel_roles(channel_obj: ActiveChannel) -> tuple[set[str], dict[str, Optional[str]]]:
+    if not channel_obj or not channel_obj.owner or not channel_obj.channel_id:
+        return set(), {}
+    owner = channel_obj.owner
+    if not TWITCH_CLIENT_ID or not owner.access_token:
+        return set(), {}
+    headers = {
+        "Authorization": f"Bearer {owner.access_token}",
+        "Client-Id": TWITCH_CLIENT_ID,
+    }
+    params = {"broadcaster_id": channel_obj.channel_id}
+    vip_ids: set[str] = set()
+    subs: dict[str, Optional[str]] = {}
+    for row in _iter_twitch_collection("https://api.twitch.tv/helix/channels/vips", headers, params):
+        user_id = row.get("user_id")
+        if isinstance(user_id, str):
+            vip_ids.add(user_id)
+    for row in _iter_twitch_collection("https://api.twitch.tv/helix/subscriptions", headers, params):
+        user_id = row.get("user_id")
+        tier = row.get("tier") if isinstance(row, dict) else None
+        if isinstance(user_id, str):
+            subs[user_id] = tier if isinstance(tier, str) else None
+    return vip_ids, subs
+
+
+@app.get("/channels/{channel}/queue/full", response_model=List[QueueItemFull])
+def get_queue_full(
+    channel: str,
+    current: TwitchUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    channel_pk = get_channel_pk(channel, db)
+    if not _user_has_access(current, channel_pk, db):
+        raise HTTPException(status_code=403, detail="not authorized for channel")
+    sid = current_stream(db, channel_pk)
+    rows: list[Request] = (
+        db.query(Request)
+        .filter(Request.channel_id == channel_pk, Request.stream_id == sid)
+        .order_by(
+            Request.played.asc(),
+            Request.is_priority.desc(),
+            Request.position.asc(),
+            Request.request_time.asc(),
+            Request.id.asc(),
+        )
+        .all()
+    )
+    song_ids = {row.song_id for row in rows}
+    user_ids = {row.user_id for row in rows}
+    songs: dict[int, Song] = {}
+    if song_ids:
+        for song in db.query(Song).filter(Song.id.in_(song_ids)).all():
+            songs[song.id] = song
+    users: dict[int, User] = {}
+    if user_ids:
+        for user in db.query(User).filter(User.id.in_(user_ids)).all():
+            users[user.id] = user
+    channel_obj = db.get(ActiveChannel, channel_pk)
+    vip_ids, subs = _collect_channel_roles(channel_obj)
+    result: list[QueueItemFull] = []
+    for row in rows:
+        song = songs.get(row.song_id)
+        user = users.get(row.user_id)
+        if not song or not user:
+            continue
+        base_user = UserOut.model_validate(user)
+        user_payload = UserWithRoles(
+            **base_user.model_dump(),
+            is_vip=user.twitch_id in vip_ids,
+            is_subscriber=user.twitch_id in subs,
+            subscriber_tier=subs.get(user.twitch_id),
+        )
+        result.append(
+            QueueItemFull(
+                request=RequestOut.model_validate(row),
+                song=SongOut.model_validate(song),
+                user=user_payload,
+            )
+        )
+    return result
+
+
 @app.get("/channels/{channel}/queue/stream")
 async def stream_queue(channel: str, db: Session = Depends(get_db)):
     channel_pk = get_channel_pk(channel, db)
