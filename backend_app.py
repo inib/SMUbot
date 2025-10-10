@@ -614,11 +614,51 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-_brokers: dict[int, asyncio.Queue[str]] = {}
+_brokers: dict[int, set[asyncio.Queue[str]]] = {}
 
 
-def _broker(channel_pk: int) -> asyncio.Queue[str]:
-    return _brokers.setdefault(channel_pk, asyncio.Queue(maxsize=1000))
+def _broker_queues(channel_pk: int) -> set[asyncio.Queue[str]]:
+    return _brokers.setdefault(channel_pk, set())
+
+
+def _subscribe_queue(channel_pk: int) -> asyncio.Queue[str]:
+    queue: asyncio.Queue[str] = asyncio.Queue(maxsize=1000)
+    _broker_queues(channel_pk).add(queue)
+    return queue
+
+
+def _unsubscribe_queue(channel_pk: int, queue: asyncio.Queue[str]) -> None:
+    listeners = _brokers.get(channel_pk)
+    if not listeners:
+        return
+    listeners.discard(queue)
+    if not listeners:
+        _brokers.pop(channel_pk, None)
+
+
+def publish_queue_changed(channel_pk: int) -> None:
+    """Notify listeners that the active queue for a channel changed."""
+    listeners = _brokers.get(channel_pk)
+    if not listeners:
+        return
+    stale: list[asyncio.Queue[str]] = []
+    for queue in list(listeners):
+        try:
+            queue.put_nowait("changed")
+        except asyncio.QueueFull:
+            stale.append(queue)
+            logger.warning("queue change notification dropped for channel %s", channel_pk)
+        except Exception:
+            stale.append(queue)
+            logger.exception(
+                "failed to enqueue queue change notification for channel %s",
+                channel_pk,
+            )
+    if stale:
+        for queue in stale:
+            listeners.discard(queue)
+        if not listeners:
+            _brokers.pop(channel_pk, None)
 
 
 def publish_queue_changed(channel_pk: int) -> None:
@@ -2239,20 +2279,25 @@ def get_queue_full(
 @app.get("/channels/{channel}/queue/stream")
 async def stream_queue(channel: str, db: Session = Depends(get_db)):
     channel_pk = get_channel_pk(channel, db)
-    q = _broker(channel_pk)
+    q = _subscribe_queue(channel_pk)
+
     async def gen():
         # initial tick so clients render immediately
-        yield "event: queue\ndata: init\n\n"
-        while True:
-            msg = await q.get()
-            yield f"event: queue\ndata: {msg}\n\n"
+        try:
+            yield "event: queue\ndata: init\n\n"
+            while True:
+                msg = await q.get()
+                yield f"event: queue\ndata: {msg}\n\n"
+        finally:
+            _unsubscribe_queue(channel_pk, q)
+
     return EventSourceResponse(
-    gen(),
-    headers={
-        "Cache-Control": "no-cache, no-transform",
-        "X-Accel-Buffering": "no",
-    }
-)
+        gen(),
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 @app.get("/channels/{channel}/queue", response_model=List[RequestOut])
 def get_queue(channel: str, db: Session = Depends(get_db)):
