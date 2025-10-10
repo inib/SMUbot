@@ -614,10 +614,51 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-_brokers: dict[int, asyncio.Queue[str]] = {}
+_brokers: dict[int, set[asyncio.Queue[str]]] = {}
 
-def _broker(channel_pk: int) -> asyncio.Queue[str]:
-    return _brokers.setdefault(channel_pk, asyncio.Queue(maxsize=1000))
+
+def _broker_queues(channel_pk: int) -> set[asyncio.Queue[str]]:
+    return _brokers.setdefault(channel_pk, set())
+
+
+def _subscribe_queue(channel_pk: int) -> asyncio.Queue[str]:
+    queue: asyncio.Queue[str] = asyncio.Queue(maxsize=1000)
+    _broker_queues(channel_pk).add(queue)
+    return queue
+
+
+def _unsubscribe_queue(channel_pk: int, queue: asyncio.Queue[str]) -> None:
+    listeners = _brokers.get(channel_pk)
+    if not listeners:
+        return
+    listeners.discard(queue)
+    if not listeners:
+        _brokers.pop(channel_pk, None)
+
+
+def publish_queue_changed(channel_pk: int) -> None:
+    """Notify listeners that the active queue for a channel changed."""
+    listeners = _brokers.get(channel_pk)
+    if not listeners:
+        return
+    stale: list[asyncio.Queue[str]] = []
+    for queue in list(listeners):
+        try:
+            queue.put_nowait("changed")
+        except asyncio.QueueFull:
+            stale.append(queue)
+            logger.warning("queue change notification dropped for channel %s", channel_pk)
+        except Exception:
+            stale.append(queue)
+            logger.exception(
+                "failed to enqueue queue change notification for channel %s",
+                channel_pk,
+            )
+    if stale:
+        for queue in stale:
+            listeners.discard(queue)
+        if not listeners:
+            _brokers.pop(channel_pk, None)
 
 
 def _json_default(value: Any) -> Any:
@@ -1652,8 +1693,7 @@ def current_stream(db: Session, channel_pk: int) -> int:
     s = StreamSession(channel_id=channel_pk)
     db.add(s)
     db.commit()
-    try: _broker(channel_pk).put_nowait("changed")
-    except: pass
+    publish_queue_changed(channel_pk)
     return s.id
 
 
@@ -1867,8 +1907,7 @@ def add_channel(payload: ChannelIn, db: Session = Depends(get_db)):
     get_or_create_settings(db, ch.id)
     get_or_create_bot_state(db, ch.id)
     channel_pk = ch.id
-    try: _broker(channel_pk).put_nowait("changed")
-    except: pass
+    publish_queue_changed(channel_pk)
     return ch
 
 @app.put("/channels/{channel}", dependencies=[Depends(require_token)])
@@ -1879,8 +1918,7 @@ def update_channel_status(channel: str, join_active: int, db: Session = Depends(
         raise HTTPException(404, "channel not found")
     ch.join_active = join_active
     db.commit()
-    try: _broker(channel_pk).put_nowait("changed")
-    except: pass
+    publish_queue_changed(channel_pk)
     return {"success": True}
 
 
@@ -1894,8 +1932,7 @@ def set_channel_bot_status(channel: str, payload: ChannelBotStatusIn, db: Sessio
     state.active = bool(payload.active)
     state.last_error = payload.error
     db.commit()
-    try: _broker(channel_pk).put_nowait("changed")
-    except: pass
+    publish_queue_changed(channel_pk)
     return {"success": True}
 
 @app.delete("/channels/{channel}", dependencies=[Depends(require_token)])
@@ -1961,8 +1998,7 @@ def set_channel_settings(channel: str, payload: ChannelSettingsIn, db: Session =
     st.other_flags = payload.other_flags
     st.max_prio_points = payload.max_prio_points
     db.commit()
-    try: _broker(channel_pk).put_nowait("changed")
-    except: pass
+    publish_queue_changed(channel_pk)
     return {"success": True}
 
 # =====================================
@@ -1983,8 +2019,7 @@ def add_song(channel: str, payload: SongIn, db: Session = Depends(get_db)):
     song = Song(channel_id=channel_pk, **payload.model_dump())
     db.add(song)
     db.commit()
-    try: _broker(channel_pk).put_nowait("changed")
-    except: pass
+    publish_queue_changed(channel_pk)
     return {"id": song.id}
 
 @app.get("/channels/{channel}/songs/{song_id}", response_model=SongOut)
@@ -2004,8 +2039,7 @@ def update_song(channel: str, song_id: int, payload: SongIn, db: Session = Depen
     for k, v in payload.model_dump().items():
         setattr(song, k, v)
     db.commit()
-    try: _broker(channel_pk).put_nowait("changed")
-    except: pass
+    publish_queue_changed(channel_pk)
     return {"success": True}
 
 @app.delete("/channels/{channel}/songs/{song_id}", dependencies=[Depends(require_token)])
@@ -2016,8 +2050,7 @@ def delete_song(channel: str, song_id: int, db: Session = Depends(get_db)):
         raise HTTPException(404, "song not found")
     db.delete(song)
     db.commit()
-    try: _broker(channel_pk).put_nowait("changed")
-    except: pass
+    publish_queue_changed(channel_pk)
     return {"success": True}
 
 # =====================================
@@ -2043,14 +2076,12 @@ def get_or_create_user(channel: str, payload: UserIn, db: Session = Depends(get_
     if u:
         u.username = payload.username  # update latest name
         db.commit()
-        try: _broker(channel_pk).put_nowait("changed")
-        except: pass
+        publish_queue_changed(channel_pk)
         return {"id": u.id}
     u = User(channel_id=channel_pk, twitch_id=payload.twitch_id, username=payload.username)
     db.add(u)
     db.commit()
-    try: _broker(channel_pk).put_nowait("changed")
-    except: pass
+    publish_queue_changed(channel_pk)
     return {"id": u.id}
 
 @app.get("/channels/{channel}/users/{user_id}", response_model=UserOut)
@@ -2073,8 +2104,7 @@ def update_user(channel: str, user_id: int, prio_points: Optional[int] = None, a
     if amount_requested is not None:
         u.amount_requested = max(0, amount_requested)
     db.commit()
-    try: _broker(channel_pk).put_nowait("changed")
-    except: pass
+    publish_queue_changed(channel_pk)
     return {"success": True}
 
 @app.get("/channels/{channel}/users/{user_id}/stream_state")
@@ -2098,11 +2128,11 @@ def list_users(channel: str, db: Session = Depends(get_db)):
 def set_points(channel: str, user_id: int, payload: dict, db: Session = Depends(get_db)):
     channel_pk = get_channel_pk(channel, db)
     u = db.get(User, user_id)
-    if not u or u.channel_id != channel_pk: raise HTTPException(404)
+    if not u or u.channel_id != channel_pk:
+        raise HTTPException(404)
     u.prio_points = int(payload.get("prio_points", 0))
     db.commit()
-    try: _broker(channel_pk).put_nowait("changed")
-    except: pass
+    publish_queue_changed(channel_pk)
     return {"success": True}
 
 # =====================================
@@ -2239,20 +2269,25 @@ def get_queue_full(
 @app.get("/channels/{channel}/queue/stream")
 async def stream_queue(channel: str, db: Session = Depends(get_db)):
     channel_pk = get_channel_pk(channel, db)
-    q = _broker(channel_pk)
+    q = _subscribe_queue(channel_pk)
+
     async def gen():
         # initial tick so clients render immediately
-        yield "event: queue\ndata: init\n\n"
-        while True:
-            msg = await q.get()
-            yield f"event: queue\ndata: {msg}\n\n"
+        try:
+            yield "event: queue\ndata: init\n\n"
+            while True:
+                msg = await q.get()
+                yield f"event: queue\ndata: {msg}\n\n"
+        finally:
+            _unsubscribe_queue(channel_pk, q)
+
     return EventSourceResponse(
-    gen(),
-    headers={
-        "Cache-Control": "no-cache, no-transform",
-        "X-Accel-Buffering": "no",
-    }
-)
+        gen(),
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 @app.get("/channels/{channel}/queue", response_model=List[RequestOut])
 def get_queue(channel: str, db: Session = Depends(get_db)):
@@ -2334,8 +2369,7 @@ def add_request(channel: str, payload: RequestCreate, db: Session = Depends(get_
                 is_priority = 1
                 priority_source = 'points'
                 db.commit()
-                try: _broker(channel_pk).put_nowait("changed")
-                except: pass
+                publish_queue_changed(channel_pk)
             else:
                 raise HTTPException(409, detail="No priority available")
 
@@ -2357,10 +2391,7 @@ def add_request(channel: str, payload: RequestCreate, db: Session = Depends(get_
 
     db.commit()
 
-    try:
-        _broker(channel_pk).put_nowait("changed")
-    except asyncio.QueueFull:
-        pass
+    publish_queue_changed(channel_pk)
     return {"request_id": req.id}
 
 @app.put("/channels/{channel}/queue/{request_id}", dependencies=[Depends(require_token)])
@@ -2387,10 +2418,7 @@ def update_request(channel: str, request_id: int, payload: RequestUpdate, db: Se
         if r.is_priority and not r.priority_source:
             r.priority_source = 'admin'
     db.commit()
-    try:
-        _broker(channel_pk).put_nowait("changed")
-    except asyncio.QueueFull:
-        pass
+    publish_queue_changed(channel_pk)
     return {"success": True}
 
 @app.delete("/channels/{channel}/queue/{request_id}", dependencies=[Depends(require_token)])
@@ -2401,10 +2429,7 @@ def remove_request(channel: str, request_id: int, db: Session = Depends(get_db))
         raise HTTPException(404, "request not found")
     db.delete(r)
     db.commit()
-    try:
-        _broker(channel_pk).put_nowait("changed")
-    except asyncio.QueueFull:
-        pass
+    publish_queue_changed(channel_pk)
     return {"success": True}
 
 @app.post("/channels/{channel}/queue/clear", dependencies=[Depends(require_token)])
@@ -2413,10 +2438,7 @@ def clear_queue(channel: str, db: Session = Depends(get_db)):
     sid = current_stream(db, channel_pk)
     db.query(Request).filter(Request.channel_id == channel_pk, Request.stream_id == sid, Request.played == 0).delete()
     db.commit()
-    try:
-        _broker(channel_pk).put_nowait("changed")
-    except asyncio.QueueFull:
-        pass
+    publish_queue_changed(channel_pk)
     return {"success": True}
 
 @app.get("/channels/{channel}/queue/random_nonpriority")
@@ -2452,10 +2474,7 @@ def bump_admin(channel: str, request_id: int, db: Session = Depends(get_db)):
     r.is_priority = 1
     r.priority_source = 'admin'
     db.commit()
-    try:
-        _broker(channel_pk).put_nowait("changed")
-    except asyncio.QueueFull:
-        pass
+    publish_queue_changed(channel_pk)
     return {"success": True}
 
 def _get_req(db, channel_pk: int, request_id: int):
@@ -2495,8 +2514,7 @@ def move_request(channel: str, request_id: int, payload: MoveRequestIn, db: Sess
         return {"success": True}  # nothing to move
     req.position, neighbor.position = neighbor.position, req.position
     db.commit()
-    try: _broker(channel_pk).put_nowait("changed")
-    except: pass
+    publish_queue_changed(channel_pk)
     return {"success": True}
 
 @app.post("/channels/{channel}/queue/{request_id}/skip", dependencies=[Depends(require_token)])
@@ -2515,8 +2533,7 @@ def skip_request(channel: str, request_id: int, db: Session = Depends(get_db)):
     )
     req.position = (max_pos or 0) + 1
     db.commit()
-    try: _broker(channel_pk).put_nowait("changed")
-    except: pass
+    publish_queue_changed(channel_pk)
     return {"success": True}
 
 @app.post("/channels/{channel}/queue/{request_id}/priority", dependencies=[Depends(require_token)])
@@ -2526,8 +2543,7 @@ def set_priority(channel: str, request_id: int, enabled: bool, db: Session = Dep
     # optional: refund or spend points can be inserted here
     req.is_priority = 1 if enabled else 0
     db.commit()
-    try: _broker(channel_pk).put_nowait("changed")
-    except: pass
+    publish_queue_changed(channel_pk)
     return {"success": True}
 
 @app.post("/channels/{channel}/queue/{request_id}/played", dependencies=[Depends(require_token)])
@@ -2537,8 +2553,7 @@ def mark_played(channel: str, request_id: int, db: Session = Depends(get_db)):
     req.played = 1
     # optionally push it out of visible order by setting a sentinel position
     db.commit()
-    try: _broker(channel_pk).put_nowait("changed")
-    except: pass
+    publish_queue_changed(channel_pk)
     return {"success": True}
 
 # =====================================
@@ -2570,8 +2585,7 @@ def log_event(channel: str, payload: EventIn, db: Session = Depends(get_db)):
     elif payload.type == "sub":
         # no automatic points; handled via free-per-stream when requesting
         pass
-    try: _broker(channel_pk).put_nowait("changed")
-    except: pass    
+    publish_queue_changed(channel_pk)
     return {"event_id": ev.id}
 
 @app.get("/channels/{channel}/events", response_model=List[EventOut])
@@ -2622,10 +2636,7 @@ def archive_stream(channel: str, db: Session = Depends(get_db)):
         db.commit()
     # start new
     new_sid = current_stream(db, channel_pk)
-    try:
-        _broker(channel_pk).put_nowait("changed")
-    except asyncio.QueueFull:
-        pass
+    publish_queue_changed(channel_pk)
     return {"new_stream_id": new_sid}
 
 # =====================================
