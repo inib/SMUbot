@@ -661,6 +661,16 @@ def publish_queue_changed(channel_pk: int) -> None:
             _brokers.pop(channel_pk, None)
 
 
+def publish_queue_changed(channel_pk: int) -> None:
+    """Notify listeners that the active queue for a channel changed."""
+    try:
+        _broker(channel_pk).put_nowait("changed")
+    except asyncio.QueueFull:
+        logger.warning("queue change notification dropped for channel %s", channel_pk)
+    except Exception:
+        logger.exception("failed to enqueue queue change notification for channel %s", channel_pk)
+
+
 def _json_default(value: Any) -> Any:
     if isinstance(value, datetime):
         return value.isoformat()
