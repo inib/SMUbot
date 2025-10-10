@@ -174,11 +174,18 @@
       }
     }
 
-    hideMessage();
     if (layout === 'banner') {
+      filtered = items.filter(item => !item.request.played);
+      if (!filtered.length) {
+        showMessage('No upcoming songs in the queue.');
+        return;
+      }
+      hideMessage();
       renderBanner(filtered);
       return;
     }
+
+    hideMessage();
     renderList(filtered);
   }
 
@@ -189,7 +196,11 @@
     items.forEach((item, idx) => {
       const card = document.createElement('div');
       card.className = 'overlay-card';
-      if (layout === 'bumped' || item.request.is_priority || item.request.bumped) {
+      if (item.request.played) {
+        card.classList.add('played');
+      }
+      const shouldHighlight = (layout === 'bumped' || item.request.is_priority || item.request.bumped) && !item.request.played;
+      if (shouldHighlight) {
         card.classList.add('highlight');
       }
       const title = document.createElement('div');
@@ -206,7 +217,7 @@
 
       const badgesWrap = document.createElement('span');
       badgesWrap.className = 'overlay-badges';
-      const badges = buildBadges(item.request, idx === 0);
+      const badges = buildBadges(item.request, idx === 0 && !item.request.played);
       badges.forEach(b => badgesWrap.appendChild(b));
       if (badges.length) {
         meta.appendChild(badgesWrap);

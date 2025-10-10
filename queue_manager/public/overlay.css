@@ -70,12 +70,34 @@ body[data-layout="banner"] .overlay-root {
   border: 1px solid var(--border);
   box-shadow: 0 12px 24px rgba(15, 23, 42, 0.4);
   min-width: 0;
+  position: relative;
 }
 
 .overlay-card.highlight {
   background: var(--surface-strong);
   border-color: var(--accent);
   box-shadow: 0 16px 36px rgba(0, 0, 0, 0.45);
+}
+
+.overlay-card.played {
+  opacity: 0.65;
+}
+
+.overlay-card.played::after {
+  content: '';
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  top: 50%;
+  border-top: 2px solid var(--border);
+  opacity: 0.85;
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+
+.overlay-card.played .overlay-title,
+.overlay-card.played .overlay-meta {
+  color: rgba(148, 163, 184, 0.85);
 }
 
 .overlay-title {
