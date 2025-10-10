@@ -132,28 +132,156 @@ qs('tab-users').onclick = () => showTab('users');
 qs('tab-settings').onclick = () => showTab('settings');
 
 // ===== Queue functions =====
+function ytId(url) {
+  if (!url) { return null; }
+  const match = url.match(/(?:youtube\.com\/.*v=|youtu\.be\/)([\w-]{11})/i);
+  return match ? match[1] : null;
+}
+
+function youtubeThumb(url) {
+  const id = ytId(url);
+  return id ? `https://img.youtube.com/vi/${id}/hqdefault.jpg` : null;
+}
+
+function formatTier(tier) {
+  if (!tier) { return ''; }
+  switch (tier) {
+    case '1000': return 'Tier 1';
+    case '2000': return 'Tier 2';
+    case '3000': return 'Tier 3';
+    case 'Prime': return 'Prime';
+    default: return tier;
+  }
+}
+
+function buildUserLine(user) {
+  const parts = [`requested by ${user.username || '?'}`];
+  const flags = [];
+  if (user.is_vip) { flags.push('VIP'); }
+  if (user.is_subscriber) {
+    const tier = formatTier(user.subscriber_tier);
+    flags.push(tier ? `Subscriber (${tier})` : 'Subscriber');
+  }
+  if (flags.length) {
+    parts.push(flags.join(' • '));
+  }
+  return parts.join(' • ');
+}
+
+function createBadge(text, extraClass) {
+  const badge = document.createElement('span');
+  badge.className = `badge${extraClass ? ' ' + extraClass : ''}`;
+  badge.textContent = text;
+  return badge;
+}
+
+function requestBadges(req) {
+  const badges = [];
+  if (req.is_priority) {
+    let label = 'priority';
+    if (req.priority_source === 'sub_free') {
+      label = 'priority (free sub)';
+    } else if (req.priority_source === 'points') {
+      label = 'priority (points)';
+    } else if (req.priority_source === 'admin') {
+      label = 'priority (admin)';
+    }
+    badges.push(createBadge(label, 'accent'));
+  }
+  if (req.bumped) {
+    badges.push(createBadge('bumped', 'accent'));
+  }
+  if (req.played) {
+    badges.push(createBadge('played'));
+  }
+  return badges;
+}
+
 async function fetchQueue() {
   if (!channelName) { return; }
   const encodedChannel = encodeURIComponent(channelName);
-  const resp = await fetch(`${API}/channels/${encodedChannel}/queue`, { credentials: 'include' });
+  const resp = await fetch(`${API}/channels/${encodedChannel}/queue/full`, { credentials: 'include' });
   if (!resp.ok) { return; }
   const data = await resp.json();
   const q = qs('queue');
   q.innerHTML = '';
-  data.forEach(item => {
+  data.forEach(entry => {
+    const { request: req, song, user } = entry;
     const row = document.createElement('div');
-    row.className = 'req';
-    const artist = item.artist || (item.song && item.song.artist) || '';
-    const title = item.title || (item.song && item.song.title) || '';
-    const label = artist || title ? `${artist} - ${title}`.replace(/^ - | -$/g, '') : `request #${item.id}`;
-    row.innerHTML = `<span class="title">${label}</span>
-      <span class="ctrl">
-        <button onclick="moveReq(${item.id}, -1)">⬆️</button>
-        <button onclick="moveReq(${item.id}, 1)">⬇️</button>
-        <button onclick="bumpReq(${item.id})">⭐</button>
-        <button onclick="skipReq(${item.id})">⏭</button>
-        <button onclick="markPlayed(${item.id})">✔️</button>
-      </span>`;
+    row.className = `item${req.is_priority ? ' prio' : ''}${req.played ? ' played' : ''}`;
+
+    const thumb = document.createElement('div');
+    thumb.className = 'thumb';
+    const thumbUrl = youtubeThumb(song.youtube_link);
+    if (thumbUrl) {
+      const img = document.createElement('img');
+      img.src = thumbUrl;
+      img.width = 56;
+      img.height = 42;
+      img.alt = '';
+      img.loading = 'lazy';
+      thumb.appendChild(img);
+    } else {
+      thumb.textContent = '?';
+    }
+    row.appendChild(thumb);
+
+    const info = document.createElement('div');
+    info.className = 'info';
+    const title = document.createElement('div');
+    title.className = 'title';
+    const text = `${song.artist || ''} - ${song.title || ''}`.replace(/^ - | -$/g, '') || 'unknown song';
+    if (song.youtube_link) {
+      const link = document.createElement('a');
+      link.href = song.youtube_link;
+      link.target = '_blank';
+      link.rel = 'noopener';
+      link.textContent = text;
+      title.appendChild(link);
+    } else {
+      title.textContent = text;
+    }
+    info.appendChild(title);
+
+    const metaLine = document.createElement('div');
+    metaLine.className = 'muted';
+    metaLine.textContent = buildUserLine(user);
+    info.appendChild(metaLine);
+    row.appendChild(info);
+
+    const meta = document.createElement('div');
+    meta.className = 'meta';
+    const badges = requestBadges(req);
+    badges.forEach(b => meta.appendChild(b));
+    const timeEl = document.createElement('div');
+    timeEl.className = 'meta-time';
+    try {
+      const time = new Date(req.request_time);
+      timeEl.textContent = time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    } catch (e) {
+      timeEl.textContent = '';
+    }
+    meta.appendChild(timeEl);
+    row.appendChild(meta);
+
+    const ctrl = document.createElement('div');
+    ctrl.className = 'ctrl';
+    const buttons = [
+      { label: '⬆️', handler: () => moveReq(req.id, -1), title: 'Move up' },
+      { label: '⬇️', handler: () => moveReq(req.id, 1), title: 'Move down' },
+      { label: '⭐', handler: () => bumpReq(req.id), title: 'Promote to priority' },
+      { label: '⏭', handler: () => skipReq(req.id), title: 'Skip' },
+      { label: '✔️', handler: () => markPlayed(req.id), title: 'Mark played' },
+    ];
+    buttons.forEach(({ label, handler, title: tooltip }) => {
+      const btn = document.createElement('button');
+      btn.textContent = label;
+      if (tooltip) { btn.title = tooltip; }
+      btn.onclick = handler;
+      ctrl.appendChild(btn);
+    });
+    row.appendChild(ctrl);
+
     q.appendChild(row);
   });
 }
@@ -251,7 +379,7 @@ async function updateSetting(key, value) {
 // ===== Landing page & login =====
 function buildLoginScopes() {
   const configured = (window.TWITCH_SCOPES || '').split(/\s+/).filter(Boolean);
-  const scopes = configured.length ? configured : ['channel:bot'];
+  const scopes = configured.length ? configured : ['channel:bot', 'channel:read:subscriptions', 'channel:read:vips'];
   if (!scopes.includes('user:read:email')) {
     scopes.push('user:read:email');
   }
