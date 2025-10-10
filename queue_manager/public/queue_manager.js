@@ -121,7 +121,7 @@ if (logoutPermBtn) {
 }
 
 function showTab(name) {
-  ['queue', 'users', 'settings'].forEach(t => {
+  ['queue', 'users', 'settings', 'overlays'].forEach(t => {
     qs(t+'-view').style.display = (t===name) ? '' : 'none';
     qs('tab-'+t).classList.toggle('active', t===name);
   });
@@ -130,6 +130,7 @@ function showTab(name) {
 qs('tab-queue').onclick = () => showTab('queue');
 qs('tab-users').onclick = () => showTab('users');
 qs('tab-settings').onclick = () => showTab('settings');
+qs('tab-overlays').onclick = () => showTab('overlays');
 
 // ===== Queue functions =====
 function ytId(url) {
@@ -383,6 +384,109 @@ async function updateSetting(key, value) {
   });
 }
 
+// ===== Overlay builder =====
+const overlayLayoutSelect = qs('overlay-layout');
+const overlayThemeSelect = qs('overlay-theme');
+const overlayUrlInput = qs('overlay-url');
+const overlayCopyBtn = qs('overlay-copy');
+const overlayPreviewFrame = qs('overlay-preview');
+const overlayDimensions = qs('overlay-dimensions');
+const overlayWarning = qs('overlay-channel-warning');
+let overlayCopyResetTimer = null;
+
+function getOverlayDimensions() {
+  if (!overlayLayoutSelect) { return { width: null, height: null }; }
+  const option = overlayLayoutSelect.options[overlayLayoutSelect.selectedIndex];
+  if (!option) { return { width: null, height: null }; }
+  const width = parseInt(option.dataset.width || '', 10) || null;
+  const height = parseInt(option.dataset.height || '', 10) || null;
+  return { width, height };
+}
+
+function buildOverlayUrl() {
+  if (!channelName || !overlayLayoutSelect || !overlayThemeSelect) { return ''; }
+  const base = new URL('overlay.html', window.location.href);
+  base.searchParams.set('channel', channelName);
+  base.searchParams.set('layout', overlayLayoutSelect.value);
+  base.searchParams.set('theme', overlayThemeSelect.value);
+  return base.toString();
+}
+
+function updateOverlayBuilder() {
+  if (!overlayLayoutSelect || !overlayThemeSelect || !overlayUrlInput) { return; }
+  const hasChannel = !!channelName;
+  if (overlayWarning) {
+    overlayWarning.hidden = hasChannel;
+  }
+  overlayLayoutSelect.disabled = !hasChannel;
+  overlayThemeSelect.disabled = !hasChannel;
+  if (overlayCopyBtn) {
+    overlayCopyBtn.disabled = !hasChannel;
+    if (!hasChannel || overlayCopyBtn.textContent !== 'Copy') {
+      overlayCopyBtn.textContent = 'Copy';
+    }
+  }
+  if (!hasChannel) {
+    overlayUrlInput.value = '';
+    if (overlayPreviewFrame) {
+      overlayPreviewFrame.src = 'about:blank';
+      overlayPreviewFrame.style.aspectRatio = '4 / 3';
+    }
+    if (overlayDimensions) {
+      overlayDimensions.textContent = '';
+    }
+    return;
+  }
+
+  const url = buildOverlayUrl();
+  overlayUrlInput.value = url;
+  const { width, height } = getOverlayDimensions();
+  if (overlayDimensions && width && height) {
+    overlayDimensions.textContent = `Recommended source size: ${width}×${height}px`;
+  } else if (overlayDimensions) {
+    overlayDimensions.textContent = '';
+  }
+  if (overlayPreviewFrame) {
+    overlayPreviewFrame.src = url;
+    if (width && height) {
+      overlayPreviewFrame.style.aspectRatio = `${width} / ${height}`;
+    } else {
+      overlayPreviewFrame.style.aspectRatio = '4 / 3';
+    }
+  }
+}
+
+async function copyOverlayLink() {
+  if (!overlayUrlInput || !overlayCopyBtn || !overlayUrlInput.value) { return; }
+  const link = overlayUrlInput.value;
+  try {
+    await navigator.clipboard.writeText(link);
+    overlayCopyBtn.textContent = 'Copied!';
+  } catch (e) {
+    console.warn('Clipboard copy failed, falling back to prompt', e);
+    window.prompt('Copy this overlay link:', link);
+    overlayCopyBtn.textContent = 'Copied';
+  }
+  if (overlayCopyResetTimer) {
+    clearTimeout(overlayCopyResetTimer);
+  }
+  overlayCopyResetTimer = setTimeout(() => {
+    overlayCopyBtn.textContent = 'Copy';
+  }, 2500);
+}
+
+function initOverlayBuilder() {
+  if (!overlayLayoutSelect || !overlayThemeSelect) { return; }
+  overlayLayoutSelect.addEventListener('change', () => updateOverlayBuilder());
+  overlayThemeSelect.addEventListener('change', () => updateOverlayBuilder());
+  if (overlayCopyBtn) {
+    overlayCopyBtn.addEventListener('click', copyOverlayLink);
+  }
+  updateOverlayBuilder();
+}
+
+initOverlayBuilder();
+
 // ===== Landing page & login =====
 function buildLoginScopes() {
   const configured = (window.TWITCH_SCOPES || '').split(/\s+/).filter(Boolean);
@@ -504,6 +608,7 @@ function selectChannel(ch) {
   fetchQueue();
   fetchUsers();
   fetchSettings();
+  updateOverlayBuilder();
 }
 
 async function initToken() {

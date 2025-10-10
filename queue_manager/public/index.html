@@ -41,6 +41,7 @@
           <button id="tab-queue" class="tab active">Queue</button>
           <button id="tab-users" class="tab">Users</button>
           <button id="tab-settings" class="tab">Settings</button>
+          <button id="tab-overlays" class="tab">Overlays</button>
         </div>
 
         <div id="queue-view">
@@ -60,6 +61,48 @@
         <div id="settings-view" style="display:none">
           <h2>Settings</h2>
           <div id="settings"></div>
+        </div>
+
+        <div id="overlays-view" style="display:none">
+          <h2>Overlay Builder</h2>
+          <p class="muted">Design OBS browser sources that stay in sync with your live queue. Select options below and copy the generated link.</p>
+          <div class="overlay-builder" aria-live="polite">
+            <div class="overlay-controls">
+              <div id="overlay-channel-warning" class="overlay-warning" hidden>Select a channel to generate overlay links.</div>
+              <label>
+                Overlay size &amp; layout
+                <select id="overlay-layout">
+                  <option value="bumped" data-width="400" data-height="300">Bumped songs (400×300)</option>
+                  <option value="full" data-width="400" data-height="800">Full queue (400×800)</option>
+                  <option value="banner" data-width="1920" data-height="200">Horizontal banner (1920×200)</option>
+                </select>
+              </label>
+              <label>
+                Color scheme
+                <select id="overlay-theme">
+                  <option value="violet">Midnight Violet</option>
+                  <option value="ocean">Nordic Ocean</option>
+                  <option value="sunset">Evening Sunset</option>
+                  <option value="mint">Aurora Mint</option>
+                </select>
+              </label>
+              <div class="overlay-link-group">
+                <label for="overlay-url">Overlay link</label>
+                <div class="overlay-link-row">
+                  <input id="overlay-url" type="text" readonly value="" aria-readonly="true"/>
+                  <button id="overlay-copy" type="button">Copy</button>
+                </div>
+                <div id="overlay-dimensions" class="overlay-dimensions muted"></div>
+              </div>
+            </div>
+            <div class="overlay-preview">
+              <div class="overlay-preview-frame">
+                <iframe id="overlay-preview" title="Overlay preview" loading="lazy"></iframe>
+                <div class="overlay-preview-hint muted">Preview background is transparent in OBS.</div>
+              </div>
+            </div>
+          </div>
+          <p class="overlay-hint muted">Add a new Browser Source in OBS, paste the link, and use the recommended size. The overlay updates itself whenever the queue changes.</p>
         </div>
       </div>
     </div>

@@ -57,3 +57,20 @@ a:hover{text-decoration:underline}
 .landing h1{margin:0 0 20px;font-size:32px}
 .landing button{padding:.5rem 1rem;border-radius:8px;border:1px solid #24283b;background:#121423;color:var(--text);cursor:pointer}
 .channel-list{display:flex;flex-wrap:wrap;gap:8px;margin-top:16px}
+.overlay-builder{display:flex;flex-wrap:wrap;gap:20px;margin-top:16px}
+.overlay-controls{flex:1 1 260px;display:flex;flex-direction:column;gap:14px}
+.overlay-controls label{display:flex;flex-direction:column;gap:6px;font-weight:600;color:var(--text)}
+.overlay-controls select{padding:.45rem .6rem;border-radius:8px;border:1px solid #24283b;background:#121423;color:var(--text)}
+.overlay-link-group{display:flex;flex-direction:column;gap:6px}
+.overlay-link-row{display:flex;gap:8px}
+#overlay-url{flex:1;padding:.45rem .6rem;border-radius:8px;border:1px solid #24283b;background:#0f1117;color:var(--text);font-family:monospace;font-size:12px}
+#overlay-url:focus{outline:2px solid var(--accent);outline-offset:2px}
+#overlay-copy{padding:.45rem .9rem;border-radius:8px;border:1px solid var(--accent);background:rgba(139,92,246,0.1);color:var(--accent);cursor:pointer;font-weight:600}
+#overlay-copy:hover{background:rgba(139,92,246,0.18)}
+.overlay-dimensions{font-size:12px;margin-top:2px}
+.overlay-preview{flex:1 1 360px;min-width:280px;display:flex;align-items:center;justify-content:center}
+.overlay-preview-frame{position:relative;width:100%;display:flex;flex-direction:column;gap:6px;align-items:center;justify-content:center;background:linear-gradient(45deg,#1e1f2a,#0d0e15);padding:16px;border-radius:16px;border:1px solid #24283b;box-shadow:0 24px 50px rgba(8,9,14,0.6)}
+.overlay-preview iframe{width:100%;border:0;border-radius:12px;background:transparent;box-shadow:0 10px 30px rgba(8,9,14,0.55);aspect-ratio:4/3;min-height:200px}
+.overlay-preview-hint{text-align:center;font-size:12px}
+.overlay-warning{padding:.6rem .75rem;border-radius:10px;border:1px solid rgba(239,68,68,0.4);background:rgba(239,68,68,0.08);color:#fca5a5;font-size:13px}
+.overlay-hint{margin-top:18px}
