@@ -5,6 +5,7 @@ set -e
 : "${TWITCH_SCOPES:=user:read:chat user:write:chat user:bot}"
 : "${BOT_APP_SCOPES:=user:read:chat user:write:chat user:bot}"
 : "${ADMIN_BASIC_AUTH_USERNAME:=admin}"
+: "${ADMIN_BASIC_AUTH_PASSWORD:=admin}"
 
 if [ -z "${ADMIN_BASIC_AUTH_PASSWORD:-}" ]; then
   echo "Error: ADMIN_BASIC_AUTH_PASSWORD environment variable must be set." >&2
