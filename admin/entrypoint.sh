@@ -13,6 +13,7 @@ if [ -z "${ADMIN_BASIC_AUTH_PASSWORD:-}" ]; then
 fi
 
 htpasswd -bBc /etc/nginx/.htpasswd "$ADMIN_BASIC_AUTH_USERNAME" "$ADMIN_BASIC_AUTH_PASSWORD" >/dev/null
+chown root:nginx /etc/nginx/.htpasswd
 chmod 640 /etc/nginx/.htpasswd
 unset ADMIN_BASIC_AUTH_PASSWORD
 # Substitute variables into config.js
