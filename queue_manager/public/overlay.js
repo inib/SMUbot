@@ -61,12 +61,20 @@
   const songCache = new Map();
   const userCache = new Map();
   let pendingFetch = null;
+  let pollTimer = null;
 
   init();
 
   function init() {
     refreshQueue();
     setupStream();
+    startPolling();
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) {
+        refreshQueue();
+      }
+    });
+    window.addEventListener('focus', refreshQueue);
   }
 
   function applyTheme(name) {
@@ -295,6 +303,9 @@
       const encodedChannel = encodeURIComponent(channel);
       const streamUrl = `${API}/channels/${encodedChannel}/queue/stream`;
       eventSource = new EventSource(streamUrl);
+      eventSource.onopen = () => {
+        refreshQueue();
+      };
       eventSource.addEventListener('queue', () => {
         refreshQueue();
       });
@@ -302,10 +313,22 @@
         if (eventSource) {
           eventSource.close();
         }
+        refreshQueue();
         setTimeout(setupStream, 5000);
       };
     } catch (err) {
       console.error('Failed to setup queue stream', err);
     }
+  }
+
+  function startPolling() {
+    if (pollTimer) {
+      clearInterval(pollTimer);
+    }
+    pollTimer = setInterval(() => {
+      if (!document.hidden) {
+        refreshQueue();
+      }
+    }, 45000);
   }
 })();
