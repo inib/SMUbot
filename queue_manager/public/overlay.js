@@ -184,7 +184,7 @@
 
     let filtered = items;
     if (layout === 'bumped') {
-      filtered = items.filter(item => !!item.request.bumped);
+      filtered = items.filter(item => !!item.request.is_priority);
       if (!filtered.length) {
         showMessage('No bumped songs at the moment.');
         return;
@@ -216,7 +216,7 @@
       if (item.request.played) {
         card.classList.add('played');
       }
-      const shouldHighlight = (layout === 'bumped' || item.request.is_priority || item.request.bumped) && !item.request.played;
+      const shouldHighlight = (layout === 'bumped' || item.request.is_priority) && !item.request.played;
       if (shouldHighlight) {
         card.classList.add('highlight');
       }
@@ -290,9 +290,6 @@
     const badges = [];
     if (request.is_priority) {
       badges.push(makeBadge('priority'));
-    }
-    if (request.bumped) {
-      badges.push(makeBadge('bumped'));
     }
     if (isFirst && layout !== 'bumped') {
       badges.push(makeBadge('up next'));
