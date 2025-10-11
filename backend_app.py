@@ -2305,10 +2305,10 @@ async def stream_queue(channel: str, db: Session = Depends(get_db)):
     async def gen():
         # initial tick so clients render immediately
         try:
-            yield "event: queue\ndata: init\n\n"
+            yield {"event": "queue", "data": "init"}
             while True:
                 msg = await q.get()
-                yield f"event: queue\ndata: {msg}\n\n"
+                yield {"event": "queue", "data": msg}
         finally:
             _unsubscribe_queue(channel_pk, q)
 
