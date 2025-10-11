@@ -113,7 +113,10 @@
     const signal = pendingFetch.signal;
     try {
       const encodedChannel = encodeURIComponent(channel);
-      const queueResp = await fetch(`${API}/channels/${encodedChannel}/queue`, { signal });
+      const queueResp = await fetch(`${API}/channels/${encodedChannel}/queue`, {
+        signal,
+        cache: 'no-store',
+      });
       if (!queueResp.ok) {
         throw new Error(`queue status ${queueResp.status}`);
       }
@@ -145,7 +148,10 @@
     if (songCache.has(songId)) {
       return songCache.get(songId);
     }
-    const resp = await fetch(`${API}/channels/${encodedChannel}/songs/${songId}`, { signal });
+    const resp = await fetch(`${API}/channels/${encodedChannel}/songs/${songId}`, {
+      signal,
+      cache: 'no-store',
+    });
     if (!resp.ok) {
       throw new Error(`song status ${resp.status}`);
     }
@@ -158,7 +164,10 @@
     if (userCache.has(userId)) {
       return userCache.get(userId);
     }
-    const resp = await fetch(`${API}/channels/${encodedChannel}/users/${userId}`, { signal });
+    const resp = await fetch(`${API}/channels/${encodedChannel}/users/${userId}`, {
+      signal,
+      cache: 'no-store',
+    });
     if (!resp.ok) {
       throw new Error(`user status ${resp.status}`);
     }
