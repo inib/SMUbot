@@ -184,7 +184,7 @@
 
     let filtered = items;
     if (layout === 'bumped') {
-      filtered = items.filter(item => !!item.request.is_priority);
+      filtered = items.filter(item => !!item.request.is_priority && !item.request.played);
       if (!filtered.length) {
         showMessage('No bumped songs at the moment.');
         return;
