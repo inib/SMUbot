@@ -614,61 +614,82 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-_brokers: dict[int, set[asyncio.Queue[str]]] = {}
+class _ChannelBroker:
+    __slots__ = ("channel_pk", "listeners")
+
+    def __init__(self, channel_pk: int) -> None:
+        self.channel_pk = channel_pk
+        self.listeners: set[asyncio.Queue[str]] = set()
+
+    def subscribe(self) -> asyncio.Queue[str]:
+        queue: asyncio.Queue[str] = asyncio.Queue(maxsize=1000)
+        self.listeners.add(queue)
+        return queue
+
+    def unsubscribe(self, queue: asyncio.Queue[str]) -> None:
+        self.listeners.discard(queue)
+
+    def _broadcast(self, message: str) -> None:
+        if not self.listeners:
+            return
+        stale: list[asyncio.Queue[str]] = []
+        for queue in list(self.listeners):
+            try:
+                queue.put_nowait(message)
+            except asyncio.QueueFull:
+                stale.append(queue)
+                logger.warning(
+                    "queue change notification dropped for channel %s",
+                    self.channel_pk,
+                )
+            except Exception:
+                stale.append(queue)
+                logger.exception(
+                    "failed to enqueue queue change notification for channel %s",
+                    self.channel_pk,
+                )
+        for queue in stale:
+            self.listeners.discard(queue)
+
+    def put_nowait(self, message: str) -> None:
+        self._broadcast(message)
+
+    def has_listeners(self) -> bool:
+        return bool(self.listeners)
 
 
-def _broker_queues(channel_pk: int) -> set[asyncio.Queue[str]]:
-    return _brokers.setdefault(channel_pk, set())
+_brokers: dict[int, _ChannelBroker] = {}
+
+
+def _broker(channel_pk: int) -> _ChannelBroker:
+    broker = _brokers.get(channel_pk)
+    if broker is None:
+        broker = _ChannelBroker(channel_pk)
+        _brokers[channel_pk] = broker
+    return broker
 
 
 def _subscribe_queue(channel_pk: int) -> asyncio.Queue[str]:
-    queue: asyncio.Queue[str] = asyncio.Queue(maxsize=1000)
-    _broker_queues(channel_pk).add(queue)
-    return queue
+    return _broker(channel_pk).subscribe()
 
 
 def _unsubscribe_queue(channel_pk: int, queue: asyncio.Queue[str]) -> None:
-    listeners = _brokers.get(channel_pk)
-    if not listeners:
+    broker = _brokers.get(channel_pk)
+    if not broker:
         return
-    listeners.discard(queue)
-    if not listeners:
+    broker.unsubscribe(queue)
+    if not broker.has_listeners():
         _brokers.pop(channel_pk, None)
 
 
 def publish_queue_changed(channel_pk: int) -> None:
     """Notify listeners that the active queue for a channel changed."""
-    listeners = _brokers.get(channel_pk)
-    if not listeners:
+    broker = _brokers.get(channel_pk)
+    if not broker:
         return
-    stale: list[asyncio.Queue[str]] = []
-    for queue in list(listeners):
-        try:
-            queue.put_nowait("changed")
-        except asyncio.QueueFull:
-            stale.append(queue)
-            logger.warning("queue change notification dropped for channel %s", channel_pk)
-        except Exception:
-            stale.append(queue)
-            logger.exception(
-                "failed to enqueue queue change notification for channel %s",
-                channel_pk,
-            )
-    if stale:
-        for queue in stale:
-            listeners.discard(queue)
-        if not listeners:
-            _brokers.pop(channel_pk, None)
-
-
-def publish_queue_changed(channel_pk: int) -> None:
-    """Notify listeners that the active queue for a channel changed."""
-    try:
-        _broker(channel_pk).put_nowait("changed")
-    except asyncio.QueueFull:
-        logger.warning("queue change notification dropped for channel %s", channel_pk)
-    except Exception:
-        logger.exception("failed to enqueue queue change notification for channel %s", channel_pk)
+    broker.put_nowait("changed")
+    if not broker.has_listeners():
+        _brokers.pop(channel_pk, None)
 
 
 def _json_default(value: Any) -> Any:
