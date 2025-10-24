@@ -330,6 +330,7 @@ class SongBot(commands.Bot):
         self._refresh_token = refresh_token
         self._scopes = list(scopes or [])
         self._subscription_ids: Dict[str, str] = {}
+        self._update_locks: Dict[str, asyncio.Lock] = {}
 
     @property
     def configured_login(self) -> Optional[str]:
@@ -442,6 +443,7 @@ class SongBot(commands.Bot):
                     metadata={'channel': channel_name},
                 )
                 self.state.pop(key, None)
+                self._update_locks.pop(key, None)
 
             for key in allowed_keys & current_keys:
                 self.channel_map[key] = allowed[key]
@@ -582,6 +584,7 @@ class SongBot(commands.Bot):
             await backend.set_bot_status(row['channel_name'], False)
         self.channel_map.clear()
         self.state.clear()
+        self._update_locks.clear()
 
     async def _announce_joined(self, login: str) -> None:
         message = self.messages.get('bot_joined')
@@ -971,25 +974,27 @@ class SongBot(commands.Bot):
 
     async def process_backend_update(self, ch_name: str) -> None:
         login = self._channel_login(ch_name)
-        state = self.state.get(login, {})
-        prev_queue = state.get('queue', [])
-        last_event = state.get('last_event')
-        new_queue = await backend.get_queue(ch_name, include_played=True)
+        lock = self._update_locks.setdefault(login, asyncio.Lock())
+        async with lock:
+            state = self.state.get(login, {})
+            prev_queue = state.get('queue', [])
+            last_event = state.get('last_event')
+            new_queue = await backend.get_queue(ch_name, include_played=True)
 
-        await self.check_played(login, ch_name, prev_queue, new_queue)
-        await self.check_bumps(login, ch_name, prev_queue, new_queue)
+            await self.check_played(login, ch_name, prev_queue, new_queue)
+            await self.check_bumps(login, ch_name, prev_queue, new_queue)
 
-        events = await backend.get_events(ch_name, since=last_event) if last_event else await backend.get_events(ch_name)
-        if events:
-            for ev in reversed(events):
-                ev_time = ev['event_time']
-                if last_event and ev_time <= last_event:
-                    continue
-                await self.announce_event(login, ch_name, ev)
-            state['last_event'] = max(ev['event_time'] for ev in events)
-        state['queue'] = new_queue
-        state['channel_name'] = ch_name
-        self.state[login] = state
+            events = await backend.get_events(ch_name, since=last_event) if last_event else await backend.get_events(ch_name)
+            if events:
+                for ev in reversed(events):
+                    ev_time = ev['event_time']
+                    if last_event and ev_time <= last_event:
+                        continue
+                    await self.announce_event(login, ch_name, ev)
+                state['last_event'] = max(ev['event_time'] for ev in events)
+            state['queue'] = new_queue
+            state['channel_name'] = ch_name
+            self.state[login] = state
 
     async def check_played(
         self,
