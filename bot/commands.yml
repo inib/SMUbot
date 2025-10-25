@@ -3,6 +3,7 @@ request:
   - request
   - req
   - r
+  - sr
 prioritize:
   - prioritize
   - prio
