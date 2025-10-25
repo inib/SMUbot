@@ -14,6 +14,10 @@ const previewResultsList = qs('preview-results');
 const previewStatusEl = qs('preview-status');
 const previewLinkInput = qs('preview-url');
 const previewCopyBtn = qs('preview-copy');
+const queueToggleBtn = qs('queue-toggle');
+const queueContent = qs('queue-content');
+const previewToggleBtn = qs('preview-toggle');
+const previewContent = qs('preview-content');
 
 let currentPreviewRequestId = null;
 let currentPreviewSourceKey = null;
@@ -444,6 +448,20 @@ function resetPreviewState() {
 if (previewCopyBtn) {
   previewCopyBtn.addEventListener('click', () => { copyPreviewLink().catch(() => {}); });
 }
+
+function setupCollapsible(toggleBtn, contentEl, expandedLabel, collapsedLabel) {
+  if (!toggleBtn || !contentEl) { return; }
+  toggleBtn.textContent = expandedLabel;
+  toggleBtn.setAttribute('aria-expanded', 'true');
+  toggleBtn.addEventListener('click', () => {
+    const collapsed = contentEl.classList.toggle('collapsed');
+    toggleBtn.setAttribute('aria-expanded', String(!collapsed));
+    toggleBtn.textContent = collapsed ? collapsedLabel : expandedLabel;
+  });
+}
+
+setupCollapsible(queueToggleBtn, queueContent, 'Hide queue', 'Show queue');
+setupCollapsible(previewToggleBtn, previewContent, 'Hide preview', 'Show preview');
 
 resetPreviewState();
 
