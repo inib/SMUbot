@@ -45,31 +45,42 @@
         </div>
 
         <div id="queue-view">
-          <h2>Active Queue</h2>
           <div class="queue-layout">
-            <div class="queue-column">
-              <div id="queue" class="queue"></div>
-            </div>
             <div class="preview-column">
               <div class="preview-card">
-                <div id="preview-video" class="preview-video empty">
-                  <iframe id="preview-frame" title="YouTube preview" src="about:blank" loading="lazy" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen></iframe>
-                  <div id="preview-message" class="preview-message">Select a request to load YouTube Music matches.</div>
+                <div class="section-header">
+                  <h3 class="section-title">YouTube Preview</h3>
+                  <button id="preview-toggle" class="collapse-toggle" type="button" aria-expanded="true" aria-controls="preview-content">Hide preview</button>
                 </div>
-                <div class="preview-link-group">
-                  <label for="preview-url">Video link</label>
-                  <div class="preview-link-row">
-                    <input id="preview-url" type="text" value="" readonly aria-readonly="true"/>
-                    <button id="preview-copy" type="button" disabled>Copy</button>
+                <div id="preview-content" class="collapsible-content">
+                  <div id="preview-video" class="preview-video empty">
+                    <iframe id="preview-frame" title="YouTube preview" src="about:blank" loading="lazy" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen></iframe>
+                    <div id="preview-message" class="preview-message">Select a request to load YouTube Music matches.</div>
+                  </div>
+                  <div class="preview-link-group">
+                    <label for="preview-url">Video link</label>
+                    <div class="preview-link-row">
+                      <input id="preview-url" type="text" value="" readonly aria-readonly="true"/>
+                      <button id="preview-copy" type="button" disabled>Copy</button>
+                    </div>
+                  </div>
+                  <div class="preview-results">
+                    <div class="preview-results-header">
+                      <span class="preview-results-title">YouTube Music results</span>
+                      <span id="preview-status" class="preview-status muted"></span>
+                    </div>
+                    <div id="preview-results" class="preview-results-list"></div>
                   </div>
                 </div>
-                <div class="preview-results">
-                  <div class="preview-results-header">
-                    <span class="preview-results-title">YouTube Music results</span>
-                    <span id="preview-status" class="preview-status muted"></span>
-                  </div>
-                  <div id="preview-results" class="preview-results-list"></div>
-                </div>
+              </div>
+            </div>
+            <div class="queue-column">
+              <div class="section-header">
+                <h2 class="section-title">Active Queue</h2>
+                <button id="queue-toggle" class="collapse-toggle" type="button" aria-expanded="true" aria-controls="queue-content">Hide queue</button>
+              </div>
+              <div id="queue-content" class="collapsible-content">
+                <div id="queue" class="queue"></div>
               </div>
             </div>
           </div>
