@@ -15,7 +15,11 @@ from urllib.parse import quote, urlparse, urlunparse
 from datetime import datetime, timedelta
 import asyncio
 import requests
-from ytmusicapi import YTMusic
+
+try:
+    from ytmusicapi import YTMusic  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - optional dependency
+    YTMusic = None  # type: ignore[assignment]
 from sse_starlette.sse import EventSourceResponse
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -149,6 +153,8 @@ def get_bot_user_id() -> Optional[str]:
 
 def get_ytmusic_client() -> YTMusic:
     global _ytmusic_client
+    if YTMusic is None:
+        raise RuntimeError("ytmusicapi dependency is not installed")
     if _ytmusic_client is not None:
         return _ytmusic_client
     with _ytmusic_lock:
@@ -2531,7 +2537,12 @@ def get_queue_full(
         for user in db.query(User).filter(User.id.in_(user_ids)).all():
             users[user.id] = user
     channel_obj = db.get(ActiveChannel, channel_pk)
-    vip_ids, subs = _collect_channel_roles(channel_obj)
+    role_collector = globals().get("_collect_channel_roles")
+    if callable(role_collector):
+        vip_ids, subs = role_collector(channel_obj)
+    else:  # pragma: no cover - defensive fallback for legacy deployments
+        logger.warning("_collect_channel_roles helper missing; skipping role lookup")
+        vip_ids, subs = set(), {}
     result: list[QueueItemFull] = []
     for row in rows:
         song = songs.get(row.song_id)
