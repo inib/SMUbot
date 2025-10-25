@@ -6,3 +6,4 @@ python-dotenv==1.0.1
 sse-starlette==2.0.0
 PyYAML==6.0.2
 requests==2.32.3
+ytmusicapi==1.11.1
