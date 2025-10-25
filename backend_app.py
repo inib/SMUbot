@@ -1,4 +1,5 @@
 from __future__ import annotations
+import math
 from typing import Optional, List, Any, Dict, Mapping, Iterable, Literal
 from threading import Lock
 import os
@@ -32,7 +33,7 @@ from fastapi import (
 )
 from fastapi.responses import RedirectResponse, HTMLResponse
 from starlette.datastructures import URL
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import (
     create_engine, Column, Integer, String, Text, DateTime, Boolean,
     ForeignKey, UniqueConstraint, func, select, and_
@@ -2318,6 +2319,84 @@ def _iter_twitch_collection(url: str, headers: Mapping[str, str], params: dict[s
     return vip_ids, subs
 
 
+def _coerce_int(value: Any, *, default: int = 0) -> int:
+    """Best-effort conversion of arbitrary values to integers.
+
+    User metadata stored in the database predates the new Pydantic response
+    models and can therefore contain unexpected types (e.g. stringified
+    numbers). Rather than returning a 500 error when validation fails we coerce
+    the value into a safe integer and fall back to ``default`` when conversion
+    is not possible.
+    """
+
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return default
+        return int(value)
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return default
+        try:
+            return int(stripped, 10)
+        except ValueError:
+            try:
+                float_value = float(stripped)
+            except ValueError:
+                return default
+            if not math.isfinite(float_value):
+                return default
+            return int(float_value)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _coerce_str(value: Any, *, default: str = "") -> str:
+    if isinstance(value, str):
+        return value
+    if value is None:
+        return default
+    return str(value)
+
+
+def _build_queue_user_payload(
+    user: User,
+    vip_ids: set[str],
+    subs: dict[str, Optional[str]],
+) -> Optional[UserWithRoles]:
+    base_data = {
+        "id": _coerce_int(getattr(user, "id", 0), default=0),
+        "twitch_id": _coerce_str(getattr(user, "twitch_id", "")),
+        "username": _coerce_str(getattr(user, "username", "")),
+        "amount_requested": _coerce_int(getattr(user, "amount_requested", 0), default=0),
+        "prio_points": _coerce_int(getattr(user, "prio_points", 0), default=0),
+    }
+    try:
+        base_user = UserOut.model_validate(base_data)
+    except ValidationError:
+        logger.warning(
+            "skipping user %s in queue due to invalid stored data",
+            getattr(user, "id", None),
+            exc_info=True,
+        )
+        return None
+    twitch_id = base_user.twitch_id
+    return UserWithRoles(
+        **base_user.model_dump(),
+        is_vip=twitch_id in vip_ids,
+        is_subscriber=twitch_id in subs,
+        subscriber_tier=subs.get(twitch_id),
+    )
+
+
 def _normalize_ytmusic_result(item: Mapping[str, Any]) -> Optional[YTMusicSearchResult]:
     if not isinstance(item, Mapping):
         return None
@@ -2459,17 +2538,35 @@ def get_queue_full(
         user = users.get(row.user_id)
         if not song or not user:
             continue
-        base_user = UserOut.model_validate(user)
-        user_payload = UserWithRoles(
-            **base_user.model_dump(),
-            is_vip=user.twitch_id in vip_ids,
-            is_subscriber=user.twitch_id in subs,
-            subscriber_tier=subs.get(user.twitch_id),
-        )
+        user_payload = _build_queue_user_payload(user, vip_ids, subs)
+        if not user_payload:
+            logger.warning(
+                "skipping request %s due to invalid user payload",
+                getattr(row, "id", None),
+            )
+            continue
+        try:
+            request_payload = RequestOut.model_validate(row)
+        except ValidationError:
+            logger.warning(
+                "skipping request %s due to invalid request data",
+                getattr(row, "id", None),
+                exc_info=True,
+            )
+            continue
+        try:
+            song_payload = SongOut.model_validate(song)
+        except ValidationError:
+            logger.warning(
+                "skipping request %s due to invalid song data",
+                getattr(row, "id", None),
+                exc_info=True,
+            )
+            continue
         result.append(
             QueueItemFull(
-                request=RequestOut.model_validate(row),
-                song=SongOut.model_validate(song),
+                request=request_payload,
+                song=song_payload,
                 user=user_payload,
             )
         )
