@@ -46,7 +46,33 @@
 
         <div id="queue-view">
           <h2>Active Queue</h2>
-          <div id="queue" class="queue"></div>
+          <div class="queue-layout">
+            <div class="queue-column">
+              <div id="queue" class="queue"></div>
+            </div>
+            <div class="preview-column">
+              <div class="preview-card">
+                <div id="preview-video" class="preview-video empty">
+                  <iframe id="preview-frame" title="YouTube preview" src="about:blank" loading="lazy" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen></iframe>
+                  <div id="preview-message" class="preview-message">Select a request to load YouTube Music matches.</div>
+                </div>
+                <div class="preview-link-group">
+                  <label for="preview-url">Video link</label>
+                  <div class="preview-link-row">
+                    <input id="preview-url" type="text" value="" readonly aria-readonly="true"/>
+                    <button id="preview-copy" type="button" disabled>Copy</button>
+                  </div>
+                </div>
+                <div class="preview-results">
+                  <div class="preview-results-header">
+                    <span class="preview-results-title">YouTube Music results</span>
+                    <span id="preview-status" class="preview-status muted"></span>
+                  </div>
+                  <div id="preview-results" class="preview-results-list"></div>
+                </div>
+              </div>
+            </div>
+          </div>
           <div class="footer">
             <button id="archive-btn">Archive Stream</button>
             <button id="mute-btn">Toggle Requests</button>

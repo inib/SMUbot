@@ -7,6 +7,22 @@ let channelsCache = [];
 function qs(id) { return document.getElementById(id); }
 
 const botStatusEl = qs('bot-status');
+const previewVideoEl = qs('preview-video');
+const previewIframe = qs('preview-frame');
+const previewMessageEl = qs('preview-message');
+const previewResultsList = qs('preview-results');
+const previewStatusEl = qs('preview-status');
+const previewLinkInput = qs('preview-url');
+const previewCopyBtn = qs('preview-copy');
+
+let currentPreviewRequestId = null;
+let currentPreviewSourceKey = null;
+let currentPreviewVideoId = null;
+let currentPreviewLink = '';
+let currentPreviewResults = [];
+let previewSearchToken = 0;
+let previewCopyResetTimer = null;
+const previewDefaultMessage = 'Select a request to load YouTube Music matches.';
 
 function getChannelInfo(name) {
   if (!name) { return null; }
@@ -144,6 +160,293 @@ function youtubeThumb(url) {
   return id ? `https://img.youtube.com/vi/${id}/hqdefault.jpg` : null;
 }
 
+function buildPreviewSourceKey(song) {
+  if (!song) { return ''; }
+  return `${song.artist || ''}|||${song.title || ''}|||${song.youtube_link || ''}`;
+}
+
+function buildSearchTerm(song) {
+  if (!song) { return ''; }
+  const artist = (song.artist || '').trim();
+  const title = (song.title || '').trim();
+  const parts = [];
+  if (artist) { parts.push(artist); }
+  if (title) { parts.push(title); }
+  if (parts.length) { return parts.join(' - '); }
+  const video = ytId(song.youtube_link);
+  return video || '';
+}
+
+function showPreviewStatus(text) {
+  if (!previewStatusEl) { return; }
+  previewStatusEl.textContent = text || '';
+}
+
+function setPreviewMessage(text) {
+  if (!previewMessageEl) { return; }
+  previewMessageEl.textContent = text || '';
+}
+
+function setPreviewLink(url) {
+  currentPreviewLink = url || '';
+  if (previewLinkInput) {
+    previewLinkInput.value = currentPreviewLink;
+  }
+  if (previewCopyBtn) {
+    previewCopyBtn.disabled = !currentPreviewLink;
+    if (previewCopyResetTimer) {
+      clearTimeout(previewCopyResetTimer);
+      previewCopyResetTimer = null;
+    }
+    previewCopyBtn.textContent = 'Copy';
+  }
+}
+
+async function copyPreviewLink() {
+  if (!previewCopyBtn || !currentPreviewLink) { return; }
+  try {
+    await navigator.clipboard.writeText(currentPreviewLink);
+    previewCopyBtn.textContent = 'Copied!';
+  } catch (e) {
+    console.warn('Clipboard copy failed, falling back to prompt', e);
+    window.prompt('Copy this link:', currentPreviewLink);
+    previewCopyBtn.textContent = 'Copied';
+  }
+  if (previewCopyResetTimer) {
+    clearTimeout(previewCopyResetTimer);
+  }
+  previewCopyResetTimer = setTimeout(() => {
+    if (previewCopyBtn) {
+      previewCopyBtn.textContent = 'Copy';
+    }
+  }, 2500);
+}
+
+function setPreviewVideo(videoId) {
+  if (!previewVideoEl || !previewIframe) { return; }
+  currentPreviewVideoId = videoId || null;
+  if (videoId) {
+    previewVideoEl.classList.remove('empty');
+    previewIframe.src = `https://www.youtube.com/embed/${videoId}`;
+  } else {
+    previewVideoEl.classList.add('empty');
+    previewIframe.src = 'about:blank';
+  }
+  updatePreviewResultSelection();
+}
+
+function updatePreviewResultSelection() {
+  if (!previewResultsList) { return; }
+  const active = currentPreviewVideoId ? String(currentPreviewVideoId) : '';
+  previewResultsList.querySelectorAll('.preview-result').forEach(btn => {
+    const vid = btn.dataset.videoId || '';
+    btn.classList.toggle('active', !!active && vid === active);
+  });
+}
+
+function renderPreviewResults(results, emptyMessage) {
+  if (!previewResultsList) { return; }
+  previewResultsList.innerHTML = '';
+  currentPreviewResults = Array.isArray(results) ? results.slice(0, 5) : [];
+  if (!currentPreviewResults.length) {
+    const empty = document.createElement('div');
+    empty.className = 'preview-empty';
+    empty.textContent = emptyMessage || 'No results to display.';
+    previewResultsList.appendChild(empty);
+    return;
+  }
+  currentPreviewResults.forEach(result => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'preview-result';
+    const videoId = result && result.video_id ? result.video_id : '';
+    btn.dataset.videoId = videoId;
+    if (!videoId) {
+      btn.disabled = true;
+    }
+
+    const thumbWrap = document.createElement('div');
+    thumbWrap.className = 'preview-thumb';
+    const thumbs = result && Array.isArray(result.thumbnails) ? result.thumbnails : [];
+    const thumb = thumbs.length ? thumbs[thumbs.length - 1] : null;
+    if (thumb && thumb.url) {
+      const img = document.createElement('img');
+      img.src = thumb.url;
+      img.alt = '';
+      img.loading = 'lazy';
+      thumbWrap.appendChild(img);
+    } else {
+      thumbWrap.textContent = videoId ? 'YT' : '?';
+    }
+    btn.appendChild(thumbWrap);
+
+    const info = document.createElement('div');
+    info.className = 'preview-result-info';
+    const title = document.createElement('div');
+    title.className = 'preview-result-title';
+    title.textContent = (result && result.title) ? result.title : '(unknown)';
+    info.appendChild(title);
+
+    const meta = document.createElement('div');
+    meta.className = 'preview-result-meta';
+    const metaBits = [];
+    if (result && Array.isArray(result.artists) && result.artists.length) {
+      metaBits.push(result.artists.join(', '));
+    }
+    if (result && result.album) {
+      metaBits.push(result.album);
+    }
+    if (result && result.duration) {
+      metaBits.push(result.duration);
+    }
+    if (result && result.result_type) {
+      metaBits.push(result.result_type);
+    }
+    meta.textContent = metaBits.join(' • ');
+    if (!meta.textContent) {
+      meta.style.display = 'none';
+    }
+    info.appendChild(meta);
+
+    btn.appendChild(info);
+    if (videoId) {
+      btn.addEventListener('click', () => {
+        applyPreviewResult(result);
+      });
+    }
+    previewResultsList.appendChild(btn);
+  });
+  updatePreviewResultSelection();
+}
+
+function applyPreviewResult(result) {
+  if (!result || !result.video_id) { return; }
+  const link = result.link || `https://www.youtube.com/watch?v=${result.video_id}`;
+  setPreviewVideo(result.video_id);
+  setPreviewLink(link);
+  setPreviewMessage('');
+  updatePreviewResultSelection();
+}
+
+async function loadPreviewForRequest(entry) {
+  if (!entry || !entry.song) { return; }
+  const song = entry.song;
+  const requestVideoId = ytId(song.youtube_link);
+  const canonicalLink = song.youtube_link || (requestVideoId ? `https://www.youtube.com/watch?v=${requestVideoId}` : '');
+  setPreviewLink(canonicalLink);
+  if (requestVideoId) {
+    setPreviewVideo(requestVideoId);
+    setPreviewMessage('');
+  } else {
+    setPreviewVideo(null);
+    setPreviewMessage('Loading search results…');
+  }
+
+  const searchTerm = buildSearchTerm(song);
+  const token = ++previewSearchToken;
+  if (!searchTerm) {
+    renderPreviewResults([], 'No song details available to search.');
+    showPreviewStatus('No metadata available for search.');
+    if (!requestVideoId) {
+      setPreviewMessage('No video available for this request.');
+    }
+    return;
+  }
+
+  renderPreviewResults([], 'Searching…');
+  showPreviewStatus('');
+
+  try {
+    const endpoint = new URL('/ytmusic/search', API);
+    endpoint.searchParams.set('query', searchTerm);
+    const resp = await fetch(endpoint.toString(), { credentials: 'include' });
+    if (!resp.ok) {
+      throw new Error(`search failed with status ${resp.status}`);
+    }
+    const payload = await resp.json();
+    if (token !== previewSearchToken) { return; }
+    const results = Array.isArray(payload) ? payload : [];
+    renderPreviewResults(results, results.length ? '' : 'No results found.');
+    if (!results.length) {
+      showPreviewStatus('No results found.');
+      if (!requestVideoId) {
+        setPreviewMessage('No video available for this request.');
+      }
+      return;
+    }
+    showPreviewStatus(`Top results for "${searchTerm}"`);
+    if (!requestVideoId) {
+      const first = results.find(r => r && r.video_id);
+      if (first) {
+        applyPreviewResult(first);
+      } else {
+        setPreviewVideo(null);
+        setPreviewMessage('No playable results returned.');
+      }
+    } else {
+      updatePreviewResultSelection();
+    }
+  } catch (e) {
+    if (token !== previewSearchToken) { return; }
+    console.error('YouTube Music search failed', e);
+    renderPreviewResults([], 'Search failed. Try again later.');
+    showPreviewStatus('Search failed.');
+    if (!requestVideoId) {
+      setPreviewMessage('No video available for this request.');
+    }
+  }
+}
+
+async function selectQueueRequest(entry, options = {}) {
+  if (!entry || !entry.request || !entry.song) { return; }
+  const { force = false } = options;
+  const requestId = entry.request.id;
+  const sourceKey = buildPreviewSourceKey(entry.song);
+  const shouldReload = force || requestId !== currentPreviewRequestId || sourceKey !== currentPreviewSourceKey;
+  currentPreviewRequestId = requestId;
+  currentPreviewSourceKey = sourceKey;
+  highlightQueueSelection();
+  if (!shouldReload) {
+    updatePreviewResultSelection();
+    return;
+  }
+  try {
+    await loadPreviewForRequest(entry);
+  } catch (e) {
+    console.error('Failed to load preview content', e);
+  }
+}
+
+function highlightQueueSelection() {
+  const container = qs('queue');
+  if (!container) { return; }
+  const active = currentPreviewRequestId ? String(currentPreviewRequestId) : '';
+  container.querySelectorAll('.item').forEach(row => {
+    const rid = row.dataset.requestId || '';
+    row.classList.toggle('selected', !!active && rid === active);
+  });
+}
+
+function resetPreviewState() {
+  currentPreviewRequestId = null;
+  currentPreviewSourceKey = null;
+  currentPreviewVideoId = null;
+  currentPreviewLink = '';
+  previewSearchToken += 1;
+  setPreviewVideo(null);
+  setPreviewMessage(previewDefaultMessage);
+  setPreviewLink('');
+  renderPreviewResults([], previewDefaultMessage);
+  showPreviewStatus('');
+  highlightQueueSelection();
+}
+
+if (previewCopyBtn) {
+  previewCopyBtn.addEventListener('click', () => { copyPreviewLink().catch(() => {}); });
+}
+
+resetPreviewState();
+
 function formatTier(tier) {
   if (!tier) { return ''; }
   switch (tier) {
@@ -203,10 +506,12 @@ async function fetchQueue() {
   const encodedChannel = encodeURIComponent(channelName);
   const resp = await fetch(`${API}/channels/${encodedChannel}/queue/full`, { credentials: 'include' });
   if (!resp.ok) { return; }
-  const data = await resp.json();
+  const payload = await resp.json();
+  const data = Array.isArray(payload) ? payload : [];
   const q = qs('queue');
   q.innerHTML = '';
   let insertedPlayedSeparator = false;
+  let matchedEntry = null;
   data.forEach(entry => {
     const { request: req, song, user } = entry;
     if (req.played && !insertedPlayedSeparator) {
@@ -217,6 +522,7 @@ async function fetchQueue() {
     }
     const row = document.createElement('div');
     row.className = `item${req.is_priority ? ' prio' : ''}${req.played ? ' played' : ''}`;
+    row.dataset.requestId = String(req.id);
 
     const thumb = document.createElement('div');
     thumb.className = 'thumb';
@@ -290,8 +596,38 @@ async function fetchQueue() {
     });
     row.appendChild(ctrl);
 
+    row.addEventListener('click', event => {
+      if (event.target.closest('.ctrl')) { return; }
+      if (event.target.closest('a')) { return; }
+      selectQueueRequest(entry, { force: true });
+    });
+
+    if (req.id === currentPreviewRequestId) {
+      matchedEntry = entry;
+    }
+
     q.appendChild(row);
   });
+
+  if (!data.length) {
+    resetPreviewState();
+    return;
+  }
+
+  if (currentPreviewRequestId) {
+    if (matchedEntry) {
+      const key = buildPreviewSourceKey(matchedEntry.song);
+      if (key !== currentPreviewSourceKey) {
+        selectQueueRequest(matchedEntry, { force: true });
+      } else {
+        highlightQueueSelection();
+      }
+    } else {
+      resetPreviewState();
+    }
+  } else {
+    highlightQueueSelection();
+  }
 }
 
 async function moveReq(id, dir) {

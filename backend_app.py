@@ -1,5 +1,6 @@
 from __future__ import annotations
 from typing import Optional, List, Any, Dict, Mapping, Iterable, Literal
+from threading import Lock
 import os
 import json
 import time
@@ -13,6 +14,7 @@ from urllib.parse import quote, urlparse, urlunparse
 from datetime import datetime, timedelta
 import asyncio
 import requests
+from ytmusicapi import YTMusic
 from sse_starlette.sse import EventSourceResponse
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -64,6 +66,8 @@ BOT_APP_SCOPES = os.getenv(
 
 ADMIN_SESSION_COOKIE = "admin_oauth_token"
 
+YTMUSIC_AUTH_FILE = os.getenv("YTMUSIC_AUTH_FILE")
+
 APP_ACCESS_TOKEN: Optional[str] = None
 APP_TOKEN_EXPIRES = 0
 BOT_USER_ID: Optional[str] = None
@@ -76,6 +80,9 @@ logger = logging.getLogger(__name__)
 engine = create_engine(DB_URL, connect_args={"check_same_thread": False} if DB_URL.startswith("sqlite") else {})
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 Base = declarative_base()
+
+_ytmusic_client: Optional[YTMusic] = None
+_ytmusic_lock = Lock()
 
 
 def get_app_access_token() -> str:
@@ -137,6 +144,25 @@ def get_bot_user_id() -> Optional[str]:
     if data:
         BOT_USER_ID = data[0]["id"]
     return BOT_USER_ID
+
+
+def get_ytmusic_client() -> YTMusic:
+    global _ytmusic_client
+    if _ytmusic_client is not None:
+        return _ytmusic_client
+    with _ytmusic_lock:
+        if _ytmusic_client is not None:
+            return _ytmusic_client
+        try:
+            if YTMUSIC_AUTH_FILE:
+                client = YTMusic(YTMUSIC_AUTH_FILE)
+            else:
+                client = YTMusic()
+        except Exception as exc:
+            logger.exception("Failed to initialize YTMusic client")
+            raise RuntimeError("YTMusic client initialization failed") from exc
+        _ytmusic_client = client
+    return _ytmusic_client
 
 
 # =====================================
@@ -439,6 +465,25 @@ class SongOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class YTMusicThumbnail(BaseModel):
+    url: str
+    width: Optional[int] = None
+    height: Optional[int] = None
+
+
+class YTMusicSearchResult(BaseModel):
+    title: str
+    video_id: Optional[str] = None
+    playlist_id: Optional[str] = None
+    browse_id: Optional[str] = None
+    result_type: Optional[str] = None
+    artists: List[str] = Field(default_factory=list)
+    album: Optional[str] = None
+    duration: Optional[str] = None
+    thumbnails: List[YTMusicThumbnail] = Field(default_factory=list)
+    link: Optional[str] = None
 
 class UserIn(BaseModel):
     twitch_id: str
@@ -2033,6 +2078,39 @@ def set_channel_settings(channel: str, payload: ChannelSettingsIn, db: Session =
     return {"success": True}
 
 # =====================================
+# Routes: YouTube Music search
+# =====================================
+
+
+@app.get("/ytmusic/search", response_model=List[YTMusicSearchResult])
+def search_ytmusic(query: str = Query(..., min_length=1, max_length=200)):
+    q = query.strip()
+    if not q:
+        raise HTTPException(status_code=400, detail="query required")
+
+    try:
+        client = get_ytmusic_client()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail="youtube music unavailable") from exc
+
+    try:
+        raw_results = client.search(q, limit=10)
+    except Exception as exc:
+        logger.exception("YouTube Music search failed for query %s", q)
+        raise HTTPException(status_code=502, detail="youtube music search failed") from exc
+
+    results: List[YTMusicSearchResult] = []
+    for item in raw_results:
+        normalized = _normalize_ytmusic_result(item)
+        if not normalized:
+            continue
+        results.append(normalized)
+        if len(results) >= 5:
+            break
+
+    return results
+
+# =====================================
 # Routes: Songs
 # =====================================
 @app.get("/channels/{channel}/songs", response_model=List[SongOut])
@@ -2238,6 +2316,107 @@ def _collect_channel_roles(channel_obj: ActiveChannel) -> tuple[set[str], dict[s
         if isinstance(user_id, str):
             subs[user_id] = tier if isinstance(tier, str) else None
     return vip_ids, subs
+
+
+def _normalize_ytmusic_result(item: Mapping[str, Any]) -> Optional[YTMusicSearchResult]:
+    if not isinstance(item, Mapping):
+        return None
+
+    title_value = item.get("title")
+    if isinstance(title_value, Mapping):
+        title = title_value.get("text") or ""
+    elif isinstance(title_value, str):
+        title = title_value
+    else:
+        title = ""
+
+    artists: List[str] = []
+    for artist in item.get("artists", []) or []:
+        if isinstance(artist, Mapping):
+            name = artist.get("name")
+            if isinstance(name, str):
+                artists.append(name)
+
+    album_name: Optional[str] = None
+    album = item.get("album")
+    if isinstance(album, Mapping):
+        raw_album_name = album.get("name")
+        if isinstance(raw_album_name, str):
+            album_name = raw_album_name
+
+    duration_value = item.get("duration")
+    if isinstance(duration_value, Mapping):
+        duration = duration_value.get("text")
+    elif isinstance(duration_value, str):
+        duration = duration_value
+    else:
+        duration = None
+    if duration is not None and not isinstance(duration, str):
+        duration = str(duration)
+
+    thumbnails: List[YTMusicThumbnail] = []
+    raw_thumbnails = item.get("thumbnails") or []
+    for thumb in raw_thumbnails:
+        if not isinstance(thumb, Mapping):
+            continue
+        url = thumb.get("url")
+        if not isinstance(url, str):
+            continue
+        width_val = thumb.get("width")
+        height_val = thumb.get("height")
+        width = None
+        height = None
+        try:
+            if width_val is not None:
+                width = int(width_val)
+        except (TypeError, ValueError):
+            width = None
+        try:
+            if height_val is not None:
+                height = int(height_val)
+        except (TypeError, ValueError):
+            height = None
+        thumbnails.append(YTMusicThumbnail(url=url, width=width, height=height))
+
+    video_id = item.get("videoId")
+    if not isinstance(video_id, str):
+        video_id = None
+
+    playlist_id = item.get("playlistId")
+    if not isinstance(playlist_id, str):
+        playlist_id = None
+
+    browse_id = item.get("browseId")
+    if not isinstance(browse_id, str):
+        browse_id = None
+
+    result_type = item.get("resultType") or item.get("category")
+    if not isinstance(result_type, str):
+        result_type = None
+
+    link = item.get("link")
+    if not isinstance(link, str):
+        link = None
+    if not link:
+        if video_id:
+            link = f"https://www.youtube.com/watch?v={video_id}"
+        elif playlist_id:
+            link = f"https://www.youtube.com/playlist?list={playlist_id}"
+        elif browse_id:
+            link = f"https://music.youtube.com/browse/{browse_id}"
+
+    return YTMusicSearchResult(
+        title=title or "",
+        video_id=video_id,
+        playlist_id=playlist_id,
+        browse_id=browse_id,
+        result_type=result_type,
+        artists=artists,
+        album=album_name,
+        duration=duration if isinstance(duration, str) else None,
+        thumbnails=thumbnails,
+        link=link,
+    )
 
 
 @app.get("/channels/{channel}/queue/full", response_model=List[QueueItemFull])
