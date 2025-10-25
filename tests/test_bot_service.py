@@ -309,6 +309,30 @@ class BotServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(bot.enabled)
         self.assertEqual(bot.configured_login, "botnick")
 
+    async def test_cancel_refresher_task(self) -> None:
+        song_bot = bot_app.SongBot.__new__(bot_app.SongBot)
+
+        async def never_complete() -> None:
+            await asyncio.Future()
+
+        refresher = asyncio.create_task(never_complete())
+        song_bot._refresher_task = refresher
+        await song_bot._cancel_refresher()
+        self.assertTrue(refresher.cancelled())
+        self.assertIsNone(song_bot._refresher_task)
+
+    async def test_songbot_shutdown_closes_resources(self) -> None:
+        song_bot = bot_app.SongBot.__new__(bot_app.SongBot)
+        song_bot._cancel_refresher = AsyncMock()
+        song_bot._disable_all_channels = AsyncMock()
+        with patch.object(bot_app.commands.Bot, "close", AsyncMock()) as base_close:
+            await song_bot.shutdown()
+
+        song_bot._cancel_refresher.assert_awaited()
+        song_bot._disable_all_channels.assert_awaited()
+        base_close.assert_awaited()
+        bot_app.backend.close.assert_awaited()
+
 
 if __name__ == "__main__":
     unittest.main()

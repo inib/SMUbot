@@ -331,6 +331,7 @@ class SongBot(commands.Bot):
         self._scopes = list(scopes or [])
         self._subscription_ids: Dict[str, str] = {}
         self._update_locks: Dict[str, asyncio.Lock] = {}
+        self._refresher_task: Optional[asyncio.Task] = None
 
     @property
     def configured_login(self) -> Optional[str]:
@@ -392,14 +393,39 @@ class SongBot(commands.Bot):
     async def event_ready(self) -> None:
         if self.enabled:
             await self.sync_channels()
-        asyncio.create_task(self.channel_refresher())
+        self._ensure_refresher_running()
         self.ready_event.set()
 
+    def _ensure_refresher_running(self) -> None:
+        task = self._refresher_task
+        if task and not task.done():
+            return
+        self._refresher_task = asyncio.create_task(self.channel_refresher())
+
+    async def _cancel_refresher(self) -> None:
+        task = self._refresher_task
+        if not task:
+            return
+        cancel = getattr(task, 'cancel', None)
+        if callable(cancel):
+            cancel()
+        if isinstance(task, asyncio.Task):
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        self._refresher_task = None
+
     async def channel_refresher(self) -> None:
-        while True:
-            await asyncio.sleep(60)
-            if self.enabled:
-                await self.sync_channels()
+        try:
+            while True:
+                await asyncio.sleep(60)
+                if self.enabled:
+                    await self.sync_channels()
+        except asyncio.CancelledError:
+            raise
+        finally:
+            self._refresher_task = None
 
     def _channel_login(self, name: str) -> str:
         return name.lower()
@@ -573,8 +599,14 @@ class SongBot(commands.Bot):
             pass
 
     async def _disable_all_channels(self) -> None:
-        for task in self.listeners.values():
-            task.cancel()
+        listener_tasks = list(self.listeners.values())
+        for task in listener_tasks:
+            cancel = getattr(task, 'cancel', None)
+            if callable(cancel):
+                cancel()
+        awaitables = [task for task in listener_tasks if isinstance(task, asyncio.Task)]
+        if awaitables:
+            await asyncio.gather(*awaitables, return_exceptions=True)
         self.listeners.clear()
         for key, row in list(self.channel_map.items()):
             await self._unsubscribe_channel(str(row.get('channel_id') or ''))
@@ -585,6 +617,17 @@ class SongBot(commands.Bot):
         self.channel_map.clear()
         self.state.clear()
         self._update_locks.clear()
+        await self._cancel_refresher()
+
+    async def shutdown(self) -> None:
+        await self._cancel_refresher()
+        await self._disable_all_channels()
+        shutdown = getattr(super(), 'shutdown', None)
+        if callable(shutdown):
+            await shutdown()
+        else:
+            await super().close()
+        await backend.close()
 
     async def _announce_joined(self, login: str) -> None:
         message = self.messages.get('bot_joined')
@@ -657,6 +700,7 @@ class SongBot(commands.Bot):
         else:
             await push_console_event('info', 'Enabling bot', event='lifecycle')
             await self.sync_channels()
+            self._ensure_refresher_running()
 
     async def event_message(self, message) -> None:
         if not self.enabled:
