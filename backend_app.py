@@ -2294,17 +2294,17 @@ def _iter_twitch_collection(url: str, headers: Mapping[str, str], params: dict[s
             return
 
 
-def _collect_channel_roles(channel_obj: ActiveChannel) -> tuple[set[str], dict[str, Optional[str]]]:
-    if not channel_obj or not channel_obj.owner or not channel_obj.channel_id:
-        return set(), {}
-    owner = channel_obj.owner
-    if not TWITCH_CLIENT_ID or not owner.access_token:
-        return set(), {}
-    headers = {
-        "Authorization": f"Bearer {owner.access_token}",
-        "Client-Id": TWITCH_CLIENT_ID,
-    }
-    params = {"broadcaster_id": channel_obj.channel_id}
+    def _collect_channel_roles(channel_obj: ActiveChannel) -> tuple[set[str], dict[str, Optional[str]]]:
+        if not channel_obj or not channel_obj.owner or not channel_obj.channel_id:
+            return set(), {}
+        owner = channel_obj.owner
+        if not TWITCH_CLIENT_ID or not owner.access_token:
+            return set(), {}
+        headers = {
+            "Authorization": f"Bearer {owner.access_token}",
+            "Client-Id": TWITCH_CLIENT_ID,
+        }
+        params = {"broadcaster_id": channel_obj.channel_id}
     vip_ids: set[str] = set()
     subs: dict[str, Optional[str]] = {}
     for row in _iter_twitch_collection("https://api.twitch.tv/helix/channels/vips", headers, params):
