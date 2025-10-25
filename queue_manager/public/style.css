@@ -30,8 +30,8 @@ a:hover{text-decoration:underline}
 .card h2{margin:0 0 10px 0;font-size:16px}
 .row{display:flex;gap:10px;align-items:center}
 .queue{display:flex;flex-direction:column;gap:10px}
-.queue-layout{display:flex;gap:16px;align-items:flex-start}
-.queue-column{flex:2 1 0;display:flex;flex-direction:column;gap:12px}
+.queue-layout{display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap}
+.queue-column{flex:1 1 800px;min-width:min(800px,100%);display:flex;flex-direction:column;gap:12px}
 .preview-column{flex:1 1 320px;min-width:280px}
 .preview-card{display:flex;flex-direction:column;gap:14px;background:#151821;border:1px solid #24283b;border-radius:14px;padding:14px}
 .preview-video{position:relative;width:100%;aspect-ratio:16/9;border-radius:12px;overflow:hidden;background:#05070d}
@@ -108,7 +108,7 @@ a:hover{text-decoration:underline}
 .overlay-warning{padding:.6rem .75rem;border-radius:10px;border:1px solid rgba(239,68,68,0.4);background:rgba(239,68,68,0.08);color:#fca5a5;font-size:13px}
 .overlay-hint{margin-top:18px}
 
-@media (max-width: 1024px){
-  .queue-layout{flex-direction:column}
-  .preview-column{width:100%;min-width:0}
+@media (max-width: 1150px){
+  .preview-column{order:-1;flex-basis:100%;min-width:0}
+  .queue-column{flex-basis:800px}
 }
