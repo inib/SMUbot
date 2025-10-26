@@ -19,6 +19,13 @@ const queueContent = qs('queue-content');
 const previewToggleBtn = qs('preview-toggle');
 const previewContent = qs('preview-content');
 
+const playlistForm = qs('playlist-form');
+const playlistUrlInput = qs('playlist-url');
+const playlistKeywordsInput = qs('playlist-keywords');
+const playlistVisibilitySelect = qs('playlist-visibility');
+const playlistStatusEl = qs('playlist-status');
+const playlistsContainer = qs('playlists');
+
 let currentPreviewRequestId = null;
 let currentPreviewSourceKey = null;
 let currentPreviewVideoId = null;
@@ -27,6 +34,9 @@ let currentPreviewResults = [];
 let previewSearchToken = 0;
 let previewCopyResetTimer = null;
 const previewDefaultMessage = 'Select a request to load YouTube Music matches.';
+
+const playlistState = new Map();
+let playlistStatusTimer = null;
 
 function getChannelInfo(name) {
   if (!name) { return null; }
@@ -143,13 +153,14 @@ if (logoutPermBtn) {
 }
 
 function showTab(name) {
-  ['queue', 'users', 'settings', 'overlays'].forEach(t => {
+  ['queue', 'playlists', 'users', 'settings', 'overlays'].forEach(t => {
     qs(t+'-view').style.display = (t===name) ? '' : 'none';
     qs('tab-'+t).classList.toggle('active', t===name);
   });
 }
 
 qs('tab-queue').onclick = () => showTab('queue');
+qs('tab-playlists').onclick = () => showTab('playlists');
 qs('tab-users').onclick = () => showTab('users');
 qs('tab-settings').onclick = () => showTab('settings');
 qs('tab-overlays').onclick = () => showTab('overlays');
@@ -480,6 +491,300 @@ setupCollapsible(queueToggleBtn, queueContent, 'Hide queue', 'Show queue');
 setupCollapsible(previewToggleBtn, previewContent, 'Hide preview', 'Show preview');
 
 resetPreviewState();
+
+function parsePlaylistKeywords(raw) {
+  if (!raw) { return []; }
+  return raw.split(',').map(k => k.trim()).filter(Boolean);
+}
+
+function setPlaylistStatus(message, isError) {
+  if (!playlistStatusEl) { return; }
+  if (playlistStatusTimer) {
+    clearTimeout(playlistStatusTimer);
+    playlistStatusTimer = null;
+  }
+  const text = message || '';
+  playlistStatusEl.textContent = text;
+  playlistStatusEl.classList.toggle('error', !!isError);
+  playlistStatusEl.hidden = !text;
+  if (text && !isError) {
+    playlistStatusTimer = setTimeout(() => {
+      playlistStatusTimer = null;
+      if (playlistStatusEl) {
+        playlistStatusEl.textContent = '';
+        playlistStatusEl.hidden = true;
+      }
+    }, 4000);
+  }
+}
+
+function resetPlaylistForm() {
+  if (playlistUrlInput) { playlistUrlInput.value = ''; }
+  if (playlistKeywordsInput) { playlistKeywordsInput.value = ''; }
+  if (playlistVisibilitySelect) { playlistVisibilitySelect.value = 'public'; }
+}
+
+function formatDuration(seconds) {
+  if (!seconds && seconds !== 0) { return ''; }
+  const total = Number(seconds);
+  if (!Number.isFinite(total) || total <= 0) { return ''; }
+  const mins = Math.floor(total / 60);
+  const secs = total % 60;
+  return `${mins}:${String(secs).padStart(2, '0')}`;
+}
+
+function renderPlaylistItems(playlistId, container, items) {
+  if (!container) { return; }
+  container.innerHTML = '';
+  const list = Array.isArray(items) ? items : [];
+  if (!list.length) {
+    const empty = document.createElement('p');
+    empty.className = 'muted';
+    empty.textContent = 'This playlist has no songs to display.';
+    container.appendChild(empty);
+    return;
+  }
+  list.forEach(item => {
+    const row = document.createElement('div');
+    row.className = 'playlist-item';
+    const info = document.createElement('div');
+    info.className = 'playlist-item-info';
+    const title = document.createElement('div');
+    title.className = 'playlist-item-title';
+    title.textContent = item.title || 'Untitled';
+    info.appendChild(title);
+    const metaParts = [];
+    if (item.artist) { metaParts.push(item.artist); }
+    const duration = formatDuration(item.duration_seconds);
+    if (duration) { metaParts.push(duration); }
+    if (metaParts.length) {
+      const meta = document.createElement('div');
+      meta.className = 'playlist-item-meta muted';
+      meta.textContent = metaParts.join(' • ');
+      info.appendChild(meta);
+    }
+    const actions = document.createElement('div');
+    actions.className = 'playlist-item-actions';
+    const addBtn = document.createElement('button');
+    addBtn.type = 'button';
+    addBtn.textContent = 'Add';
+    addBtn.addEventListener('click', () => queuePlaylistItem(playlistId, item.id, false, addBtn));
+    const bumpBtn = document.createElement('button');
+    bumpBtn.type = 'button';
+    bumpBtn.className = 'accent';
+    bumpBtn.textContent = 'Bump';
+    bumpBtn.title = 'Add as bumped priority';
+    bumpBtn.addEventListener('click', () => queuePlaylistItem(playlistId, item.id, true, bumpBtn));
+    actions.appendChild(addBtn);
+    actions.appendChild(bumpBtn);
+    row.appendChild(info);
+    row.appendChild(actions);
+    container.appendChild(row);
+  });
+}
+
+async function loadPlaylistItems(playlistId, container, toggleBtn) {
+  if (!channelName || !container) { return; }
+  const encodedChannel = encodeURIComponent(channelName);
+  container.innerHTML = '<div class="playlist-loading">Loading…</div>';
+  try {
+    const resp = await fetch(`${API}/channels/${encodedChannel}/playlists/${playlistId}/items`, { credentials: 'include' });
+    if (!resp.ok) {
+      throw new Error(`status ${resp.status}`);
+    }
+    const data = await resp.json();
+    playlistState.set(playlistId, { info: playlistState.get(playlistId)?.info || null, items: data });
+    renderPlaylistItems(playlistId, container, data);
+  } catch (e) {
+    console.error('Failed to load playlist items', e);
+    container.innerHTML = '';
+    const err = document.createElement('p');
+    err.className = 'muted error';
+    err.textContent = 'Failed to load playlist songs.';
+    container.appendChild(err);
+    if (toggleBtn) {
+      toggleBtn.textContent = 'Show songs';
+      toggleBtn.setAttribute('aria-expanded', 'false');
+    }
+  }
+}
+
+function renderPlaylists(playlists) {
+  if (!playlistsContainer) { return; }
+  playlistsContainer.innerHTML = '';
+  const list = Array.isArray(playlists) ? playlists : [];
+  if (!list.length) {
+    const empty = document.createElement('p');
+    empty.className = 'muted';
+    empty.textContent = 'Add a playlist link to get started.';
+    playlistsContainer.appendChild(empty);
+    return;
+  }
+  list.forEach(pl => {
+    const card = document.createElement('div');
+    card.className = 'playlist-card';
+    card.dataset.playlistId = String(pl.id);
+
+    const header = document.createElement('div');
+    header.className = 'playlist-header';
+    const info = document.createElement('div');
+    info.className = 'playlist-header-info';
+    const title = document.createElement('h3');
+    title.textContent = pl.title || 'Playlist';
+    info.appendChild(title);
+    const meta = document.createElement('div');
+    meta.className = 'playlist-meta muted';
+    const keywords = (pl.keywords && pl.keywords.length) ? pl.keywords.join(', ') : 'none';
+    meta.textContent = `${pl.item_count} songs • visibility: ${pl.visibility} • keywords: ${keywords}`;
+    info.appendChild(meta);
+    const linkRow = document.createElement('div');
+    linkRow.className = 'playlist-meta-link';
+    const link = document.createElement('a');
+    link.href = pl.url;
+    link.target = '_blank';
+    link.rel = 'noopener';
+    link.textContent = 'Open on YouTube';
+    linkRow.appendChild(link);
+    info.appendChild(linkRow);
+    header.appendChild(info);
+
+    const toggleBtn = document.createElement('button');
+    toggleBtn.type = 'button';
+    toggleBtn.className = 'playlist-toggle';
+    toggleBtn.textContent = 'Show songs';
+    toggleBtn.setAttribute('aria-expanded', 'false');
+    const itemsContainer = document.createElement('div');
+    itemsContainer.className = 'playlist-items';
+    itemsContainer.hidden = true;
+    toggleBtn.addEventListener('click', () => {
+      const expanded = itemsContainer.hidden;
+      if (expanded) {
+        itemsContainer.hidden = false;
+        toggleBtn.textContent = 'Hide songs';
+        toggleBtn.setAttribute('aria-expanded', 'true');
+        const cached = playlistState.get(pl.id);
+        if (cached && Array.isArray(cached.items)) {
+          renderPlaylistItems(pl.id, itemsContainer, cached.items);
+        } else {
+          loadPlaylistItems(pl.id, itemsContainer, toggleBtn).catch(() => {});
+        }
+      } else {
+        itemsContainer.hidden = true;
+        toggleBtn.textContent = 'Show songs';
+        toggleBtn.setAttribute('aria-expanded', 'false');
+      }
+    });
+    header.appendChild(toggleBtn);
+
+    card.appendChild(header);
+    card.appendChild(itemsContainer);
+    playlistsContainer.appendChild(card);
+  });
+}
+
+async function fetchPlaylists() {
+  if (!channelName) { return; }
+  const encodedChannel = encodeURIComponent(channelName);
+  try {
+    const resp = await fetch(`${API}/channels/${encodedChannel}/playlists`, { credentials: 'include' });
+    if (!resp.ok) {
+      throw new Error(`status ${resp.status}`);
+    }
+    const data = await resp.json();
+    playlistState.clear();
+    const list = Array.isArray(data) ? data : [];
+    list.forEach(pl => {
+      playlistState.set(pl.id, { info: pl, items: null });
+    });
+    renderPlaylists(list);
+  } catch (e) {
+    console.error('Failed to fetch playlists', e);
+    if (playlistsContainer) {
+      playlistsContainer.innerHTML = '';
+      const err = document.createElement('p');
+      err.className = 'muted error';
+      err.textContent = 'Failed to load playlists.';
+      playlistsContainer.appendChild(err);
+    }
+  }
+}
+
+async function addPlaylist() {
+  if (!channelName) { return; }
+  if (!playlistUrlInput || !playlistVisibilitySelect) { return; }
+  const url = playlistUrlInput.value.trim();
+  if (!url) {
+    setPlaylistStatus('Enter a playlist link to continue.', true);
+    return;
+  }
+  const keywords = parsePlaylistKeywords(playlistKeywordsInput ? playlistKeywordsInput.value : '');
+  const visibility = playlistVisibilitySelect.value || 'public';
+  const encodedChannel = encodeURIComponent(channelName);
+  const submitBtn = playlistForm ? playlistForm.querySelector('button[type="submit"]') : null;
+  if (submitBtn) { submitBtn.disabled = true; }
+  if (playlistForm) { playlistForm.classList.add('loading'); }
+  setPlaylistStatus('Saving playlist…');
+  try {
+    const resp = await fetch(`${API}/channels/${encodedChannel}/playlists`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url, keywords, visibility }),
+    });
+    if (!resp.ok) {
+      let detail = `Failed to save playlist (status ${resp.status})`;
+      try {
+        const data = await resp.json();
+        if (data && data.detail) {
+          detail = Array.isArray(data.detail) ? data.detail.join(', ') : data.detail;
+        }
+      } catch (err) {
+        /* ignore */
+      }
+      throw new Error(detail);
+    }
+    resetPlaylistForm();
+    setPlaylistStatus('Playlist saved.');
+    await fetchPlaylists();
+  } catch (e) {
+    console.error('Failed to add playlist', e);
+    setPlaylistStatus(e.message || 'Failed to add playlist.', true);
+  } finally {
+    if (playlistForm) { playlistForm.classList.remove('loading'); }
+    if (submitBtn) { submitBtn.disabled = false; }
+  }
+}
+
+async function queuePlaylistItem(playlistId, itemId, bumped, triggerBtn) {
+  if (!channelName) { return; }
+  const encodedChannel = encodeURIComponent(channelName);
+  if (triggerBtn) { triggerBtn.disabled = true; }
+  try {
+    const resp = await fetch(`${API}/channels/${encodedChannel}/playlists/${playlistId}/queue`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ item_id: itemId, bumped: Boolean(bumped) }),
+    });
+    if (!resp.ok) {
+      throw new Error(`status ${resp.status}`);
+    }
+    setPlaylistStatus('Song added to queue.');
+    fetchQueue();
+  } catch (e) {
+    console.error('Failed to queue playlist song', e);
+    setPlaylistStatus('Failed to add song to queue.', true);
+  } finally {
+    if (triggerBtn) { triggerBtn.disabled = false; }
+  }
+}
+
+if (playlistForm) {
+  playlistForm.addEventListener('submit', evt => {
+    evt.preventDefault();
+    addPlaylist().catch(() => {});
+  });
+}
 
 function formatTier(tier) {
   if (!tier) { return ''; }
@@ -992,6 +1297,7 @@ function selectChannel(ch) {
   qs('landing').style.display = 'none';
   qs('app').style.display = '';
   fetchQueue();
+  fetchPlaylists();
   fetchUsers();
   fetchSettings();
   updateOverlayBuilder();

@@ -1,0 +1,200 @@
+from __future__ import annotations
+
+import unittest
+from unittest import mock
+
+from fastapi.testclient import TestClient
+
+import backend_app
+
+
+def _wipe_db() -> None:
+    db = backend_app.SessionLocal()
+    try:
+        for model in [
+            backend_app.Request,
+            backend_app.Song,
+            backend_app.User,
+            backend_app.StreamSession,
+            backend_app.PlaylistItem,
+            backend_app.PlaylistKeyword,
+            backend_app.Playlist,
+            backend_app.ChannelSettings,
+            backend_app.ChannelModerator,
+            backend_app.ActiveChannel,
+            backend_app.TwitchUser,
+        ]:
+            db.query(model).delete()
+        db.commit()
+    finally:
+        db.close()
+
+
+class FakeYTMusic:
+    def get_playlist(self, playlistId, limit=500):  # noqa: N802 - external API casing
+        if playlistId != "PL123":
+            raise AssertionError(f"unexpected playlist id {playlistId}")
+        return {
+            "title": "Test Playlist",
+            "tracks": [
+                {
+                    "videoId": "vid1",
+                    "title": "Track One",
+                    "artists": [{"name": "Artist A"}],
+                    "duration_seconds": 215,
+                },
+                {
+                    "videoId": "vid2",
+                    "title": "Track Two",
+                    "artists": [{"name": "Artist B"}],
+                    "duration": "3:45",
+                },
+            ],
+        }
+
+
+class PlaylistApiTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.client = TestClient(backend_app.app)
+        self._original_get_client = backend_app.get_ytmusic_client
+        self._fake_client = FakeYTMusic()
+        backend_app.get_ytmusic_client = lambda: self._fake_client  # type: ignore[assignment]
+        _wipe_db()
+        db = backend_app.SessionLocal()
+        try:
+            owner = backend_app.TwitchUser(
+                twitch_id="owner",
+                username="owner",
+                access_token="token",
+                refresh_token="",
+                scopes="",
+            )
+            db.add(owner)
+            db.commit()
+            db.refresh(owner)
+
+            channel = backend_app.ActiveChannel(
+                channel_id="chan123",
+                channel_name="itsalpine",
+                owner_id=owner.id,
+                authorized=True,
+            )
+            db.add(channel)
+            db.commit()
+            db.refresh(channel)
+            backend_app.get_or_create_settings(db, channel.id)
+            self.channel_name = channel.channel_name
+        finally:
+            db.close()
+
+    def tearDown(self) -> None:
+        backend_app.get_ytmusic_client = self._original_get_client  # type: ignore[assignment]
+        self.client.close()
+        _wipe_db()
+
+    def _admin_headers(self) -> dict[str, str]:
+        return {"X-Admin-Token": backend_app.ADMIN_TOKEN}
+
+    def _create_sample_playlist(self) -> int:
+        response = self.client.post(
+            f"/channels/{self.channel_name}/playlists",
+            json={
+                "url": "https://www.youtube.com/playlist?list=PL123",
+                "keywords": ["Default", " chill "],
+                "visibility": "notlisted",
+            },
+            headers=self._admin_headers(),
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        return int(payload["id"])
+
+    def test_create_playlist_and_fetch_items(self) -> None:
+        playlist_id = self._create_sample_playlist()
+
+        list_response = self.client.get(
+            f"/channels/{self.channel_name}/playlists",
+            headers=self._admin_headers(),
+        )
+        self.assertEqual(list_response.status_code, 200, list_response.text)
+        data = list_response.json()
+        self.assertEqual(len(data), 1)
+        playlist = data[0]
+        self.assertEqual(playlist["playlist_id"], "PL123")
+        self.assertEqual(playlist["visibility"], "unlisted")
+        self.assertEqual(playlist["keywords"], ["chill", "default"])
+        self.assertEqual(playlist["item_count"], 2)
+
+        items_response = self.client.get(
+            f"/channels/{self.channel_name}/playlists/{playlist_id}/items",
+            headers=self._admin_headers(),
+        )
+        self.assertEqual(items_response.status_code, 200, items_response.text)
+        items = items_response.json()
+        self.assertEqual(len(items), 2)
+        first = items[0]
+        self.assertEqual(first["video_id"], "vid1")
+        self.assertEqual(first["artist"], "Artist A")
+        self.assertEqual(first["duration_seconds"], 215)
+
+    def test_random_request_uses_default_keyword(self) -> None:
+        self._create_sample_playlist()
+        with mock.patch("backend_app.random.choice", side_effect=lambda seq: seq[0]):
+            response = self.client.post(
+                f"/channels/{self.channel_name}/playlists/random_request",
+                json={
+                    "twitch_id": "viewer1",
+                    "username": "Viewer",
+                    "is_subscriber": False,
+                },
+                headers=self._admin_headers(),
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["keyword"], "default")
+        self.assertEqual(payload["song"]["title"], "Track One")
+
+        db = backend_app.SessionLocal()
+        try:
+            requests = db.query(backend_app.Request).all()
+            self.assertEqual(len(requests), 1)
+            req = requests[0]
+            self.assertEqual(req.is_priority, 0)
+            user = db.get(backend_app.User, req.user_id)
+            self.assertIsNotNone(user)
+            self.assertEqual(user.twitch_id, "viewer1")
+            song = db.get(backend_app.Song, req.song_id)
+            self.assertIsNotNone(song)
+            if song:
+                self.assertEqual(song.youtube_link, "https://www.youtube.com/watch?v=vid1")
+        finally:
+            db.close()
+
+    def test_queue_playlist_item_bumped_sets_priority(self) -> None:
+        playlist_id = self._create_sample_playlist()
+        items_response = self.client.get(
+            f"/channels/{self.channel_name}/playlists/{playlist_id}/items",
+            headers=self._admin_headers(),
+        )
+        self.assertEqual(items_response.status_code, 200, items_response.text)
+        item_id = items_response.json()[0]["id"]
+
+        queue_response = self.client.post(
+            f"/channels/{self.channel_name}/playlists/{playlist_id}/queue",
+            json={"item_id": item_id, "bumped": True},
+            headers=self._admin_headers(),
+        )
+        self.assertEqual(queue_response.status_code, 200, queue_response.text)
+
+        db = backend_app.SessionLocal()
+        try:
+            req = db.query(backend_app.Request).one()
+            self.assertEqual(req.is_priority, 1)
+            self.assertEqual(req.priority_source, "admin")
+            self.assertEqual(req.bumped, 1)
+            user = db.get(backend_app.User, req.user_id)
+            self.assertIsNotNone(user)
+            if user:
+                self.assertEqual(user.twitch_id, "__playlist__")
+        finally:
+            db.close()

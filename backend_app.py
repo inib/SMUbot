@@ -11,7 +11,8 @@ import logging
 import re
 import secrets
 import html
-from urllib.parse import quote, urlparse, urlunparse
+import random
+from urllib.parse import quote, urlparse, urlunparse, parse_qs
 from datetime import datetime, timedelta
 import asyncio
 import requests
@@ -42,7 +43,7 @@ from sqlalchemy import (
     create_engine, Column, Integer, String, Text, DateTime, Boolean,
     ForeignKey, UniqueConstraint, func, select, and_
 )
-from sqlalchemy.orm import declarative_base, relationship, sessionmaker, Session
+from sqlalchemy.orm import declarative_base, relationship, sessionmaker, Session, joinedload, selectinload
 from sqlalchemy.exc import IntegrityError
 
 # =====================================
@@ -195,6 +196,7 @@ class ActiveChannel(Base):
         uselist=False,
         cascade="all, delete-orphan",
     )
+    playlists = relationship("Playlist", back_populates="channel", cascade="all, delete-orphan")
 
     @property
     def bot_active(self) -> bool:
@@ -333,6 +335,57 @@ class BotConfig(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
+
+class Playlist(Base):
+    __tablename__ = "playlists"
+    id = Column(Integer, primary_key=True)
+    channel_id = Column(Integer, ForeignKey("active_channels.id", ondelete="CASCADE"), nullable=False)
+    title = Column(String, nullable=False)
+    playlist_id = Column(String, nullable=False)
+    url = Column(Text, nullable=False)
+    visibility = Column(String, nullable=False, default="public")
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    channel = relationship("ActiveChannel", back_populates="playlists")
+    keywords = relationship("PlaylistKeyword", back_populates="playlist", cascade="all, delete-orphan")
+    items = relationship("PlaylistItem", back_populates="playlist", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        UniqueConstraint("channel_id", "playlist_id", name="uq_playlists_channel_playlist"),
+    )
+
+
+class PlaylistKeyword(Base):
+    __tablename__ = "playlist_keywords"
+    id = Column(Integer, primary_key=True)
+    playlist_id = Column(Integer, ForeignKey("playlists.id", ondelete="CASCADE"), nullable=False)
+    keyword = Column(String, nullable=False)
+
+    playlist = relationship("Playlist", back_populates="keywords")
+
+    __table_args__ = (
+        UniqueConstraint("playlist_id", "keyword", name="uq_playlist_keyword"),
+    )
+
+
+class PlaylistItem(Base):
+    __tablename__ = "playlist_items"
+    id = Column(Integer, primary_key=True)
+    playlist_id = Column(Integer, ForeignKey("playlists.id", ondelete="CASCADE"), nullable=False)
+    position = Column(Integer, default=0, nullable=False)
+    video_id = Column(String, nullable=False)
+    title = Column(String, nullable=False)
+    artist = Column(String, nullable=True)
+    duration_seconds = Column(Integer)
+    url = Column(Text, nullable=False)
+
+    playlist = relationship("Playlist", back_populates="items")
+
+    __table_args__ = (
+        UniqueConstraint("playlist_id", "video_id", name="uq_playlist_item_video"),
+    )
+
 # =====================================
 # DB bootstrap
 # =====================================
@@ -449,6 +502,58 @@ class BotLogAckOut(BaseModel):
 
 class BotOAuthStartIn(BaseModel):
     return_url: Optional[str] = None
+
+
+class PlaylistCreate(BaseModel):
+    url: str = Field(..., min_length=1, max_length=1024)
+    keywords: List[str] = Field(default_factory=list)
+    visibility: Optional[str] = Field(default="public")
+
+
+class PlaylistOut(BaseModel):
+    id: int
+    title: str
+    playlist_id: str
+    url: str
+    visibility: str
+    keywords: List[str] = Field(default_factory=list)
+    item_count: int
+
+
+class PlaylistItemOut(BaseModel):
+    id: int
+    title: str
+    artist: Optional[str]
+    video_id: str
+    url: str
+    position: int
+    duration_seconds: Optional[int] = None
+
+
+class PlaylistQueueIn(BaseModel):
+    item_id: int
+    bumped: bool = False
+
+
+class PlaylistSongPick(BaseModel):
+    id: int
+    artist: str
+    title: str
+    youtube_link: Optional[str] = None
+
+
+class RandomPlaylistRequestIn(BaseModel):
+    keyword: Optional[str] = None
+    twitch_id: str = Field(..., min_length=1)
+    username: str = Field(..., min_length=1)
+    is_subscriber: bool = False
+
+
+class RandomPlaylistRequestOut(BaseModel):
+    request_id: int
+    song: PlaylistSongPick
+    playlist_item_id: int
+    keyword: str
 
 class SongIn(BaseModel):
     artist: str
@@ -1765,6 +1870,224 @@ def get_or_create_bot_state(db: Session, channel_pk: int) -> ChannelBotState:
     return state
 
 
+def _normalize_keyword(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    normalized = value.strip().lower()
+    return normalized or None
+
+
+def _normalize_keywords(keywords: Iterable[str]) -> List[str]:
+    seen: set[str] = set()
+    normalized: List[str] = []
+    for raw in keywords:
+        key = _normalize_keyword(raw)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        normalized.append(key)
+    return normalized
+
+
+def _normalize_visibility(value: Optional[str]) -> str:
+    if not value:
+        return "public"
+    token = value.strip().lower()
+    if token in {"public"}:
+        return "public"
+    if token in {"unlisted", "notlisted", "not_listed"}:
+        return "unlisted"
+    raise HTTPException(status_code=400, detail="invalid visibility")
+
+
+def _extract_playlist_id(url: str) -> Optional[str]:
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return None
+    query = parse_qs(parsed.query)
+    candidates = query.get("list")
+    if candidates:
+        identifier = (candidates[0] or "").strip()
+        if identifier:
+            return identifier
+    path = (parsed.path or "").strip("/")
+    if "playlist" in path:
+        parts = path.split("/")
+        if parts and parts[-1]:
+            return parts[-1]
+    return None
+
+
+def _build_playlist_url(playlist_id: str) -> str:
+    return f"https://www.youtube.com/playlist?list={playlist_id}"
+
+
+def _parse_duration_seconds(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        parts = value.split(":")
+        total = 0
+        try:
+            for part in parts:
+                total = total * 60 + int(part)
+            return total
+        except ValueError:
+            return None
+    return None
+
+
+def _fetch_playlist_tracks(playlist_id: str) -> tuple[str, List[Dict[str, Any]]]:
+    try:
+        client = get_ytmusic_client()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail="youtube music unavailable") from exc
+    try:
+        raw = client.get_playlist(playlist_id, limit=500)
+    except Exception as exc:
+        logger.exception("Failed to load playlist %s", playlist_id)
+        raise HTTPException(status_code=502, detail="failed to load playlist") from exc
+    title = raw.get("title") or playlist_id
+    tracks = raw.get("tracks") or []
+    items: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for idx, track in enumerate(tracks, start=1):
+        video_id = track.get("videoId")
+        if not video_id or video_id in seen:
+            continue
+        seen.add(video_id)
+        item_title = track.get("title") or f"Video {video_id}"
+        artist_names = []
+        for artist in track.get("artists") or []:
+            name = artist.get("name") if isinstance(artist, Mapping) else None
+            if name:
+                artist_names.append(name)
+        artist = ", ".join(artist_names) if artist_names else "Unknown"
+        duration = track.get("duration_seconds")
+        if duration is not None:
+            try:
+                duration_int = int(duration)
+            except (TypeError, ValueError):
+                duration_int = None
+        else:
+            duration_int = _parse_duration_seconds(track.get("duration"))
+        items.append(
+            {
+                "position": idx,
+                "video_id": video_id,
+                "title": item_title,
+                "artist": artist,
+                "duration_seconds": duration_int,
+                "url": f"https://www.youtube.com/watch?v={video_id}",
+            }
+        )
+    if not items:
+        raise HTTPException(status_code=404, detail="playlist contains no playable tracks")
+    return title, items
+
+
+def _get_or_create_channel_user(db: Session, channel_pk: int, twitch_id: str, username: str) -> User:
+    user = (
+        db.query(User)
+        .filter(User.channel_id == channel_pk, User.twitch_id == twitch_id)
+        .one_or_none()
+    )
+    if user:
+        if username and user.username != username:
+            user.username = username
+        return user
+    user = User(channel_id=channel_pk, twitch_id=twitch_id, username=username or twitch_id)
+    db.add(user)
+    db.flush()
+    return user
+
+
+def _get_playlist_user(db: Session, channel_pk: int) -> User:
+    return _get_or_create_channel_user(db, channel_pk, "__playlist__", "Playlist")
+
+
+def _ensure_playlist_song(db: Session, channel_pk: int, item: PlaylistItem) -> Song:
+    song = (
+        db.query(Song)
+        .filter(Song.channel_id == channel_pk, Song.youtube_link == item.url)
+        .one_or_none()
+    )
+    if song:
+        return song
+    song = Song(
+        channel_id=channel_pk,
+        artist=item.artist or "Unknown",
+        title=item.title or "Unknown",
+        youtube_link=item.url,
+    )
+    db.add(song)
+    db.flush()
+    return song
+
+
+def _create_request_entry(
+    db: Session,
+    channel_pk: int,
+    user_id: int,
+    song_id: int,
+    *,
+    bumped: bool = False,
+) -> Request:
+    stream_id = current_stream(db, channel_pk)
+    max_pos = (
+        db.query(func.coalesce(func.max(Request.position), 0))
+        .filter(
+            Request.channel_id == channel_pk,
+            Request.stream_id == stream_id,
+            Request.played == 0,
+        )
+        .scalar()
+    )
+    new_position = (max_pos or 0) + 1
+    req = Request(
+        channel_id=channel_pk,
+        stream_id=stream_id,
+        song_id=song_id,
+        user_id=user_id,
+        position=new_position,
+    )
+    if bumped:
+        req.bumped = 1
+        req.is_priority = 1
+        req.priority_source = "admin"
+    db.add(req)
+    user = db.get(User, user_id)
+    if user:
+        user.amount_requested = (user.amount_requested or 0) + 1
+    db.flush()
+    return req
+
+
+def _playlists_with_keyword(db: Session, channel_pk: int, keyword: str) -> List[Playlist]:
+    return (
+        db.query(Playlist)
+        .join(PlaylistKeyword)
+        .options(selectinload(Playlist.items))
+        .filter(Playlist.channel_id == channel_pk, PlaylistKeyword.keyword == keyword)
+        .all()
+    )
+
+
+def _aggregate_playlist_items(playlists: Iterable[Playlist]) -> List[PlaylistItem]:
+    collected: List[PlaylistItem] = []
+    seen: set[str] = set()
+    for playlist in playlists:
+        for item in playlist.items:
+            if item.video_id in seen:
+                continue
+            seen.add(item.video_id)
+            collected.append(item)
+    return collected
+
+
 def current_stream(db: Session, channel_pk: int) -> int:
     s = (
         db.query(StreamSession)
@@ -2120,6 +2443,207 @@ def search_ytmusic(query: str = Query(..., min_length=1, max_length=200)):
 # =====================================
 # Routes: Songs
 # =====================================
+
+
+@app.get("/channels/{channel}/playlists", response_model=List[PlaylistOut], dependencies=[Depends(require_token)])
+def list_playlists(channel: str, db: Session = Depends(get_db)):
+    channel_pk = get_channel_pk(channel, db)
+    playlists = (
+        db.query(Playlist)
+        .options(selectinload(Playlist.keywords), selectinload(Playlist.items))
+        .filter(Playlist.channel_id == channel_pk)
+        .order_by(Playlist.title.asc())
+        .all()
+    )
+    results: List[PlaylistOut] = []
+    for playlist in playlists:
+        keywords = sorted(kw.keyword for kw in playlist.keywords)
+        results.append(
+            PlaylistOut(
+                id=playlist.id,
+                title=playlist.title,
+                playlist_id=playlist.playlist_id,
+                url=playlist.url,
+                visibility=playlist.visibility,
+                keywords=keywords,
+                item_count=len(playlist.items),
+            )
+        )
+    return results
+
+
+@app.post(
+    "/channels/{channel}/playlists",
+    response_model=dict,
+    dependencies=[Depends(require_token)],
+)
+def create_playlist(channel: str, payload: PlaylistCreate, db: Session = Depends(get_db)):
+    channel_pk = get_channel_pk(channel, db)
+    playlist_id = _extract_playlist_id(payload.url or "")
+    if not playlist_id:
+        raise HTTPException(status_code=400, detail="invalid playlist url")
+    existing = (
+        db.query(Playlist)
+        .filter(Playlist.channel_id == channel_pk, Playlist.playlist_id == playlist_id)
+        .one_or_none()
+    )
+    if existing:
+        raise HTTPException(status_code=409, detail="playlist already added")
+    title, tracks = _fetch_playlist_tracks(playlist_id)
+    visibility = _normalize_visibility(payload.visibility)
+    playlist = Playlist(
+        channel_id=channel_pk,
+        title=title,
+        playlist_id=playlist_id,
+        url=_build_playlist_url(playlist_id),
+        visibility=visibility,
+    )
+    db.add(playlist)
+    db.flush()
+    for keyword in _normalize_keywords(payload.keywords):
+        db.add(PlaylistKeyword(playlist_id=playlist.id, keyword=keyword))
+    for item in tracks:
+        db.add(
+            PlaylistItem(
+                playlist_id=playlist.id,
+                position=item["position"],
+                video_id=item["video_id"],
+                title=item["title"],
+                artist=item["artist"],
+                duration_seconds=item["duration_seconds"],
+                url=item["url"],
+            )
+        )
+    db.commit()
+    return {"id": playlist.id}
+
+
+@app.get(
+    "/channels/{channel}/playlists/{playlist_id}/items",
+    response_model=List[PlaylistItemOut],
+    dependencies=[Depends(require_token)],
+)
+def list_playlist_items(channel: str, playlist_id: int, db: Session = Depends(get_db)):
+    channel_pk = get_channel_pk(channel, db)
+    playlist = (
+        db.query(Playlist)
+        .options(selectinload(Playlist.items))
+        .filter(Playlist.channel_id == channel_pk, Playlist.id == playlist_id)
+        .one_or_none()
+    )
+    if not playlist:
+        raise HTTPException(status_code=404, detail="playlist not found")
+    items = sorted(playlist.items, key=lambda entry: entry.position)
+    return [
+        PlaylistItemOut(
+            id=item.id,
+            title=item.title,
+            artist=item.artist,
+            video_id=item.video_id,
+            url=item.url,
+            position=item.position,
+            duration_seconds=item.duration_seconds,
+        )
+        for item in items
+    ]
+
+
+@app.post(
+    "/channels/{channel}/playlists/{playlist_id}/queue",
+    response_model=dict,
+    dependencies=[Depends(require_token)],
+)
+def queue_playlist_item(
+    channel: str,
+    playlist_id: int,
+    payload: PlaylistQueueIn,
+    db: Session = Depends(get_db),
+):
+    channel_pk = get_channel_pk(channel, db)
+    playlist = (
+        db.query(Playlist)
+        .filter(Playlist.channel_id == channel_pk, Playlist.id == playlist_id)
+        .one_or_none()
+    )
+    if not playlist:
+        raise HTTPException(status_code=404, detail="playlist not found")
+    item = (
+        db.query(PlaylistItem)
+        .filter(PlaylistItem.id == payload.item_id, PlaylistItem.playlist_id == playlist.id)
+        .one_or_none()
+    )
+    if not item:
+        raise HTTPException(status_code=404, detail="playlist item not found")
+    playlist_user = _get_playlist_user(db, channel_pk)
+    song = _ensure_playlist_song(db, channel_pk, item)
+    req = _create_request_entry(db, channel_pk, playlist_user.id, song.id, bumped=payload.bumped)
+    db.commit()
+    publish_queue_changed(channel_pk)
+    return {"request_id": req.id}
+
+
+@app.post(
+    "/channels/{channel}/playlists/random_request",
+    response_model=RandomPlaylistRequestOut,
+    dependencies=[Depends(require_token)],
+)
+def random_playlist_request(
+    channel: str,
+    payload: RandomPlaylistRequestIn,
+    db: Session = Depends(get_db),
+):
+    channel_pk = get_channel_pk(channel, db)
+    keyword = _normalize_keyword(payload.keyword) if payload.keyword else None
+    playlists: List[Playlist] = []
+    resolved_keyword = keyword or ""
+    if keyword:
+        playlists = _playlists_with_keyword(db, channel_pk, keyword)
+    if not playlists:
+        playlists = _playlists_with_keyword(db, channel_pk, "default")
+        if playlists:
+            resolved_keyword = "default"
+    if not playlists:
+        raise HTTPException(status_code=404, detail="no playlist for keyword")
+    pool = _aggregate_playlist_items(playlists)
+    if not pool:
+        raise HTTPException(status_code=404, detail="no playlist items available")
+    choice = random.choice(pool)
+    user = _get_or_create_channel_user(db, channel_pk, payload.twitch_id, payload.username)
+    db.flush()
+    enforce_queue_limits(db, channel_pk, user.id, want_priority=False)
+    stream_id = current_stream(db, channel_pk)
+    existing_req = (
+        db.query(Request.id)
+        .filter(
+            Request.channel_id == channel_pk,
+            Request.stream_id == stream_id,
+            Request.user_id == user.id,
+        )
+        .first()
+    )
+    if not existing_req and payload.is_subscriber:
+        try:
+            award_prio_points(db, channel_pk, user.id, 1)
+        except HTTPException:
+            pass
+    song = _ensure_playlist_song(db, channel_pk, choice)
+    req = _create_request_entry(db, channel_pk, user.id, song.id, bumped=False)
+    db.commit()
+    publish_queue_changed(channel_pk)
+    pick = PlaylistSongPick(
+        id=song.id,
+        artist=song.artist,
+        title=song.title,
+        youtube_link=song.youtube_link,
+    )
+    return RandomPlaylistRequestOut(
+        request_id=req.id,
+        song=pick,
+        playlist_item_id=choice.id,
+        keyword=resolved_keyword,
+    )
+
+
 @app.get("/channels/{channel}/songs", response_model=List[SongOut])
 def search_songs(channel: str, search: Optional[str] = Query(None), db: Session = Depends(get_db)):
     channel_pk = get_channel_pk(channel, db)
