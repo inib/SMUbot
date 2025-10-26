@@ -86,6 +86,14 @@ class Backend:
         self.headers = { 'X-Admin-Token': admin_token, 'Content-Type': 'application/json' }
         self.session: Optional[aiohttp.ClientSession] = None
 
+
+class BackendError(RuntimeError):
+    def __init__(self, status: int, detail: object):
+        message = detail if isinstance(detail, str) else str(detail)
+        super().__init__(message)
+        self.status = status
+        self.detail = message
+
     async def start(self):
         if not self.session:
             self.session = aiohttp.ClientSession()
