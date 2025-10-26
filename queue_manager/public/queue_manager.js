@@ -171,13 +171,27 @@ function buildPreviewSourceKey(song) {
   return `${song.artist || ''}|||${song.title || ''}|||${song.youtube_link || ''}`;
 }
 
+// The backend uses the lowercase string "unknown" as a placeholder when
+// request metadata is missing. Keep the comparison case-sensitive so that
+// legitimate titles/artists containing "Unknown" are preserved.
+const PLACEHOLDER_METADATA_TOKEN = 'unknown';
+
+function isPlaceholderMetadata(value) {
+  if (!value) { return false; }
+  const trimmed = value.trim();
+  if (!trimmed) { return false; }
+  return trimmed === PLACEHOLDER_METADATA_TOKEN;
+}
+
 function buildSearchTerm(song) {
   if (!song) { return ''; }
   const artist = (song.artist || '').trim();
   const title = (song.title || '').trim();
+  const normalizedArtist = isPlaceholderMetadata(artist) ? '' : artist;
+  const normalizedTitle = isPlaceholderMetadata(title) ? '' : title;
   const parts = [];
-  if (artist) { parts.push(artist); }
-  if (title) { parts.push(title); }
+  if (normalizedArtist) { parts.push(normalizedArtist); }
+  if (normalizedTitle) { parts.push(normalizedTitle); }
   if (parts.length) { return parts.join(' - '); }
   const video = ytId(song.youtube_link);
   return video || '';

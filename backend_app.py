@@ -2476,8 +2476,15 @@ def _normalize_ytmusic_result(item: Mapping[str, Any]) -> Optional[YTMusicSearch
         browse_id = None
 
     result_type = item.get("resultType") or item.get("category")
-    if not isinstance(result_type, str):
+    if isinstance(result_type, str):
+        normalized_result_type = (
+            result_type.strip().lower().replace(" ", "_").replace("-", "_")
+        )
+        if not normalized_result_type:
+            normalized_result_type = None
+    else:
         result_type = None
+        normalized_result_type = None
 
     link = item.get("link")
     if not isinstance(link, str):
@@ -2489,6 +2496,13 @@ def _normalize_ytmusic_result(item: Mapping[str, Any]) -> Optional[YTMusicSearch
             link = f"https://www.youtube.com/playlist?list={playlist_id}"
         elif browse_id:
             link = f"https://music.youtube.com/browse/{browse_id}"
+
+    if not video_id:
+        return None
+
+    allowed_result_types = {"song", "songs", "video", "videos", "music_video", "musicvideo"}
+    if normalized_result_type and normalized_result_type not in allowed_result_types:
+        return None
 
     return YTMusicSearchResult(
         title=title or "",
