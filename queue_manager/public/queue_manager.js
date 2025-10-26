@@ -38,6 +38,59 @@ const previewDefaultMessage = 'Select a request to load YouTube Music matches.';
 const playlistState = new Map();
 let playlistStatusTimer = null;
 
+const SETTINGS_CONFIG = {
+  queue_closed: {
+    type: 'boolean',
+    label: 'Pause new requests',
+    description: 'When enabled, chat cannot add new songs. Existing queue entries stay untouched.',
+    onLabel: 'Paused',
+    offLabel: 'Accepting',
+  },
+  prio_only: {
+    type: 'boolean',
+    label: 'Priority requests only',
+    description: 'Require viewers to spend priority points or other privileges to add requests.',
+    onLabel: 'Required',
+    offLabel: 'Optional',
+  },
+  allow_bumps: {
+    type: 'boolean',
+    label: 'Allow chat bumps',
+    description: 'Reserved for a future feature. Toggling this has no effect yet on queue behaviour.',
+    onLabel: 'Enabled',
+    offLabel: 'Disabled',
+    disabled: true,
+    disabledReason: 'Chat bump restrictions are not implemented yet.',
+  },
+  max_requests_per_user: {
+    type: 'number',
+    label: 'Requests per viewer',
+    description: 'Maximum number of unplayed songs a viewer may keep in the queue at once. Use “No limit” to disable the cap.',
+    min: 0,
+    step: 1,
+    special: {
+      value: -1,
+      label: 'No limit',
+      activeLabel: 'No limit active',
+      fallback: 0,
+    },
+  },
+  max_prio_points: {
+    type: 'number',
+    label: 'Priority point cap',
+    description: 'Highest number of priority points that any viewer can hold.',
+    min: 0,
+    step: 1,
+  },
+  other_flags: {
+    type: 'text',
+    label: 'Experimental flags',
+    description: 'Advanced, comma-separated flags for beta features. Leave blank unless directed.',
+    multiline: true,
+    placeholder: 'flag-one,flag-two',
+  },
+};
+
 function getChannelInfo(name) {
   if (!name) { return null; }
   return channelsCache.find(ch => ch.channel_name.toLowerCase() === name.toLowerCase()) || null;
@@ -1168,26 +1221,345 @@ async function modPoints(uid, delta) {
 }
 
 // ===== Settings view =====
+function normaliseSettingOrder(data) {
+  const knownKeys = Object.keys(SETTINGS_CONFIG).filter(key => Object.prototype.hasOwnProperty.call(data, key));
+  const extras = Object.keys(data).filter(key => key !== 'channel_id' && !knownKeys.includes(key));
+  return [...knownKeys, ...extras];
+}
+
+function buildSettingRow(key, value, meta) {
+  const row = document.createElement('section');
+  row.className = 'setting-row';
+  row.dataset.key = key;
+
+  const info = document.createElement('div');
+  info.className = 'setting-info';
+  const title = document.createElement('h3');
+  title.textContent = meta.label || key;
+  info.appendChild(title);
+  if (meta.description) {
+    const desc = document.createElement('p');
+    desc.className = 'muted';
+    desc.textContent = meta.description;
+    info.appendChild(desc);
+  }
+  row.appendChild(info);
+
+  const controlWrap = document.createElement('div');
+  controlWrap.className = 'setting-control';
+  const control = createSettingControl(key, value, meta);
+  if (!control) {
+    return null;
+  }
+  if (meta.disabled) {
+    controlWrap.classList.add('disabled');
+    if (meta.disabledReason) {
+      controlWrap.title = meta.disabledReason;
+    }
+  }
+  controlWrap.appendChild(control);
+  row.appendChild(controlWrap);
+  return row;
+}
+
+function createSettingControl(key, value, meta) {
+  const type = meta.type || (typeof value === 'number' ? 'number' : 'text');
+  if (type === 'boolean') {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'setting-toggle';
+    const switchLabel = document.createElement('label');
+    switchLabel.className = 'toggle-switch';
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.checked = !!Number(value);
+    if (meta.disabled) {
+      input.disabled = true;
+    }
+    const slider = document.createElement('span');
+    slider.className = 'toggle-slider';
+    switchLabel.appendChild(input);
+    switchLabel.appendChild(slider);
+    const state = document.createElement('span');
+    state.className = 'toggle-state';
+    const onLabel = meta.onLabel || 'On';
+    const offLabel = meta.offLabel || 'Off';
+    const refreshState = () => {
+      state.textContent = input.checked ? onLabel : offLabel;
+    };
+    refreshState();
+    wrapper.appendChild(switchLabel);
+    wrapper.appendChild(state);
+
+    const setBusy = (isBusy) => {
+      wrapper.classList.toggle('loading', isBusy);
+      if (!meta.disabled) {
+        input.disabled = isBusy;
+      }
+    };
+
+    if (!meta.disabled) {
+      input.addEventListener('change', async () => {
+        const newValue = input.checked ? 1 : 0;
+        setBusy(true);
+        const ok = await updateSetting(key, newValue);
+        if (!ok) {
+          input.checked = !input.checked;
+        }
+        refreshState();
+        setBusy(false);
+      });
+    }
+
+    return wrapper;
+  }
+
+  if (type === 'number') {
+    let currentValue = typeof value === 'number' ? value : parseInt(value, 10);
+    if (Number.isNaN(currentValue)) {
+      currentValue = 0;
+    }
+    const step = meta.step || 1;
+    const wrapper = document.createElement('div');
+    wrapper.className = 'setting-number';
+
+    const stepper = document.createElement('div');
+    stepper.className = 'number-stepper';
+    const dec = document.createElement('button');
+    dec.type = 'button';
+    dec.className = 'stepper-btn';
+    dec.textContent = '−';
+    const inc = document.createElement('button');
+    inc.type = 'button';
+    inc.className = 'stepper-btn';
+    inc.textContent = '+';
+    const input = document.createElement('input');
+    input.type = 'number';
+    input.step = step;
+    input.value = currentValue;
+    if (meta.min !== undefined) { input.min = meta.min; }
+    if (meta.max !== undefined) { input.max = meta.max; }
+    stepper.appendChild(dec);
+    stepper.appendChild(input);
+    stepper.appendChild(inc);
+    wrapper.appendChild(stepper);
+
+    let specialBtn = null;
+    let specialLabel = null;
+    if (meta.special) {
+      specialBtn = document.createElement('button');
+      specialBtn.type = 'button';
+      specialBtn.className = 'settings-chip';
+      specialBtn.textContent = meta.special.label;
+      wrapper.appendChild(specialBtn);
+      specialLabel = document.createElement('span');
+      specialLabel.className = 'setting-value-label';
+      wrapper.appendChild(specialLabel);
+    }
+
+    const clampValue = (val) => {
+      if (meta.special && val <= meta.special.value) {
+        return meta.special.value;
+      }
+      if (meta.min !== undefined && val < meta.min) {
+        return meta.min;
+      }
+      if (meta.max !== undefined && val > meta.max) {
+        return meta.max;
+      }
+      return val;
+    };
+
+    const setBusy = (isBusy) => {
+      wrapper.classList.toggle('loading', isBusy);
+      if (meta.disabled) {
+        dec.disabled = true;
+        inc.disabled = true;
+        input.disabled = true;
+        if (specialBtn) { specialBtn.disabled = true; }
+        return;
+      }
+      dec.disabled = isBusy;
+      inc.disabled = isBusy;
+      input.disabled = isBusy;
+      if (specialBtn) { specialBtn.disabled = isBusy; }
+    };
+
+    const refreshSpecialState = () => {
+      if (!meta.special) { return; }
+      const isActive = currentValue === meta.special.value;
+      if (specialBtn) {
+        specialBtn.classList.toggle('active', isActive);
+      }
+      if (specialLabel) {
+        if (isActive) {
+          specialLabel.textContent = meta.special.activeLabel || meta.special.label;
+          specialLabel.hidden = false;
+        } else {
+          specialLabel.textContent = '';
+          specialLabel.hidden = true;
+        }
+      }
+    };
+
+    refreshSpecialState();
+
+    const commitValue = async (next) => {
+      if (Number.isNaN(next)) {
+        input.value = currentValue;
+        refreshSpecialState();
+        return;
+      }
+      const desired = clampValue(next);
+      if (desired === currentValue) {
+        input.value = currentValue;
+        refreshSpecialState();
+        return;
+      }
+      setBusy(true);
+      const ok = await updateSetting(key, desired);
+      if (ok) {
+        currentValue = desired;
+      }
+      input.value = currentValue;
+      refreshSpecialState();
+      setBusy(false);
+    };
+
+    dec.addEventListener('click', () => {
+      if (meta.disabled) { return; }
+      let next;
+      if (meta.special && currentValue === meta.special.value) {
+        next = meta.special.value;
+      } else {
+        next = currentValue - step;
+      }
+      commitValue(next);
+    });
+    inc.addEventListener('click', () => {
+      if (meta.disabled) { return; }
+      let next;
+      if (meta.special && currentValue === meta.special.value) {
+        next = meta.special.fallback !== undefined ? meta.special.fallback : (meta.min !== undefined ? meta.min : 0);
+      } else {
+        next = currentValue + step;
+      }
+      commitValue(next);
+    });
+    input.addEventListener('change', () => {
+      const val = parseInt(input.value, 10);
+      commitValue(val);
+    });
+
+    if (specialBtn && !meta.disabled) {
+      specialBtn.addEventListener('click', () => {
+        commitValue(meta.special.value);
+      });
+    }
+
+    if (meta.disabled) {
+      setBusy(false);
+    }
+
+    return wrapper;
+  }
+
+  const wrapper = document.createElement('div');
+  wrapper.className = 'setting-text';
+  const multiline = meta.multiline;
+  const input = document.createElement(multiline ? 'textarea' : 'input');
+  if (multiline) {
+    input.className = 'setting-textarea';
+    input.rows = meta.rows || 3;
+  } else {
+    input.type = meta.inputType || 'text';
+    input.className = 'setting-input';
+  }
+  if (meta.placeholder) {
+    input.placeholder = meta.placeholder;
+  }
+  if (value != null) {
+    input.value = value;
+  }
+  if (meta.disabled) {
+    input.disabled = true;
+  }
+  wrapper.appendChild(input);
+
+  let currentValue = value || '';
+
+  const setBusy = (isBusy) => {
+    wrapper.classList.toggle('loading', isBusy);
+    if (!meta.disabled) {
+      input.disabled = isBusy;
+    }
+  };
+
+  if (!meta.disabled) {
+    input.addEventListener('change', async () => {
+      const next = input.value;
+      if (next === currentValue) { return; }
+      setBusy(true);
+      const ok = await updateSetting(key, next);
+      if (ok) {
+        currentValue = next;
+      } else {
+        input.value = currentValue;
+      }
+      setBusy(false);
+    });
+  }
+
+  return wrapper;
+}
+
 async function fetchSettings() {
+  if (!channelName) { return; }
   const resp = await fetch(`${API}/channels/${channelName}/settings`, { credentials: 'include' });
   if (!resp.ok) { return; }
   const data = await resp.json();
-  const s = qs('settings');
-  s.innerHTML = '';
-  Object.entries(data).forEach(([k,v])=>{
-    const row = document.createElement('div');
-    row.className = 'req';
-    row.innerHTML = `<label>${k}<input value="${v}" onchange="updateSetting('${k}', this.value)"/></label>`;
-    s.appendChild(row);
+  const container = qs('settings');
+  if (!container) { return; }
+  container.innerHTML = '';
+  container.classList.add('settings-list');
+  const fragment = document.createDocumentFragment();
+  const orderedKeys = normaliseSettingOrder(data);
+  orderedKeys.forEach(key => {
+    if (key === 'channel_id') { return; }
+    const meta = SETTINGS_CONFIG[key] || { type: typeof data[key] === 'number' ? 'number' : 'text', label: key };
+    const row = buildSettingRow(key, data[key], meta);
+    if (row) {
+      fragment.appendChild(row);
+    }
   });
+  if (!fragment.childNodes.length) {
+    const empty = document.createElement('p');
+    empty.className = 'muted';
+    empty.textContent = 'No configurable settings are available for this channel yet.';
+    container.appendChild(empty);
+  } else {
+    container.appendChild(fragment);
+  }
 }
+
 async function updateSetting(key, value) {
-  await fetch(`${API}/channels/${channelName}/settings`, {
-    method: 'PUT',
-    body: JSON.stringify({ [key]: value }),
-    headers: { 'Content-Type': 'application/json' },
-    credentials: 'include'
-  });
+  if (!channelName) { return false; }
+  try {
+    const resp = await fetch(`${API}/channels/${channelName}/settings`, {
+      method: 'PUT',
+      body: JSON.stringify({ [key]: value }),
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include'
+    });
+    if (!resp.ok) {
+      const text = await resp.text();
+      throw new Error(text || `Request failed with status ${resp.status}`);
+    }
+    return true;
+  } catch (e) {
+    console.error('Failed to update setting', key, e);
+    alert('Unable to update the setting. Please try again.');
+    return false;
+  }
 }
 
 // ===== Overlay builder =====
