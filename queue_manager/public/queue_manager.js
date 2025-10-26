@@ -174,7 +174,7 @@ function buildPreviewSourceKey(song) {
 // The backend uses the lowercase string "unknown" as a placeholder when
 // request metadata is missing. Keep the comparison case-sensitive so that
 // legitimate titles/artists containing "Unknown" are preserved.
-const PLACEHOLDER_METADATA_TOKEN = 'unknown';
+const PLACEHOLDER_METADATA_TOKEN = 'Unknown';
 
 function isPlaceholderMetadata(value) {
   if (!value) { return false; }
