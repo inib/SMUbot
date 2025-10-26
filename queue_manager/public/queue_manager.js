@@ -114,6 +114,7 @@ if (logoutBtn) {
       userInfo = null;
       userLogin = '';
       channelName = '';
+      teardownQueueStream();
       updateLoginStatus();
       location.reload();
     }
@@ -134,6 +135,7 @@ if (logoutPermBtn) {
       userInfo = null;
       userLogin = '';
       channelName = '';
+      teardownQueueStream();
       updateLoginStatus();
       location.reload();
     }
@@ -519,28 +521,37 @@ function requestBadges(req) {
   return badges;
 }
 
+let queueFetchActive = false;
+let queueFetchQueued = false;
+
 async function fetchQueue() {
   if (!channelName) { return; }
-  const encodedChannel = encodeURIComponent(channelName);
-  const resp = await fetch(`${API}/channels/${encodedChannel}/queue/full`, { credentials: 'include' });
-  if (!resp.ok) { return; }
-  const payload = await resp.json();
-  const data = Array.isArray(payload) ? payload : [];
-  const q = qs('queue');
-  q.innerHTML = '';
-  let insertedPlayedSeparator = false;
-  let matchedEntry = null;
-  data.forEach(entry => {
-    const { request: req, song, user } = entry;
-    if (req.played && !insertedPlayedSeparator) {
-      const sep = document.createElement('div');
-      sep.className = 'sep';
-      q.appendChild(sep);
-      insertedPlayedSeparator = true;
-    }
-    const row = document.createElement('div');
-    row.className = `item${req.is_priority ? ' prio' : ''}${req.played ? ' played' : ''}`;
-    row.dataset.requestId = String(req.id);
+  if (queueFetchActive) {
+    queueFetchQueued = true;
+    return;
+  }
+  queueFetchActive = true;
+  try {
+    const encodedChannel = encodeURIComponent(channelName);
+    const resp = await fetch(`${API}/channels/${encodedChannel}/queue/full`, { credentials: 'include' });
+    if (!resp.ok) { return; }
+    const payload = await resp.json();
+    const data = Array.isArray(payload) ? payload : [];
+    const q = qs('queue');
+    q.innerHTML = '';
+    let insertedPlayedSeparator = false;
+    let matchedEntry = null;
+    data.forEach(entry => {
+      const { request: req, song, user } = entry;
+      if (req.played && !insertedPlayedSeparator) {
+        const sep = document.createElement('div');
+        sep.className = 'sep';
+        q.appendChild(sep);
+        insertedPlayedSeparator = true;
+      }
+      const row = document.createElement('div');
+      row.className = `item${req.is_priority ? ' prio' : ''}${req.played ? ' played' : ''}`;
+      row.dataset.requestId = String(req.id);
 
     const thumb = document.createElement('div');
     thumb.className = 'thumb';
@@ -624,27 +635,34 @@ async function fetchQueue() {
       matchedEntry = entry;
     }
 
-    q.appendChild(row);
-  });
+      q.appendChild(row);
+    });
 
-  if (!data.length) {
-    resetPreviewState();
-    return;
-  }
+    if (!data.length) {
+      resetPreviewState();
+      return;
+    }
 
-  if (currentPreviewRequestId) {
-    if (matchedEntry) {
-      const key = buildPreviewSourceKey(matchedEntry.song);
-      if (key !== currentPreviewSourceKey) {
-        selectQueueRequest(matchedEntry, { force: true });
+    if (currentPreviewRequestId) {
+      if (matchedEntry) {
+        const key = buildPreviewSourceKey(matchedEntry.song);
+        if (key !== currentPreviewSourceKey) {
+          selectQueueRequest(matchedEntry, { force: true });
+        } else {
+          highlightQueueSelection();
+        }
       } else {
-        highlightQueueSelection();
+        resetPreviewState();
       }
     } else {
-      resetPreviewState();
+      highlightQueueSelection();
     }
-  } else {
-    highlightQueueSelection();
+  } finally {
+    queueFetchActive = false;
+    if (queueFetchQueued) {
+      queueFetchQueued = false;
+      fetchQueue();
+    }
   }
 }
 
@@ -963,6 +981,45 @@ function selectChannel(ch) {
   fetchUsers();
   fetchSettings();
   updateOverlayBuilder();
+  connectQueueStream();
+}
+
+let queueStream = null;
+let queueStreamTimer = null;
+
+function teardownQueueStream() {
+  if (queueStream) {
+    try { queueStream.close(); } catch (e) { /* ignore */ }
+    queueStream = null;
+  }
+  if (queueStreamTimer) {
+    clearTimeout(queueStreamTimer);
+    queueStreamTimer = null;
+  }
+}
+
+function connectQueueStream() {
+  teardownQueueStream();
+  if (!channelName) { return; }
+  const encodedChannel = encodeURIComponent(channelName);
+  const url = `${API}/channels/${encodedChannel}/queue/stream`;
+  try {
+    queueStream = new EventSource(url);
+  } catch (e) {
+    console.error('Failed to create queue stream', e);
+    queueStreamTimer = setTimeout(connectQueueStream, 5000);
+    return;
+  }
+  queueStream.onopen = () => {
+    fetchQueue();
+  };
+  queueStream.addEventListener('queue', () => {
+    fetchQueue();
+  });
+  queueStream.onerror = () => {
+    teardownQueueStream();
+    queueStreamTimer = setTimeout(connectQueueStream, 5000);
+  };
 }
 
 async function initToken() {
