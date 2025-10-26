@@ -198,3 +198,43 @@ class PlaylistApiTests(unittest.TestCase):
                 self.assertEqual(user.twitch_id, "__playlist__")
         finally:
             db.close()
+
+    def test_update_playlist_keywords_and_visibility(self) -> None:
+        playlist_id = self._create_sample_playlist()
+        response = self.client.put(
+            f"/channels/{self.channel_name}/playlists/{playlist_id}",
+            json={"keywords": ["Focus", "", "LoFi"], "visibility": "PUBLIC"},
+            headers=self._admin_headers(),
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["visibility"], "public")
+        self.assertEqual(payload["keywords"], ["focus", "lofi"])
+
+        db = backend_app.SessionLocal()
+        try:
+            playlist = db.get(backend_app.Playlist, playlist_id)
+            self.assertIsNotNone(playlist)
+            if playlist:
+                self.assertEqual(playlist.visibility, "public")
+                stored_keywords = sorted(kw.keyword for kw in playlist.keywords)
+                self.assertEqual(stored_keywords, ["focus", "lofi"])
+        finally:
+            db.close()
+
+    def test_delete_playlist_removes_related_rows(self) -> None:
+        playlist_id = self._create_sample_playlist()
+        response = self.client.delete(
+            f"/channels/{self.channel_name}/playlists/{playlist_id}",
+            headers=self._admin_headers(),
+        )
+        self.assertEqual(response.status_code, 204, response.text)
+
+        db = backend_app.SessionLocal()
+        try:
+            playlists = db.query(backend_app.Playlist).all()
+            self.assertFalse(playlists)
+            self.assertFalse(db.query(backend_app.PlaylistItem).all())
+            self.assertFalse(db.query(backend_app.PlaylistKeyword).all())
+        finally:
+            db.close()

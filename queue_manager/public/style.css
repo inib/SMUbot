@@ -103,6 +103,7 @@ a:hover{text-decoration:underline}
 .playlist-status.error,.muted.error{color:var(--danger)}
 .playlists-list{display:flex;flex-direction:column;gap:12px;margin-top:16px}
 .playlist-card{border:1px solid #24283b;border-radius:12px;padding:14px;background:#121423;display:flex;flex-direction:column;gap:12px}
+.playlist-card.loading{opacity:.6}
 .playlist-header{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap}
 .playlist-header-info{display:flex;flex-direction:column;gap:6px}
 .playlist-header-info h3{margin:0;font-size:15px}
@@ -110,6 +111,18 @@ a:hover{text-decoration:underline}
 .playlist-meta-link a{font-size:12px}
 .playlist-toggle{padding:.35rem .75rem;border-radius:8px;border:1px solid #24283b;background:#1a1d29;color:var(--text);cursor:pointer;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.03em}
 .playlist-toggle:hover{background:#24283b}
+.playlist-manage{border-top:1px solid #1f2330;padding-top:12px;display:flex;flex-direction:column;gap:10px}
+.playlist-keywords-form{display:flex;flex-direction:column;gap:8px}
+.playlist-keywords-form label{font-weight:600;color:var(--text);font-size:13px}
+.playlist-keywords-form input{padding:.45rem .6rem;border-radius:8px;border:1px solid #24283b;background:#0f1117;color:var(--text)}
+.playlist-keywords-form input:focus{outline:2px solid var(--accent);outline-offset:2px}
+.playlist-keywords-form.loading{opacity:.7}
+.playlist-keywords-actions{display:flex;gap:8px;flex-wrap:wrap}
+.playlist-keywords-actions button{padding:.35rem .7rem;border-radius:8px;border:1px solid #24283b;background:#1a1d29;color:var(--text);cursor:pointer;font-size:12px;font-weight:600}
+.playlist-keywords-actions button:hover{background:#24283b}
+.playlist-keywords-actions button.danger{border-color:var(--danger);color:var(--danger)}
+.playlist-keywords-actions button.danger:hover{background:rgba(239,68,68,0.18)}
+.playlist-keywords-hint{margin:0;font-size:11px;line-height:1.4}
 .playlist-items{display:flex;flex-direction:column;gap:8px}
 .playlist-item{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:10px;border-radius:10px;border:1px solid #24283b;background:#0f1117}
 .playlist-item-info{display:flex;flex-direction:column;gap:4px;min-width:0}

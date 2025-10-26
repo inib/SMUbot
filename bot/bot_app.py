@@ -72,6 +72,14 @@ YOUTUBE_PATTERNS = [
 ]
 
 # ---- Backend client ----
+class BackendError(RuntimeError):
+    def __init__(self, status: int, detail: object):
+        message = detail if isinstance(detail, str) else str(detail)
+        super().__init__(message)
+        self.status = status
+        self.detail = message
+
+
 class Backend:
     def __init__(self, base_url: str, admin_token: str):
         self.base = base_url.rstrip('/')
@@ -252,6 +260,7 @@ class BackendError(RuntimeError):
         if keyword:
             payload['keyword'] = keyword
         return await self._req('POST', f"/channels/{channel}/playlists/random_request", payload)
+
 
 backend = Backend(BACKEND_URL, ADMIN_TOKEN)
 

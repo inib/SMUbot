@@ -510,6 +510,11 @@ class PlaylistCreate(BaseModel):
     visibility: Optional[str] = Field(default="public")
 
 
+class PlaylistUpdate(BaseModel):
+    keywords: Optional[List[str]] = None
+    visibility: Optional[str] = None
+
+
 class PlaylistOut(BaseModel):
     id: int
     title: str
@@ -1889,6 +1894,14 @@ def _normalize_keywords(keywords: Iterable[str]) -> List[str]:
     return normalized
 
 
+def _replace_playlist_keywords(playlist: Playlist, keywords: Iterable[str]) -> List[str]:
+    normalized = _normalize_keywords(keywords)
+    playlist.keywords.clear()
+    for keyword in normalized:
+        playlist.keywords.append(PlaylistKeyword(keyword=keyword))
+    return normalized
+
+
 def _normalize_visibility(value: Optional[str]) -> str:
     if not value:
         return "public"
@@ -2516,6 +2529,63 @@ def create_playlist(channel: str, payload: PlaylistCreate, db: Session = Depends
         )
     db.commit()
     return {"id": playlist.id}
+
+
+@app.put(
+    "/channels/{channel}/playlists/{playlist_id}",
+    response_model=PlaylistOut,
+    dependencies=[Depends(require_token)],
+)
+def update_playlist(
+    channel: str,
+    playlist_id: int,
+    payload: PlaylistUpdate,
+    db: Session = Depends(get_db),
+):
+    channel_pk = get_channel_pk(channel, db)
+    playlist = (
+        db.query(Playlist)
+        .options(selectinload(Playlist.keywords), selectinload(Playlist.items))
+        .filter(Playlist.channel_id == channel_pk, Playlist.id == playlist_id)
+        .one_or_none()
+    )
+    if not playlist:
+        raise HTTPException(status_code=404, detail="playlist not found")
+    if payload.visibility is not None:
+        playlist.visibility = _normalize_visibility(payload.visibility)
+    if payload.keywords is not None:
+        _replace_playlist_keywords(playlist, payload.keywords)
+    db.commit()
+    db.refresh(playlist)
+    keywords = sorted(kw.keyword for kw in playlist.keywords)
+    return PlaylistOut(
+        id=playlist.id,
+        title=playlist.title,
+        playlist_id=playlist.playlist_id,
+        url=playlist.url,
+        visibility=playlist.visibility,
+        keywords=keywords,
+        item_count=len(playlist.items),
+    )
+
+
+@app.delete(
+    "/channels/{channel}/playlists/{playlist_id}",
+    status_code=204,
+    dependencies=[Depends(require_token)],
+)
+def delete_playlist(channel: str, playlist_id: int, db: Session = Depends(get_db)):
+    channel_pk = get_channel_pk(channel, db)
+    playlist = (
+        db.query(Playlist)
+        .filter(Playlist.channel_id == channel_pk, Playlist.id == playlist_id)
+        .one_or_none()
+    )
+    if not playlist:
+        raise HTTPException(status_code=404, detail="playlist not found")
+    db.delete(playlist)
+    db.commit()
+    return Response(status_code=204)
 
 
 @app.get(

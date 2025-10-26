@@ -494,7 +494,10 @@ resetPreviewState();
 
 function parsePlaylistKeywords(raw) {
   if (!raw) { return []; }
-  return raw.split(',').map(k => k.trim()).filter(Boolean);
+  return raw
+    .split(/[\s,]+/)
+    .map(k => k.trim())
+    .filter(Boolean);
 }
 
 function setPlaylistStatus(message, isError) {
@@ -676,7 +679,52 @@ function renderPlaylists(playlists) {
     });
     header.appendChild(toggleBtn);
 
+    const manage = document.createElement('div');
+    manage.className = 'playlist-manage';
+    const keywordsForm = document.createElement('form');
+    keywordsForm.className = 'playlist-keywords-form';
+    const keywordsLabel = document.createElement('label');
+    const keywordsInputId = `playlist-keywords-${pl.id}`;
+    keywordsLabel.setAttribute('for', keywordsInputId);
+    keywordsLabel.textContent = 'Keywords';
+    const keywordsInput = document.createElement('input');
+    keywordsInput.id = keywordsInputId;
+    keywordsInput.type = 'text';
+    keywordsInput.placeholder = 'Separate with commas or spaces';
+    keywordsInput.value = (pl.keywords && pl.keywords.length) ? pl.keywords.join(', ') : '';
+    keywordsInput.autocomplete = 'off';
+    const keywordsActions = document.createElement('div');
+    keywordsActions.className = 'playlist-keywords-actions';
+    const saveBtn = document.createElement('button');
+    saveBtn.type = 'submit';
+    saveBtn.textContent = 'Save keywords';
+    keywordsActions.appendChild(saveBtn);
+    const deleteBtn = document.createElement('button');
+    deleteBtn.type = 'button';
+    deleteBtn.className = 'danger';
+    deleteBtn.textContent = 'Remove playlist';
+    keywordsActions.appendChild(deleteBtn);
+    const keywordsHint = document.createElement('p');
+    keywordsHint.className = 'muted playlist-keywords-hint';
+    keywordsHint.textContent = 'Use commas or spaces to list multiple keywords. Include "default" for fallback picks.';
+    keywordsForm.appendChild(keywordsLabel);
+    keywordsForm.appendChild(keywordsInput);
+    keywordsForm.appendChild(keywordsActions);
+    keywordsForm.appendChild(keywordsHint);
+    keywordsForm.addEventListener('submit', evt => {
+      evt.preventDefault();
+      const keywords = parsePlaylistKeywords(keywordsInput.value);
+      updatePlaylistDetails(pl.id, { keywords }, { form: keywordsForm, submitBtn: saveBtn }).catch(() => {});
+    });
+    deleteBtn.addEventListener('click', () => {
+      const confirmed = window.confirm('Remove this playlist and its cached songs?');
+      if (!confirmed) { return; }
+      deletePlaylist(pl.id, { triggerBtn: deleteBtn, card, form: keywordsForm }).catch(() => {});
+    });
+    manage.appendChild(keywordsForm);
+
     card.appendChild(header);
+    card.appendChild(manage);
     card.appendChild(itemsContainer);
     playlistsContainer.appendChild(card);
   });
@@ -752,6 +800,73 @@ async function addPlaylist() {
   } finally {
     if (playlistForm) { playlistForm.classList.remove('loading'); }
     if (submitBtn) { submitBtn.disabled = false; }
+  }
+}
+
+
+async function updatePlaylistDetails(playlistId, changes, ctx = {}) {
+  if (!channelName) { return; }
+  const encodedChannel = encodeURIComponent(channelName);
+  const { form, submitBtn } = ctx;
+  if (submitBtn) { submitBtn.disabled = true; }
+  if (form) { form.classList.add('loading'); }
+  setPlaylistStatus('Updating playlist…');
+  try {
+    const resp = await fetch(`${API}/channels/${encodedChannel}/playlists/${playlistId}`, {
+      method: 'PUT',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(changes),
+    });
+    if (!resp.ok) {
+      let detail = `Failed to update playlist (status ${resp.status})`;
+      try {
+        const data = await resp.json();
+        if (data && data.detail) {
+          detail = Array.isArray(data.detail) ? data.detail.join(', ') : data.detail;
+        }
+      } catch (err) {
+        /* ignore */
+      }
+      throw new Error(detail);
+    }
+    setPlaylistStatus('Playlist updated.');
+    await fetchPlaylists();
+  } catch (e) {
+    console.error('Failed to update playlist', e);
+    setPlaylistStatus(e.message || 'Failed to update playlist.', true);
+  } finally {
+    if (form) { form.classList.remove('loading'); }
+    if (submitBtn) { submitBtn.disabled = false; }
+  }
+}
+
+
+async function deletePlaylist(playlistId, ctx = {}) {
+  if (!channelName) { return; }
+  const encodedChannel = encodeURIComponent(channelName);
+  const { triggerBtn, card, form } = ctx;
+  if (triggerBtn) { triggerBtn.disabled = true; }
+  if (form) { form.classList.add('loading'); }
+  if (card) { card.classList.add('loading'); }
+  setPlaylistStatus('Removing playlist…');
+  try {
+    const resp = await fetch(`${API}/channels/${encodedChannel}/playlists/${playlistId}`, {
+      method: 'DELETE',
+      credentials: 'include',
+    });
+    if (!resp.ok) {
+      throw new Error(`Failed to delete playlist (status ${resp.status})`);
+    }
+    setPlaylistStatus('Playlist removed.');
+    await fetchPlaylists();
+  } catch (e) {
+    console.error('Failed to delete playlist', e);
+    setPlaylistStatus(e.message || 'Failed to delete playlist.', true);
+  } finally {
+    if (card) { card.classList.remove('loading'); }
+    if (form) { form.classList.remove('loading'); }
+    if (triggerBtn) { triggerBtn.disabled = false; }
   }
 }
 
