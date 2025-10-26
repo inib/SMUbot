@@ -39,6 +39,7 @@
       <div class="card">
         <div class="tabs">
           <button id="tab-queue" class="tab active">Queue</button>
+          <button id="tab-playlists" class="tab">Playlists</button>
           <button id="tab-users" class="tab">Users</button>
           <button id="tab-settings" class="tab">Settings</button>
           <button id="tab-overlays" class="tab">Overlays</button>
@@ -88,6 +89,33 @@
             <button id="archive-btn">Archive Stream</button>
             <button id="mute-btn">Toggle Requests</button>
           </div>
+        </div>
+
+        <div id="playlists-view" style="display:none">
+          <h2>Playlists</h2>
+          <form id="playlist-form" class="playlist-form">
+            <div class="playlist-form-row">
+              <label for="playlist-url">Playlist link</label>
+              <input id="playlist-url" type="url" required placeholder="https://www.youtube.com/playlist?list=..." />
+            </div>
+            <div class="playlist-form-row">
+              <label for="playlist-visibility">Visibility</label>
+              <select id="playlist-visibility">
+                <option value="public">Public</option>
+                <option value="unlisted">Unlisted</option>
+              </select>
+            </div>
+            <div class="playlist-form-row">
+              <label for="playlist-keywords">Keywords</label>
+              <input id="playlist-keywords" type="text" placeholder="Comma-separated keywords" />
+              <p class="muted playlist-form-hint">Keywords let chat use !random keyword to pull songs from matching playlists.</p>
+            </div>
+            <div class="playlist-form-actions">
+              <button type="submit">Add playlist</button>
+              <span id="playlist-status" class="playlist-status muted" role="status" hidden></span>
+            </div>
+          </form>
+          <div id="playlists" class="playlists-list"></div>
         </div>
 
         <div id="users-view" style="display:none">
