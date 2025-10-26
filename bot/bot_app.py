@@ -28,6 +28,7 @@ DEFAULT_COMMANDS = {
     'points': ['points', 'pp'],
     'remove': ['remove', 'undo', 'del'],
     'archive': ['archive'],
+    'random_request': ['random', 'rr', 'randomrequest'],
 }
 
 DEFAULT_MESSAGES = {
@@ -35,6 +36,8 @@ DEFAULT_MESSAGES = {
     'currency_plural': 'points',
     'channel_not_registered': 'Channel not registered in backend',
     'request_added': 'Added: {artist} - {title}',
+    'random_request_added': 'Random pick: {artist} - {title}',
+    'random_not_found': 'No playlist found for "{keyword}"',
     'prioritize_limit': 'Limit reached: 3 prioritized songs per stream',
     'prioritize_no_target': 'No eligible request to prioritize',
     'prioritize_success': 'Prioritized request #{request_id}',
@@ -69,6 +72,14 @@ YOUTUBE_PATTERNS = [
 ]
 
 # ---- Backend client ----
+class BackendError(RuntimeError):
+    def __init__(self, status: int, detail: object):
+        message = detail if isinstance(detail, str) else str(detail)
+        super().__init__(message)
+        self.status = status
+        self.detail = message
+
+
 class Backend:
     def __init__(self, base_url: str, admin_token: str):
         self.base = base_url.rstrip('/')
@@ -89,9 +100,28 @@ class Backend:
             await self.start()
         url = f"{self.base}{path}"
         async with self.session.request(method, url, headers=self.headers, data=json.dumps(payload) if payload else None) as r:
+            content_type = r.headers.get('content-type', '')
+            is_json = content_type.startswith('application/json')
             if r.status >= 400:
-                raise RuntimeError(f"{method} {path} -> {r.status}: {await r.text()}")
-            if r.headers.get('content-type','').startswith('application/json'):
+                detail: object = ''
+                if is_json:
+                    try:
+                        data = await r.json()
+                    except Exception:
+                        data = None
+                    if isinstance(data, dict) and 'detail' in data:
+                        detail = data['detail']
+                    else:
+                        detail = data or ''
+                if not detail:
+                    try:
+                        detail = await r.text()
+                    except Exception:
+                        detail = ''
+                if isinstance(detail, list):
+                    detail = ', '.join(str(item) for item in detail)
+                raise BackendError(r.status, detail or f"{method} {path} failed")
+            if is_json:
                 return await r.json()
             return await r.text()
 
@@ -204,6 +234,25 @@ class Backend:
             'source': 'bot',
         }
         return await self._req('POST', "/bot/logs", payload)
+
+    async def random_playlist_request(
+        self,
+        channel: str,
+        *,
+        keyword: Optional[str],
+        twitch_id: str,
+        username: str,
+        is_subscriber: bool,
+    ) -> Dict[str, object]:
+        payload: Dict[str, object] = {
+            'twitch_id': twitch_id,
+            'username': username,
+            'is_subscriber': bool(is_subscriber),
+        }
+        if keyword:
+            payload['keyword'] = keyword
+        return await self._req('POST', f"/channels/{channel}/playlists/random_request", payload)
+
 
 backend = Backend(BACKEND_URL, ADMIN_TOKEN)
 
@@ -716,6 +765,8 @@ class SongBot(commands.Bot):
         cmd_lower = cmd.lower()
         if cmd_lower in self.commands_map['request']:
             await self.handle_request(message, args)
+        elif cmd_lower in self.commands_map['random_request']:
+            await self.handle_random_request(message, args)
         elif cmd_lower in self.commands_map['prioritize']:
             await self.handle_prioritize(message, args)
         elif cmd_lower in self.commands_map['points']:
@@ -790,6 +841,92 @@ class SongBot(commands.Bot):
                 login,
                 self.messages['failed'].format(error=exc),
                 metadata={'channel': channel, 'command': 'request'},
+                reply_to=msg.id,
+                fallback_partial=msg.broadcaster,
+            )
+
+    async def handle_random_request(self, msg, arg: str) -> None:
+        login = self._channel_login(msg.broadcaster.name)
+        row = self.channel_map.get(login)
+        if not row:
+            await self._send_message(
+                login,
+                self.messages['channel_not_registered'],
+                metadata={'channel': msg.broadcaster.name, 'command': 'random_request'},
+                reply_to=msg.id,
+                fallback_partial=msg.broadcaster,
+            )
+            return
+        channel = row['channel_name']
+        display_name = getattr(msg.chatter, 'display_name', None) or msg.chatter.name
+        keyword = (arg or '').strip()
+        try:
+            response = await backend.random_playlist_request(
+                channel,
+                keyword=keyword or None,
+                twitch_id=str(msg.chatter.id),
+                username=display_name,
+                is_subscriber=bool(msg.chatter.subscriber),
+            )
+        except BackendError as exc:
+            if exc.status == 404:
+                template = self.messages.get('random_not_found', 'No playlist found for "{keyword}"')
+                await self._send_message(
+                    login,
+                    template.format(keyword=keyword or 'default'),
+                    metadata={'channel': channel, 'command': 'random_request'},
+                    reply_to=msg.id,
+                    fallback_partial=msg.broadcaster,
+                )
+                return
+            await push_console_event(
+                'error',
+                f'Failed random request for {msg.chatter.name}: {exc.detail}',
+                metadata={'channel': channel, 'command': 'random_request', 'status': exc.status, 'keyword': keyword},
+            )
+            await self._send_message(
+                login,
+                self.messages['failed'].format(error=exc.detail),
+                metadata={'channel': channel, 'command': 'random_request'},
+                reply_to=msg.id,
+                fallback_partial=msg.broadcaster,
+            )
+            return
+        except Exception as exc:
+            await push_console_event(
+                'error',
+                f'Failed random request for {msg.chatter.name}: {exc}',
+                metadata={'channel': channel, 'command': 'random_request'},
+            )
+            await self._send_message(
+                login,
+                self.messages['failed'].format(error=exc),
+                metadata={'channel': channel, 'command': 'random_request'},
+                reply_to=msg.id,
+                fallback_partial=msg.broadcaster,
+            )
+            return
+
+        song_payload = response.get('song') if isinstance(response, dict) else None
+        artist = song_payload.get('artist', '') if isinstance(song_payload, dict) else ''
+        title = song_payload.get('title', '') if isinstance(song_payload, dict) else ''
+        resolved_keyword = ''
+        if isinstance(response, dict):
+            resolved_keyword = response.get('keyword') or ''
+        template = self.messages.get('random_request_added') or self.messages.get('request_added')
+        if template:
+            try:
+                message_text = template.format(
+                    artist=artist,
+                    title=title,
+                    keyword=resolved_keyword or keyword or '',
+                )
+            except KeyError:
+                message_text = template
+            await self._send_message(
+                login,
+                message_text,
+                metadata={'channel': channel, 'command': 'random_request', 'keyword': resolved_keyword or keyword},
                 reply_to=msg.id,
                 fallback_partial=msg.broadcaster,
             )
