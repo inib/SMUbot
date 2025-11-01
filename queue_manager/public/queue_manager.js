@@ -1593,16 +1593,33 @@ async function updateSetting(key, value) {
 }
 
 // ===== Overlay builder =====
+const overlayFamilyTabs = document.querySelectorAll('[data-overlay-family-tab]');
+const overlayFamilySections = document.querySelectorAll('[data-overlay-family]');
+const overlayPreviewHints = document.querySelectorAll('[data-overlay-family-hint]');
 const overlayLayoutSelect = qs('overlay-layout');
 const overlayThemeSelect = qs('overlay-theme');
+const eventOverlayLayoutSelect = qs('event-overlay-layout');
+const eventOverlayThemeSelect = qs('event-overlay-theme');
+const eventOverlayDetailSelect = qs('event-overlay-detail');
+const eventOverlayPresetSelect = qs('event-overlay-preset');
+const eventOverlayMemeSelect = qs('event-overlay-meme');
 const overlayUrlInput = qs('overlay-url');
 const overlayCopyBtn = qs('overlay-copy');
 const overlayPreviewFrame = qs('overlay-preview');
 const overlayDimensions = qs('overlay-dimensions');
 const overlayWarning = qs('overlay-channel-warning');
 let overlayCopyResetTimer = null;
+let activeOverlayFamily = 'queue';
 
 function getOverlayDimensions() {
+  if (activeOverlayFamily === 'events') {
+    if (!eventOverlayPresetSelect) { return { width: null, height: null }; }
+    const option = eventOverlayPresetSelect.options[eventOverlayPresetSelect.selectedIndex];
+    if (!option) { return { width: null, height: null }; }
+    const width = parseInt(option.dataset.width || '', 10) || null;
+    const height = parseInt(option.dataset.height || '', 10) || null;
+    return { width, height };
+  }
   if (!overlayLayoutSelect) { return { width: null, height: null }; }
   const option = overlayLayoutSelect.options[overlayLayoutSelect.selectedIndex];
   if (!option) { return { width: null, height: null }; }
@@ -1612,7 +1629,24 @@ function getOverlayDimensions() {
 }
 
 function buildOverlayUrl() {
-  if (!channelName || !overlayLayoutSelect || !overlayThemeSelect) { return ''; }
+  if (!channelName) { return ''; }
+  if (activeOverlayFamily === 'events') {
+    if (!eventOverlayLayoutSelect || !eventOverlayThemeSelect || !eventOverlayDetailSelect || !eventOverlayPresetSelect || !eventOverlayMemeSelect) {
+      return '';
+    }
+    const base = new URL('event_overlay.html', window.location.href);
+    base.searchParams.set('channel', channelName);
+    base.searchParams.set('layout', eventOverlayLayoutSelect.value);
+    base.searchParams.set('theme', eventOverlayThemeSelect.value);
+    base.searchParams.set('detail', eventOverlayDetailSelect.value);
+    base.searchParams.set('preset', eventOverlayPresetSelect.value);
+    const meme = eventOverlayMemeSelect.value || '';
+    if (meme && meme !== 'none') {
+      base.searchParams.set('meme', meme);
+    }
+    return base.toString();
+  }
+  if (!overlayLayoutSelect || !overlayThemeSelect) { return ''; }
   const base = new URL('overlay.html', window.location.href);
   base.searchParams.set('channel', channelName);
   base.searchParams.set('layout', overlayLayoutSelect.value);
@@ -1621,13 +1655,24 @@ function buildOverlayUrl() {
 }
 
 function updateOverlayBuilder() {
-  if (!overlayLayoutSelect || !overlayThemeSelect || !overlayUrlInput) { return; }
+  if (!overlayUrlInput) { return; }
   const hasChannel = !!channelName;
   if (overlayWarning) {
     overlayWarning.hidden = hasChannel;
   }
-  overlayLayoutSelect.disabled = !hasChannel;
-  overlayThemeSelect.disabled = !hasChannel;
+  [
+    overlayLayoutSelect,
+    overlayThemeSelect,
+    eventOverlayLayoutSelect,
+    eventOverlayThemeSelect,
+    eventOverlayDetailSelect,
+    eventOverlayPresetSelect,
+    eventOverlayMemeSelect,
+  ].forEach((control) => {
+    if (control) {
+      control.disabled = !hasChannel;
+    }
+  });
   if (overlayCopyBtn) {
     overlayCopyBtn.disabled = !hasChannel;
     if (!hasChannel || overlayCopyBtn.textContent !== 'Copy') {
@@ -1647,6 +1692,18 @@ function updateOverlayBuilder() {
   }
 
   const url = buildOverlayUrl();
+  if (!url) {
+    overlayUrlInput.value = '';
+    if (overlayPreviewFrame) {
+      overlayPreviewFrame.src = 'about:blank';
+      overlayPreviewFrame.style.aspectRatio = '4 / 3';
+    }
+    if (overlayDimensions) {
+      overlayDimensions.textContent = '';
+    }
+    return;
+  }
+
   overlayUrlInput.value = url;
   const { width, height } = getOverlayDimensions();
   if (overlayDimensions && width && height) {
@@ -1684,9 +1741,68 @@ async function copyOverlayLink() {
 }
 
 function initOverlayBuilder() {
-  if (!overlayLayoutSelect || !overlayThemeSelect) { return; }
-  overlayLayoutSelect.addEventListener('change', () => updateOverlayBuilder());
-  overlayThemeSelect.addEventListener('change', () => updateOverlayBuilder());
+  if (!overlayUrlInput) { return; }
+  const updateFamily = () => {
+    overlayFamilyTabs.forEach((tab) => {
+      const family = (tab.dataset.overlayFamilyTab || 'queue');
+      const isActive = family === activeOverlayFamily;
+      tab.classList.toggle('active', isActive);
+      tab.setAttribute('aria-selected', isActive ? 'true' : 'false');
+      if (tab.hasAttribute('tabindex')) {
+        tab.removeAttribute('tabindex');
+      }
+    });
+    overlayFamilySections.forEach((section) => {
+      const family = section.dataset.overlayFamily || 'queue';
+      const isActive = family === activeOverlayFamily;
+      section.hidden = !isActive;
+      section.setAttribute('aria-hidden', isActive ? 'false' : 'true');
+      if (isActive) {
+        section.removeAttribute('tabindex');
+      } else {
+        section.setAttribute('tabindex', '-1');
+      }
+    });
+    overlayPreviewHints.forEach((hint) => {
+      const family = hint.dataset.overlayFamilyHint || 'queue';
+      const isActive = family === activeOverlayFamily;
+      hint.hidden = !isActive;
+    });
+  };
+
+  overlayFamilyTabs.forEach((tab) => {
+    tab.addEventListener('click', () => {
+      const family = (tab.dataset.overlayFamilyTab || 'queue');
+      if (family === activeOverlayFamily) { return; }
+      activeOverlayFamily = family === 'events' ? 'events' : 'queue';
+      updateFamily();
+      updateOverlayBuilder();
+    });
+  });
+
+  updateFamily();
+
+  if (overlayLayoutSelect) {
+    overlayLayoutSelect.addEventListener('change', () => updateOverlayBuilder());
+  }
+  if (overlayThemeSelect) {
+    overlayThemeSelect.addEventListener('change', () => updateOverlayBuilder());
+  }
+  if (eventOverlayLayoutSelect) {
+    eventOverlayLayoutSelect.addEventListener('change', () => updateOverlayBuilder());
+  }
+  if (eventOverlayThemeSelect) {
+    eventOverlayThemeSelect.addEventListener('change', () => updateOverlayBuilder());
+  }
+  if (eventOverlayDetailSelect) {
+    eventOverlayDetailSelect.addEventListener('change', () => updateOverlayBuilder());
+  }
+  if (eventOverlayPresetSelect) {
+    eventOverlayPresetSelect.addEventListener('change', () => updateOverlayBuilder());
+  }
+  if (eventOverlayMemeSelect) {
+    eventOverlayMemeSelect.addEventListener('change', () => updateOverlayBuilder());
+  }
   if (overlayCopyBtn) {
     overlayCopyBtn.addEventListener('click', copyOverlayLink);
   }

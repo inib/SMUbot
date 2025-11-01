@@ -146,27 +146,79 @@
 
         <div id="overlays-view" style="display:none">
           <h2>Overlay Builder</h2>
-          <p class="muted">Design OBS browser sources that stay in sync with your live queue. Select options below and copy the generated link.</p>
+          <p class="muted">Design OBS browser sources that stay in sync with your live queue and channel events. Choose an overlay family, customize the options, and copy the generated link.</p>
           <div class="overlay-builder" aria-live="polite">
             <div class="overlay-controls">
               <div id="overlay-channel-warning" class="overlay-warning" hidden>Select a channel to generate overlay links.</div>
-              <label>
-                Overlay size &amp; layout
-                <select id="overlay-layout">
-                  <option value="bumped" data-width="400" data-height="300">Bumped songs (400×300)</option>
-                  <option value="full" data-width="400" data-height="800">Full queue (400×800)</option>
-                  <option value="banner" data-width="1920" data-height="200">Horizontal banner (1920×200)</option>
-                </select>
-              </label>
-              <label>
-                Color scheme
-                <select id="overlay-theme">
-                  <option value="violet">Midnight Violet</option>
-                  <option value="ocean">Nordic Ocean</option>
-                  <option value="sunset">Evening Sunset</option>
-                  <option value="mint">Aurora Mint</option>
-                </select>
-              </label>
+              <div class="overlay-family-tabs" role="tablist" aria-label="Overlay type">
+                <button id="overlay-family-tab-queue" class="overlay-family-tab active" type="button" role="tab" aria-selected="true" data-overlay-family-tab="queue">Queue overlays</button>
+                <button id="overlay-family-tab-events" class="overlay-family-tab" type="button" role="tab" aria-selected="false" data-overlay-family-tab="events">Event overlays</button>
+              </div>
+              <div class="overlay-section" role="tabpanel" aria-labelledby="overlay-family-tab-queue" data-overlay-family="queue">
+                <p class="overlay-section-intro muted">Display your current queue in different layouts and themes.</p>
+                <label>
+                  Overlay size &amp; layout
+                  <select id="overlay-layout">
+                    <option value="bumped" data-width="400" data-height="300">Bumped songs (400×300)</option>
+                    <option value="full" data-width="400" data-height="800">Full queue (400×800)</option>
+                    <option value="banner" data-width="1920" data-height="200">Horizontal banner (1920×200)</option>
+                  </select>
+                </label>
+                <label>
+                  Color scheme
+                  <select id="overlay-theme">
+                    <option value="violet">Midnight Violet</option>
+                    <option value="ocean">Nordic Ocean</option>
+                    <option value="sunset">Evening Sunset</option>
+                    <option value="mint">Aurora Mint</option>
+                  </select>
+                </label>
+              </div>
+              <div class="overlay-section" role="tabpanel" aria-labelledby="overlay-family-tab-events" data-overlay-family="events" hidden>
+                <p class="overlay-section-intro muted">Create stylized alerts that follow channel events in real time.</p>
+                <label>
+                  Event layout
+                  <select id="event-overlay-layout">
+                    <option value="ticker">Marquee ticker</option>
+                    <option value="stacked">Stacked cards</option>
+                    <option value="minimal">Minimal badge</option>
+                  </select>
+                </label>
+                <label>
+                  Color palette
+                  <select id="event-overlay-theme">
+                    <option value="violet">Midnight Violet</option>
+                    <option value="ocean">Nordic Ocean</option>
+                    <option value="ember">Festival Ember</option>
+                    <option value="mint">Aurora Mint</option>
+                  </select>
+                </label>
+                <label>
+                  Detail intensity
+                  <select id="event-overlay-detail">
+                    <option value="minimal">Minimal</option>
+                    <option value="standard" selected>Standard</option>
+                    <option value="max">Maximum</option>
+                  </select>
+                </label>
+                <label>
+                  Size &amp; position preset
+                  <select id="event-overlay-preset">
+                    <option value="top-right" data-width="560" data-height="360">Top right (560×360)</option>
+                    <option value="bottom-left" data-width="640" data-height="420">Bottom left (640×420)</option>
+                    <option value="full-stage" data-width="1920" data-height="1080">Full stage (1920×1080)</option>
+                  </select>
+                </label>
+                <label>
+                  Meme effects (optional)
+                  <select id="event-overlay-meme">
+                    <option value="none">None</option>
+                    <option value="confetti">Confetti burst</option>
+                    <option value="airhorn">Airhorn stingers</option>
+                    <option value="bongo">Bongo cat bounce</option>
+                  </select>
+                </label>
+              </div>
               <div class="overlay-link-group">
                 <label for="overlay-url">Overlay link</label>
                 <div class="overlay-link-row">
@@ -179,11 +231,14 @@
             <div class="overlay-preview">
               <div class="overlay-preview-frame">
                 <iframe id="overlay-preview" title="Overlay preview" loading="lazy"></iframe>
-                <div class="overlay-preview-hint muted">Preview background is transparent in OBS.</div>
+                <div class="overlay-preview-hints">
+                  <div class="overlay-preview-hint muted" data-overlay-family-hint="queue">Preview background is transparent in OBS. Queue overlays update whenever the song list changes.</div>
+                  <div class="overlay-preview-hint muted" data-overlay-family-hint="events" hidden>Preview background is transparent in OBS. Event overlays animate when new alerts arrive.</div>
+                </div>
               </div>
             </div>
           </div>
-          <p class="overlay-hint muted">Add a new Browser Source in OBS, paste the link, and use the recommended size. The overlay updates itself whenever the queue changes.</p>
+          <p class="overlay-hint muted">Add a new Browser Source in OBS, paste the link, and use the recommended size. The overlay updates itself whenever your channel data changes.</p>
         </div>
       </div>
     </div>
