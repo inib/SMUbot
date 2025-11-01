@@ -1,5 +1,6 @@
 from __future__ import annotations
 import math
+import contextlib
 from typing import Optional, List, Any, Dict, Mapping, Iterable, Literal
 from threading import Lock
 import os
@@ -35,7 +36,9 @@ from fastapi import (
     Response,
     Cookie,
     Body,
+    WebSocket,
 )
+from fastapi import WebSocketDisconnect
 from fastapi.responses import RedirectResponse, HTMLResponse
 from starlette.datastructures import URL
 from pydantic import BaseModel, Field, ValidationError
@@ -854,6 +857,92 @@ def publish_queue_changed(channel_pk: int) -> None:
         _brokers.pop(channel_pk, None)
 
 
+class _ChannelEventBroker:
+    __slots__ = ("channel_pk", "listeners")
+
+    def __init__(self, channel_pk: int) -> None:
+        self.channel_pk = channel_pk
+        self.listeners: set[asyncio.Queue[str]] = set()
+
+    def subscribe(self) -> asyncio.Queue[str]:
+        queue: asyncio.Queue[str] = asyncio.Queue(maxsize=1000)
+        self.listeners.add(queue)
+        return queue
+
+    def unsubscribe(self, queue: asyncio.Queue[str]) -> None:
+        self.listeners.discard(queue)
+
+    def put_nowait(self, message: str) -> None:
+        if not self.listeners:
+            return
+        stale: list[asyncio.Queue[str]] = []
+        for queue in list(self.listeners):
+            try:
+                queue.put_nowait(message)
+            except asyncio.QueueFull:
+                stale.append(queue)
+                logger.warning(
+                    "channel event notification dropped for channel %s",
+                    self.channel_pk,
+                )
+            except Exception:
+                stale.append(queue)
+                logger.exception(
+                    "failed to enqueue channel event for channel %s",
+                    self.channel_pk,
+                )
+        for queue in stale:
+            self.listeners.discard(queue)
+
+    def has_listeners(self) -> bool:
+        return bool(self.listeners)
+
+
+_event_brokers: dict[int, _ChannelEventBroker] = {}
+
+
+def _event_broker(channel_pk: int) -> _ChannelEventBroker:
+    broker = _event_brokers.get(channel_pk)
+    if broker is None:
+        broker = _ChannelEventBroker(channel_pk)
+        _event_brokers[channel_pk] = broker
+    return broker
+
+
+def _subscribe_channel_events(channel_pk: int) -> asyncio.Queue[str]:
+    return _event_broker(channel_pk).subscribe()
+
+
+def _unsubscribe_channel_events(channel_pk: int, queue: asyncio.Queue[str]) -> None:
+    broker = _event_brokers.get(channel_pk)
+    if not broker:
+        return
+    broker.unsubscribe(queue)
+    if not broker.has_listeners():
+        _event_brokers.pop(channel_pk, None)
+
+
+def publish_channel_event(
+    channel_pk: int, event_type: str, payload: Optional[Mapping[str, Any]]
+) -> None:
+    broker = _event_brokers.get(channel_pk)
+    if not broker:
+        return
+    event_payload = {
+        "type": event_type,
+        "payload": payload,
+        "timestamp": datetime.utcnow(),
+    }
+    try:
+        message = json.dumps(event_payload, default=_json_default)
+    except TypeError:
+        logger.exception("failed to serialize channel event for channel %s", channel_pk)
+        return
+    broker.put_nowait(message)
+    if not broker.has_listeners():
+        _event_brokers.pop(channel_pk, None)
+
+
 def _json_default(value: Any) -> Any:
     if isinstance(value, datetime):
         return value.isoformat()
@@ -870,6 +959,81 @@ def _broadcast_bot_log(event: Dict[str, Any]) -> None:
             stale.append(queue)
     for queue in stale:
         _bot_log_listeners.discard(queue)
+
+
+def _serialize_user_summary(user: User) -> Dict[str, Any]:
+    return {
+        "id": user.id,
+        "username": user.username,
+    }
+
+
+def _serialize_request_event(db: Session, request: Request) -> Dict[str, Any]:
+    song = db.get(Song, request.song_id)
+    user = db.get(User, request.user_id)
+    song_payload = {
+        "title": None,
+        "artist": None,
+        "youtube_link": None,
+    }
+    if song:
+        song_payload.update(
+            {
+                "title": song.title,
+                "artist": song.artist,
+                "youtube_link": song.youtube_link,
+            }
+        )
+    requester_payload: Dict[str, Any] = {
+        "id": None,
+        "username": None,
+    }
+    if user:
+        requester_payload.update(_serialize_user_summary(user))
+    return {
+        "id": request.id,
+        "song": song_payload,
+        "requester": requester_payload,
+        "is_priority": bool(request.is_priority),
+        "bumped": bool(request.bumped),
+        "priority_source": request.priority_source,
+    }
+
+
+def _next_pending_request(
+    db: Session, channel_pk: int, stream_id: Optional[int]
+) -> Optional[Dict[str, Any]]:
+    if stream_id is None:
+        return None
+    next_req = (
+        db.query(Request)
+        .filter(
+            Request.channel_id == channel_pk,
+            Request.stream_id == stream_id,
+            Request.played == 0,
+        )
+        .order_by(
+            Request.is_priority.desc(),
+            Request.position.asc(),
+            Request.request_time.asc(),
+            Request.id.asc(),
+        )
+        .first()
+    )
+    if not next_req:
+        return None
+    return _serialize_request_event(db, next_req)
+
+
+def _serialize_settings_event(settings: ChannelSettings) -> Dict[str, Any]:
+    return {
+        "max_requests_per_user": settings.max_requests_per_user,
+        "prio_only": settings.prio_only,
+        "queue_closed": settings.queue_closed,
+        "allow_bumps": settings.allow_bumps,
+        "other_flags": settings.other_flags,
+        "max_prio_points": settings.max_prio_points,
+    }
 
 
 def _normalize_return_url(value: Optional[str]) -> Optional[str]:
@@ -2149,9 +2313,24 @@ def award_prio_points(db: Session, channel_pk: int, user_id: int, delta: int):
         raise HTTPException(404, detail="user not found in channel")
     settings = get_or_create_settings(db, channel_pk)
     cap = settings.max_prio_points or 10
-    new_val = min(cap, (user.prio_points or 0) + delta)
+    old_val = user.prio_points or 0
+    new_val = min(cap, old_val + delta)
     user.prio_points = new_val
     db.commit()
+    if new_val != old_val:
+        db.refresh(user)
+        applied_delta = new_val - old_val
+        if applied_delta > 0:
+            publish_channel_event(
+                channel_pk,
+                "user.bump_awarded",
+                {
+                    "user": _serialize_user_summary(user),
+                    "delta": applied_delta,
+                    "prio_points": new_val,
+                },
+            )
+    return new_val
 
 
 def enforce_queue_limits(db: Session, channel_pk: int, user_id: int, want_priority: bool):
@@ -2410,6 +2589,7 @@ def get_channel_oauth(channel: str, db: Session = Depends(get_db)):
 def set_channel_settings(channel: str, payload: ChannelSettingsIn, db: Session = Depends(get_db)):
     channel_pk = get_channel_pk(channel, db)
     st = get_or_create_settings(db, channel_pk)
+    prev_queue_closed = bool(st.queue_closed)
     st.max_requests_per_user = payload.max_requests_per_user
     st.prio_only = payload.prio_only
     st.queue_closed = payload.queue_closed
@@ -2417,6 +2597,18 @@ def set_channel_settings(channel: str, payload: ChannelSettingsIn, db: Session =
     st.other_flags = payload.other_flags
     st.max_prio_points = payload.max_prio_points
     db.commit()
+    db.refresh(st)
+    updated_settings = _serialize_settings_event(st)
+    if bool(st.queue_closed) != prev_queue_closed:
+        publish_channel_event(
+            channel_pk,
+            "queue.status",
+            {
+                "closed": bool(st.queue_closed),
+                "status": "closed" if st.queue_closed else "open",
+            },
+        )
+    publish_channel_event(channel_pk, "settings.updated", updated_settings)
     publish_queue_changed(channel_pk)
     return {"success": True}
 
@@ -2648,6 +2840,11 @@ def queue_playlist_item(
     song = _ensure_playlist_song(db, channel_pk, item)
     req = _create_request_entry(db, channel_pk, playlist_user.id, song.id, bumped=payload.bumped)
     db.commit()
+    db.refresh(req)
+    payload_data = _serialize_request_event(db, req)
+    publish_channel_event(channel_pk, "request.added", payload_data)
+    if req.is_priority or req.bumped:
+        publish_channel_event(channel_pk, "request.bumped", payload_data)
     publish_queue_changed(channel_pk)
     return {"request_id": req.id}
 
@@ -2699,6 +2896,9 @@ def random_playlist_request(
     song = _ensure_playlist_song(db, channel_pk, choice)
     req = _create_request_entry(db, channel_pk, user.id, song.id, bumped=False)
     db.commit()
+    db.refresh(req)
+    event_payload = _serialize_request_event(db, req)
+    publish_channel_event(channel_pk, "request.added", event_payload)
     publish_queue_changed(channel_pk)
     pick = PlaylistSongPick(
         id=song.id,
@@ -3215,6 +3415,49 @@ async def stream_queue(channel: str, db: Session = Depends(get_db)):
         },
     )
 
+
+@app.websocket("/channels/{channel}/events")
+async def channel_event_stream(channel: str, websocket: WebSocket) -> None:
+    db = SessionLocal()
+    try:
+        try:
+            channel_pk = get_channel_pk(channel, db)
+        except HTTPException:
+            await websocket.accept()
+            await websocket.close(code=1008)
+            return
+        queue = _subscribe_channel_events(channel_pk)
+        await websocket.accept()
+        send_task: asyncio.Task[str] = asyncio.create_task(queue.get())
+        receive_task = asyncio.create_task(websocket.receive_text())
+        try:
+            while True:
+                done, _ = await asyncio.wait(
+                    {send_task, receive_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if receive_task in done:
+                    # connection closed by client
+                    break
+                if send_task in done:
+                    try:
+                        message = send_task.result()
+                        await websocket.send_text(message)
+                    except WebSocketDisconnect:
+                        break
+                    send_task = asyncio.create_task(queue.get())
+        except WebSocketDisconnect:
+            pass
+        finally:
+            send_task.cancel()
+            receive_task.cancel()
+            with contextlib.suppress(Exception):
+                await asyncio.gather(send_task, receive_task, return_exceptions=True)
+            _unsubscribe_channel_events(channel_pk, queue)
+    finally:
+        db.close()
+
+
 @app.get("/channels/{channel}/queue", response_model=List[RequestOut])
 def get_queue(channel: str, db: Session = Depends(get_db)):
     channel_pk = get_channel_pk(channel, db)
@@ -3316,6 +3559,11 @@ def add_request(channel: str, payload: RequestCreate, db: Session = Depends(get_
         u.amount_requested = (u.amount_requested or 0) + 1
 
     db.commit()
+    db.refresh(req)
+    event_payload = _serialize_request_event(db, req)
+    publish_channel_event(channel_pk, "request.added", event_payload)
+    if req.is_priority or req.bumped:
+        publish_channel_event(channel_pk, "request.bumped", event_payload)
 
     publish_queue_changed(channel_pk)
     return {"request_id": req.id}
@@ -3326,8 +3574,16 @@ def update_request(channel: str, request_id: int, payload: RequestUpdate, db: Se
     r = db.query(Request).filter(Request.id == request_id, Request.channel_id == channel_pk).one_or_none()
     if not r:
         raise HTTPException(404, "request not found")
+    prev_played = bool(r.played)
+    prev_bumped = bool(r.bumped)
+    prev_priority = bool(r.is_priority)
+    played_now = False
+    became_bumped = False
+    became_priority = False
     if payload.played is not None:
         r.played = 1 if payload.played else 0
+        if r.played and not prev_played:
+            played_now = True
         if r.played:
             # Update song stats
             s = db.get(Song, r.song_id)
@@ -3339,11 +3595,29 @@ def update_request(channel: str, request_id: int, payload: RequestUpdate, db: Se
                 s.total_played = (s.total_played or 0) + 1
     if payload.bumped is not None:
         r.bumped = 1 if payload.bumped else 0
+        if r.bumped and not prev_bumped:
+            became_bumped = True
     if payload.is_priority is not None:
         r.is_priority = 1 if payload.is_priority else 0
         if r.is_priority and not r.priority_source:
             r.priority_source = 'admin'
+        if r.is_priority and not prev_priority:
+            became_priority = True
     db.commit()
+    db.refresh(r)
+    event_payload = _serialize_request_event(db, r)
+    if played_now:
+        up_next = _next_pending_request(db, channel_pk, r.stream_id)
+        publish_channel_event(
+            channel_pk,
+            "request.played",
+            {
+                "request": event_payload,
+                "up_next": up_next,
+            },
+        )
+    if became_bumped or became_priority:
+        publish_channel_event(channel_pk, "request.bumped", event_payload)
     publish_queue_changed(channel_pk)
     return {"success": True}
 
@@ -3400,6 +3674,9 @@ def bump_admin(channel: str, request_id: int, db: Session = Depends(get_db)):
     r.is_priority = 1
     r.priority_source = 'admin'
     db.commit()
+    db.refresh(r)
+    payload = _serialize_request_event(db, r)
+    publish_channel_event(channel_pk, "request.bumped", payload)
     publish_queue_changed(channel_pk)
     return {"success": True}
 
@@ -3466,9 +3743,16 @@ def skip_request(channel: str, request_id: int, db: Session = Depends(get_db)):
 def set_priority(channel: str, request_id: int, enabled: bool, db: Session = Depends(get_db)):
     channel_pk = get_channel_pk(channel, db)
     req = _get_req(db, channel_pk, request_id)
+    was_priority = bool(req.is_priority)
     # optional: refund or spend points can be inserted here
     req.is_priority = 1 if enabled else 0
+    if req.is_priority and not req.priority_source:
+        req.priority_source = 'admin'
     db.commit()
+    db.refresh(req)
+    if req.is_priority and not was_priority:
+        payload = _serialize_request_event(db, req)
+        publish_channel_event(channel_pk, "request.bumped", payload)
     publish_queue_changed(channel_pk)
     return {"success": True}
 
@@ -3479,6 +3763,17 @@ def mark_played(channel: str, request_id: int, db: Session = Depends(get_db)):
     req.played = 1
     # optionally push it out of visible order by setting a sentinel position
     db.commit()
+    db.refresh(req)
+    payload = _serialize_request_event(db, req)
+    up_next = _next_pending_request(db, channel_pk, req.stream_id)
+    publish_channel_event(
+        channel_pk,
+        "request.played",
+        {
+            "request": payload,
+            "up_next": up_next,
+        },
+    )
     publish_queue_changed(channel_pk)
     return {"success": True}
 
@@ -3557,11 +3852,21 @@ def archive_stream(channel: str, db: Session = Depends(get_db)):
         .one_or_none()
     )
     now = datetime.utcnow()
+    archived_stream_id: Optional[int] = None
     if cur:
+        archived_stream_id = cur.id
         cur.ended_at = now
         db.commit()
     # start new
     new_sid = current_stream(db, channel_pk)
+    publish_channel_event(
+        channel_pk,
+        "queue.archived",
+        {
+            "archived_stream_id": archived_stream_id,
+            "new_stream_id": new_sid,
+        },
+    )
     publish_queue_changed(channel_pk)
     return {"new_stream_id": new_sid}
 

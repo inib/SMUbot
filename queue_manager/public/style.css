@@ -158,6 +158,21 @@ a:hover{text-decoration:underline}
 .overlay-preview iframe{width:100%;border:0;border-radius:12px;background:transparent;box-shadow:0 10px 30px rgba(8,9,14,0.55);aspect-ratio:4/3;min-height:200px}
 .overlay-preview-hint{text-align:center;font-size:12px}
 .overlay-warning{padding:.6rem .75rem;border-radius:10px;border:1px solid rgba(239,68,68,0.4);background:rgba(239,68,68,0.08);color:#fca5a5;font-size:13px}
+.events-header{display:flex;align-items:center;gap:16px;justify-content:space-between;flex-wrap:wrap;margin-bottom:12px}
+.events-controls{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-left:auto}
+.event-status{font-size:12px;color:var(--muted);font-weight:600}
+.event-status.ok{color:var(--ok)}
+.event-status.warn{color:var(--warn)}
+.event-status.error{color:var(--danger)}
+.event-autoscroll{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)}
+.event-autoscroll input{accent-color:var(--accent)}
+#event-clear{padding:.35rem .7rem;border-radius:8px;border:1px solid #24283b;background:#121423;color:var(--text);cursor:pointer;font-size:12px;font-weight:600}
+#event-clear:hover{background:#1b1f2b}
+.event-feed{display:flex;flex-direction:column;gap:10px;padding:12px;border-radius:12px;border:1px solid #24283b;background:#0f1117;min-height:240px;max-height:420px;overflow:auto;font-family:"SFMono-Regular","Consolas","Liberation Mono",monospace;font-size:12px;line-height:1.5}
+.event-entry{display:flex;flex-direction:column;gap:6px;padding:10px;border-radius:10px;background:#121423;border:1px solid #1f2330}
+.event-entry-meta{font-size:11px;color:var(--muted);letter-spacing:.03em;text-transform:uppercase}
+.event-entry-type{color:var(--accent)}
+.event-entry-body{margin:0;white-space:pre-wrap;word-break:break-word}
 .overlay-hint{margin-top:18px}
 
 .settings-list{display:flex;flex-direction:column;gap:14px;margin-top:16px}
