@@ -1607,6 +1607,7 @@ const overlayLayoutLabel = qs('overlay-layout-label');
 const overlayDetailWrapper = qs('overlay-detail-wrapper');
 const overlayScaleWrapper = qs('overlay-scale-wrapper');
 let overlayCopyResetTimer = null;
+let activeOverlayFamily = 'queue';
 
 const OVERLAY_CONFIG = {
   queue: {
@@ -1692,6 +1693,14 @@ function updateOverlayControlVisibility(kind, hasChannel) {
 }
 
 function getOverlayDimensions() {
+  if (activeOverlayFamily === 'events') {
+    if (!eventOverlayPresetSelect) { return { width: null, height: null }; }
+    const option = eventOverlayPresetSelect.options[eventOverlayPresetSelect.selectedIndex];
+    if (!option) { return { width: null, height: null }; }
+    const width = parseInt(option.dataset.width || '', 10) || null;
+    const height = parseInt(option.dataset.height || '', 10) || null;
+    return { width, height };
+  }
   if (!overlayLayoutSelect) { return { width: null, height: null }; }
   const option = overlayLayoutSelect.options[overlayLayoutSelect.selectedIndex];
   if (!option) { return { width: null, height: null }; }
@@ -1755,6 +1764,18 @@ function updateOverlayBuilder() {
   }
 
   const url = buildOverlayUrl();
+  if (!url) {
+    overlayUrlInput.value = '';
+    if (overlayPreviewFrame) {
+      overlayPreviewFrame.src = 'about:blank';
+      overlayPreviewFrame.style.aspectRatio = '4 / 3';
+    }
+    if (overlayDimensions) {
+      overlayDimensions.textContent = '';
+    }
+    return;
+  }
+
   overlayUrlInput.value = url;
   overlaySelectionMemory[kind] = overlayLayoutSelect.value;
   const { width, height } = getOverlayDimensions();
