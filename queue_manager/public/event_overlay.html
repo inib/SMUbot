@@ -1,0 +1,24 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Event Overlay</title>
+  <link rel="stylesheet" href="event_overlay.css"/>
+</head>
+<body>
+  <div id="overlay-root" class="event-overlay" data-empty="true">
+    <div id="overlay-message" class="overlay-message" role="status">Connecting to event feed…</div>
+    <div id="overlay-stage" class="overlay-stage" hidden>
+      <div id="popup-stack" class="popup-stack" aria-live="polite" aria-atomic="false"></div>
+      <div id="ticker" class="ticker" hidden>
+        <div class="ticker-clip">
+          <div id="ticker-track" class="ticker-track" aria-live="polite"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <script src="config.js"></script>
+  <script src="event_overlay.js"></script>
+</body>
+</html>

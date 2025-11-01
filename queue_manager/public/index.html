@@ -151,11 +151,31 @@
             <div class="overlay-controls">
               <div id="overlay-channel-warning" class="overlay-warning" hidden>Select a channel to generate overlay links.</div>
               <label>
-                Overlay size &amp; layout
-                <select id="overlay-layout">
-                  <option value="bumped" data-width="400" data-height="300">Bumped songs (400×300)</option>
-                  <option value="full" data-width="400" data-height="800">Full queue (400×800)</option>
-                  <option value="banner" data-width="1920" data-height="200">Horizontal banner (1920×200)</option>
+                Overlay type
+                <select id="overlay-kind">
+                  <option value="queue">Queue overlay</option>
+                  <option value="events">Event overlay</option>
+                </select>
+              </label>
+              <label id="overlay-layout-wrapper">
+                <span id="overlay-layout-label">Overlay size &amp; layout</span>
+                <select id="overlay-layout"></select>
+              </label>
+              <label id="overlay-detail-wrapper" hidden>
+                Detail level
+                <select id="overlay-detail">
+                  <option value="minimal">Minimal</option>
+                  <option value="summary" selected>Summary</option>
+                  <option value="full">Full</option>
+                </select>
+              </label>
+              <label id="overlay-scale-wrapper" hidden>
+                Size scaling
+                <select id="overlay-scale">
+                  <option value="90">90%</option>
+                  <option value="100" selected>100%</option>
+                  <option value="115">115%</option>
+                  <option value="130">130%</option>
                 </select>
               </label>
               <label>

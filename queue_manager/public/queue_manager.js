@@ -1593,14 +1593,103 @@ async function updateSetting(key, value) {
 }
 
 // ===== Overlay builder =====
+const overlayKindSelect = qs('overlay-kind');
 const overlayLayoutSelect = qs('overlay-layout');
 const overlayThemeSelect = qs('overlay-theme');
+const overlayDetailSelect = qs('overlay-detail');
+const overlayScaleSelect = qs('overlay-scale');
 const overlayUrlInput = qs('overlay-url');
 const overlayCopyBtn = qs('overlay-copy');
 const overlayPreviewFrame = qs('overlay-preview');
 const overlayDimensions = qs('overlay-dimensions');
 const overlayWarning = qs('overlay-channel-warning');
+const overlayLayoutLabel = qs('overlay-layout-label');
+const overlayDetailWrapper = qs('overlay-detail-wrapper');
+const overlayScaleWrapper = qs('overlay-scale-wrapper');
 let overlayCopyResetTimer = null;
+
+const OVERLAY_CONFIG = {
+  queue: {
+    path: 'overlay.html',
+    label: 'Overlay size & layout',
+    detail: false,
+    scale: false,
+    layouts: [
+      { value: 'bumped', label: 'Bumped songs (400×300)', width: 400, height: 300 },
+      { value: 'full', label: 'Full queue (400×800)', width: 400, height: 800 },
+      { value: 'banner', label: 'Horizontal banner (1920×200)', width: 1920, height: 200 }
+    ]
+  },
+  events: {
+    path: 'event_overlay.html',
+    label: 'Layout & placement',
+    detail: true,
+    scale: true,
+    layouts: [
+      { value: 'popup', label: 'Pop-up spotlight (600×400)', width: 600, height: 400 },
+      { value: 'ticker_top', label: 'Ticker – docked top (1920×160)', width: 1920, height: 160 },
+      { value: 'ticker_bottom', label: 'Ticker – docked bottom (1920×160)', width: 1920, height: 160 }
+    ]
+  }
+};
+
+const overlaySelectionMemory = {
+  queue: 'bumped',
+  events: 'popup'
+};
+
+function getOverlayConfig(kind) {
+  return OVERLAY_CONFIG[kind] || OVERLAY_CONFIG.queue;
+}
+
+function populateOverlayLayouts(kind) {
+  if (!overlayLayoutSelect) { return; }
+  const config = getOverlayConfig(kind);
+  const remembered = overlaySelectionMemory[kind];
+  overlayLayoutSelect.innerHTML = '';
+  config.layouts.forEach((layout, index) => {
+    const option = document.createElement('option');
+    option.value = layout.value;
+    option.textContent = layout.label;
+    if (layout.width) { option.dataset.width = layout.width; }
+    if (layout.height) { option.dataset.height = layout.height; }
+    if (remembered && layout.value === remembered) {
+      option.selected = true;
+    } else if (!remembered && index === 0) {
+      option.selected = true;
+    }
+    overlayLayoutSelect.appendChild(option);
+  });
+  if (!overlayLayoutSelect.value && config.layouts.length) {
+    overlayLayoutSelect.value = config.layouts[0].value;
+  }
+  overlaySelectionMemory[kind] = overlayLayoutSelect.value || (config.layouts[0] && config.layouts[0].value) || '';
+}
+
+function updateOverlayControlVisibility(kind, hasChannel) {
+  const config = getOverlayConfig(kind);
+  if (overlayLayoutLabel) {
+    overlayLayoutLabel.textContent = config.label;
+  }
+  if (overlayDetailWrapper) {
+    overlayDetailWrapper.hidden = !config.detail;
+  }
+  if (overlayScaleWrapper) {
+    overlayScaleWrapper.hidden = !config.scale;
+  }
+  if (overlayDetailSelect) {
+    overlayDetailSelect.disabled = !config.detail || !hasChannel;
+    if (!config.detail) {
+      overlayDetailSelect.value = 'summary';
+    }
+  }
+  if (overlayScaleSelect) {
+    overlayScaleSelect.disabled = !config.scale || !hasChannel;
+    if (!config.scale) {
+      overlayScaleSelect.value = '100';
+    }
+  }
+}
 
 function getOverlayDimensions() {
   if (!overlayLayoutSelect) { return { width: null, height: null }; }
@@ -1613,21 +1702,40 @@ function getOverlayDimensions() {
 
 function buildOverlayUrl() {
   if (!channelName || !overlayLayoutSelect || !overlayThemeSelect) { return ''; }
-  const base = new URL('overlay.html', window.location.href);
+  const kind = overlayKindSelect ? overlayKindSelect.value : 'queue';
+  const config = getOverlayConfig(kind);
+  const base = new URL(config.path, window.location.href);
   base.searchParams.set('channel', channelName);
   base.searchParams.set('layout', overlayLayoutSelect.value);
   base.searchParams.set('theme', overlayThemeSelect.value);
+  if (config.detail && overlayDetailSelect) {
+    base.searchParams.set('detail', overlayDetailSelect.value || 'summary');
+  }
+  if (config.scale && overlayScaleSelect) {
+    base.searchParams.set('scale', overlayScaleSelect.value || '100');
+  }
   return base.toString();
 }
 
 function updateOverlayBuilder() {
   if (!overlayLayoutSelect || !overlayThemeSelect || !overlayUrlInput) { return; }
+  const kind = overlayKindSelect ? overlayKindSelect.value : 'queue';
   const hasChannel = !!channelName;
   if (overlayWarning) {
     overlayWarning.hidden = hasChannel;
   }
+  updateOverlayControlVisibility(kind, hasChannel);
+  if (overlayKindSelect) {
+    overlayKindSelect.disabled = !hasChannel;
+  }
   overlayLayoutSelect.disabled = !hasChannel;
   overlayThemeSelect.disabled = !hasChannel;
+  if (overlayDetailSelect) {
+    overlayDetailSelect.disabled = overlayDetailSelect.disabled || !hasChannel;
+  }
+  if (overlayScaleSelect) {
+    overlayScaleSelect.disabled = overlayScaleSelect.disabled || !hasChannel;
+  }
   if (overlayCopyBtn) {
     overlayCopyBtn.disabled = !hasChannel;
     if (!hasChannel || overlayCopyBtn.textContent !== 'Copy') {
@@ -1648,6 +1756,7 @@ function updateOverlayBuilder() {
 
   const url = buildOverlayUrl();
   overlayUrlInput.value = url;
+  overlaySelectionMemory[kind] = overlayLayoutSelect.value;
   const { width, height } = getOverlayDimensions();
   if (overlayDimensions && width && height) {
     overlayDimensions.textContent = `Recommended source size: ${width}×${height}px`;
@@ -1685,8 +1794,27 @@ async function copyOverlayLink() {
 
 function initOverlayBuilder() {
   if (!overlayLayoutSelect || !overlayThemeSelect) { return; }
-  overlayLayoutSelect.addEventListener('change', () => updateOverlayBuilder());
+  const initialKind = overlayKindSelect ? overlayKindSelect.value : 'queue';
+  populateOverlayLayouts(initialKind);
+  if (overlayKindSelect) {
+    overlayKindSelect.addEventListener('change', () => {
+      const nextKind = overlayKindSelect.value;
+      populateOverlayLayouts(nextKind);
+      updateOverlayBuilder();
+    });
+  }
+  overlayLayoutSelect.addEventListener('change', () => {
+    const currentKind = overlayKindSelect ? overlayKindSelect.value : 'queue';
+    overlaySelectionMemory[currentKind] = overlayLayoutSelect.value;
+    updateOverlayBuilder();
+  });
   overlayThemeSelect.addEventListener('change', () => updateOverlayBuilder());
+  if (overlayDetailSelect) {
+    overlayDetailSelect.addEventListener('change', () => updateOverlayBuilder());
+  }
+  if (overlayScaleSelect) {
+    overlayScaleSelect.addEventListener('change', () => updateOverlayBuilder());
+  }
   if (overlayCopyBtn) {
     overlayCopyBtn.addEventListener('click', copyOverlayLink);
   }
