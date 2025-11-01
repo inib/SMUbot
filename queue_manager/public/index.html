@@ -42,6 +42,7 @@
           <button id="tab-playlists" class="tab">Playlists</button>
           <button id="tab-users" class="tab">Users</button>
           <button id="tab-settings" class="tab">Settings</button>
+          <button id="tab-events" class="tab">Events</button>
           <button id="tab-overlays" class="tab">Overlays</button>
         </div>
 
@@ -126,6 +127,21 @@
         <div id="settings-view" style="display:none">
           <h2>Settings</h2>
           <div id="settings"></div>
+        </div>
+
+        <div id="events-view" style="display:none">
+          <div class="events-header">
+            <h2 class="section-title">Channel Events</h2>
+            <div class="events-controls">
+              <span id="event-status" class="event-status">Disconnected</span>
+              <label class="event-autoscroll">
+                <input id="event-autoscroll" type="checkbox" checked />
+                Auto-scroll
+              </label>
+              <button id="event-clear" type="button">Clear</button>
+            </div>
+          </div>
+          <div id="event-feed" class="event-feed" role="log" aria-live="polite" aria-relevant="additions"></div>
         </div>
 
         <div id="overlays-view" style="display:none">

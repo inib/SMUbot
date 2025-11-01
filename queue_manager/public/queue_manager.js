@@ -19,6 +19,11 @@ const queueContent = qs('queue-content');
 const previewToggleBtn = qs('preview-toggle');
 const previewContent = qs('preview-content');
 
+const eventFeedEl = qs('event-feed');
+const eventStatusEl = qs('event-status');
+const eventClearBtn = qs('event-clear');
+const eventAutoscrollInput = qs('event-autoscroll');
+
 const playlistForm = qs('playlist-form');
 const playlistUrlInput = qs('playlist-url');
 const playlistKeywordsInput = qs('playlist-keywords');
@@ -37,6 +42,12 @@ const previewDefaultMessage = 'Select a request to load YouTube Music matches.';
 
 const playlistState = new Map();
 let playlistStatusTimer = null;
+
+const EVENT_FEED_LIMIT = 200;
+let eventAutoscrollEnabled = eventAutoscrollInput ? eventAutoscrollInput.checked : true;
+let channelEventSocket = null;
+let channelEventTimer = null;
+let channelEventShouldReconnect = false;
 
 const SETTINGS_CONFIG = {
   queue_closed: {
@@ -166,6 +177,22 @@ function updateLoginStatus() {
 
 updateLoginStatus();
 
+if (eventClearBtn) {
+  eventClearBtn.onclick = () => {
+    clearEventFeed();
+  };
+}
+
+if (eventAutoscrollInput) {
+  eventAutoscrollEnabled = eventAutoscrollInput.checked;
+  eventAutoscrollInput.onchange = () => {
+    eventAutoscrollEnabled = eventAutoscrollInput.checked;
+    if (eventAutoscrollEnabled && eventFeedEl) {
+      eventFeedEl.scrollTop = eventFeedEl.scrollHeight;
+    }
+  };
+}
+
 const logoutBtn = qs('logout-btn');
 if (logoutBtn) {
   logoutBtn.onclick = async () => {
@@ -178,6 +205,7 @@ if (logoutBtn) {
       userLogin = '';
       channelName = '';
       teardownQueueStream();
+      teardownChannelEvents();
       updateLoginStatus();
       location.reload();
     }
@@ -199,6 +227,7 @@ if (logoutPermBtn) {
       userLogin = '';
       channelName = '';
       teardownQueueStream();
+      teardownChannelEvents();
       updateLoginStatus();
       location.reload();
     }
@@ -206,7 +235,7 @@ if (logoutPermBtn) {
 }
 
 function showTab(name) {
-  ['queue', 'playlists', 'users', 'settings', 'overlays'].forEach(t => {
+  ['queue', 'playlists', 'users', 'settings', 'events', 'overlays'].forEach(t => {
     qs(t+'-view').style.display = (t===name) ? '' : 'none';
     qs('tab-'+t).classList.toggle('active', t===name);
   });
@@ -216,6 +245,7 @@ qs('tab-queue').onclick = () => showTab('queue');
 qs('tab-playlists').onclick = () => showTab('playlists');
 qs('tab-users').onclick = () => showTab('users');
 qs('tab-settings').onclick = () => showTab('settings');
+qs('tab-events').onclick = () => showTab('events');
 qs('tab-overlays').onclick = () => showTab('overlays');
 
 // ===== Queue functions =====
@@ -1788,7 +1818,9 @@ function selectChannel(ch) {
   fetchUsers();
   fetchSettings();
   updateOverlayBuilder();
+  clearEventFeed();
   connectQueueStream();
+  connectChannelEvents();
 }
 
 let queueStream = null;
@@ -1826,6 +1858,176 @@ function connectQueueStream() {
   queueStream.onerror = () => {
     teardownQueueStream();
     queueStreamTimer = setTimeout(connectQueueStream, 5000);
+  };
+}
+
+function teardownChannelEvents() {
+  channelEventShouldReconnect = false;
+  if (channelEventTimer) {
+    clearTimeout(channelEventTimer);
+    channelEventTimer = null;
+  }
+  if (channelEventSocket) {
+    try {
+      channelEventSocket.onopen = null;
+      channelEventSocket.onmessage = null;
+      channelEventSocket.onerror = null;
+      channelEventSocket.onclose = null;
+      channelEventSocket.close();
+    } catch (e) {
+      /* ignore */
+    }
+    channelEventSocket = null;
+  }
+  updateEventStatus('Disconnected', 'warn');
+}
+
+function clearEventFeed() {
+  if (!eventFeedEl) { return; }
+  eventFeedEl.replaceChildren();
+}
+
+function updateEventStatus(text, status) {
+  if (!eventStatusEl) { return; }
+  eventStatusEl.textContent = text;
+  eventStatusEl.classList.remove('ok', 'warn', 'error');
+  if (status) {
+    eventStatusEl.classList.add(status);
+  }
+}
+
+function formatEventTimestamp(value) {
+  if (!value) {
+    return new Date().toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return String(value);
+  }
+  return date.toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+function appendEventEntry(type, payload, timestamp) {
+  if (!eventFeedEl) { return; }
+  const entry = document.createElement('div');
+  entry.className = 'event-entry';
+
+  const meta = document.createElement('div');
+  meta.className = 'event-entry-meta';
+  meta.append(`[${formatEventTimestamp(timestamp)}] `);
+  const typeSpan = document.createElement('span');
+  typeSpan.className = 'event-entry-type';
+  typeSpan.textContent = type || 'event';
+  meta.appendChild(typeSpan);
+  entry.appendChild(meta);
+
+  if (typeof payload !== 'undefined') {
+    const body = document.createElement('pre');
+    body.className = 'event-entry-body';
+    if (typeof payload === 'string') {
+      body.textContent = payload;
+    } else {
+      try {
+        body.textContent = JSON.stringify(payload, null, 2);
+      } catch (e) {
+        body.textContent = String(payload);
+      }
+    }
+    entry.appendChild(body);
+  }
+
+  eventFeedEl.appendChild(entry);
+  while (eventFeedEl.children.length > EVENT_FEED_LIMIT) {
+    eventFeedEl.removeChild(eventFeedEl.firstChild);
+  }
+  if (eventAutoscrollEnabled) {
+    eventFeedEl.scrollTop = eventFeedEl.scrollHeight;
+  }
+}
+
+function handleEventMessage(data) {
+  let parsed;
+  try {
+    parsed = JSON.parse(data);
+  } catch (e) {
+    console.error('Failed to parse channel event message', e);
+    appendEventEntry('raw', data, new Date().toISOString());
+    return;
+  }
+  const isObject = parsed && typeof parsed === 'object';
+  const type = isObject && typeof parsed.type === 'string' ? parsed.type : 'event';
+  const timestamp = isObject && parsed.timestamp ? parsed.timestamp : new Date().toISOString();
+  let payload;
+  if (isObject && parsed !== null && Object.prototype.hasOwnProperty.call(parsed, 'payload')) {
+    payload = parsed.payload;
+  } else {
+    payload = parsed;
+  }
+  appendEventEntry(type, payload, timestamp);
+}
+
+function buildWebsocketBase(url) {
+  if (!url) { return url; }
+  if (url.startsWith('https://')) {
+    return `wss://${url.slice(8)}`;
+  }
+  if (url.startsWith('http://')) {
+    return `ws://${url.slice(7)}`;
+  }
+  if (url.startsWith('ws://') || url.startsWith('wss://')) {
+    return url;
+  }
+  return url;
+}
+
+function connectChannelEvents() {
+  teardownChannelEvents();
+  if (!channelName || !eventFeedEl) {
+    return;
+  }
+  const encodedChannel = encodeURIComponent(channelName);
+  const base = (API || '').replace(/\/$/, '');
+  const wsBase = buildWebsocketBase(base);
+  const url = `${wsBase}/channels/${encodedChannel}/events`;
+  channelEventShouldReconnect = true;
+  updateEventStatus('Connecting…', 'warn');
+  try {
+    channelEventSocket = new WebSocket(url);
+  } catch (e) {
+    console.error('Failed to create channel event socket', e);
+    updateEventStatus('Connection failed', 'error');
+    channelEventTimer = setTimeout(connectChannelEvents, 5000);
+    return;
+  }
+  channelEventSocket.onopen = () => {
+    if (channelEventTimer) {
+      clearTimeout(channelEventTimer);
+      channelEventTimer = null;
+    }
+    updateEventStatus('Connected', 'ok');
+    appendEventEntry('system', 'Connected to channel event feed.', new Date().toISOString());
+  };
+  channelEventSocket.onmessage = (event) => {
+    handleEventMessage(event.data);
+  };
+  channelEventSocket.onerror = (event) => {
+    console.error('Channel event socket error', event);
+    updateEventStatus('Connection error', 'error');
+  };
+  channelEventSocket.onclose = () => {
+    channelEventSocket = null;
+    if (channelEventTimer) {
+      clearTimeout(channelEventTimer);
+      channelEventTimer = null;
+    }
+    if (channelEventShouldReconnect) {
+      updateEventStatus('Reconnecting…', 'warn');
+      appendEventEntry('system', 'Connection closed. Attempting to reconnect…', new Date().toISOString());
+      channelEventTimer = setTimeout(connectChannelEvents, 5000);
+    } else {
+      updateEventStatus('Disconnected', 'warn');
+      appendEventEntry('system', 'Disconnected from channel event feed.', new Date().toISOString());
+    }
   };
 }
 

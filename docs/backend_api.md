@@ -71,11 +71,34 @@ This document summarizes the REST endpoints exposed by `backend_app.py`.
 |--------|------|-------------|
 | POST | `/channels/{channel}/events` | Log a channel event such as follows, subscriptions, or bits (admin). |
 | GET | `/channels/{channel}/events` | Retrieve logged events with optional filtering by type and time. |
+| WS | `/channels/{channel}/events` | WebSocket stream that pushes queue and settings events for overlays. |
 
 Certain events award priority points:
 
 - `bits` events grant 1 point for any cheer of at least 200 bits.
 - Gifted subs (`gift_sub` events) grant 1 point for every 5 subscriptions gifted.
+
+### Channel event stream
+
+The `/channels/{channel}/events` WebSocket emits JSON objects with the shape:
+
+```
+{
+  "type": "event.name",
+  "payload": {...},
+  "timestamp": "2024-01-01T12:34:56.789Z"
+}
+```
+
+All payloads only expose queue-facing data:
+
+- `request.added` — `payload` is a request summary `{ "id", "song": { "title", "artist", "youtube_link" }, "requester": { "id", "username" }, "is_priority", "bumped", "priority_source" }`.
+- `request.bumped` — same payload as `request.added`, emitted whenever a request gains priority (admin bump, playlist bump, or priority toggle).
+- `request.played` — payload `{ "request": <request summary>, "up_next": <request summary>|null }`, where `up_next` is the next pending request after the played entry.
+- `queue.status` — payload `{ "closed": bool, "status": "open"|"closed" }` indicating whether the queue accepts new requests.
+- `queue.archived` — payload `{ "archived_stream_id": int|null, "new_stream_id": int }` describing the stream transition when archiving.
+- `settings.updated` — payload mirroring `ChannelSettingsIn` (`max_requests_per_user`, `prio_only`, `queue_closed`, `allow_bumps`, `other_flags`, `max_prio_points`).
+- `user.bump_awarded` — payload `{ "user": { "id", "username" }, "delta": int, "prio_points": int }` when a user earns additional priority points.
 
 ## Streams
 | Method | Path | Description |
