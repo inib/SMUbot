@@ -7,7 +7,7 @@ services:
     env_file:
       - stack.env
     ports:
-      - "${API_PORT:-7111}:80"
+      - "${API_PORT:-7070}:7070"
     volumes:
       - ./data:/data
   bot:
