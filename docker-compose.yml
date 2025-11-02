@@ -32,7 +32,6 @@ services:
       context: .
       dockerfile: web/Dockerfile
     container_name: songqueue-web
-    environment:
     env_file:
       - stack.env
     ports:
@@ -45,7 +44,6 @@ services:
       context: .
       dockerfile: queue_manager/Dockerfile
     container_name: songqueue-queue-manager
-    environment:
     env_file:
       - stack.env
     ports:
