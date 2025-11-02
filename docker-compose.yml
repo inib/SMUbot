@@ -7,7 +7,7 @@ services:
     env_file:
       - stack.env
     ports:
-      - "7070:7070"
+      - "${API_PORT:-7111}:80"
     volumes:
       - ./data:/data
   bot:
@@ -24,7 +24,6 @@ services:
     depends_on:
       - api
     restart: unless-stopped
-
     volumes:
       - ./bot/commands.yml:/bot/commands.yml:ro
       - ./bot/messages.yml:/bot/messages.yml:ro
