@@ -39,7 +39,7 @@ from fastapi import (
     WebSocket,
 )
 from fastapi import WebSocketDisconnect
-from fastapi.responses import RedirectResponse, HTMLResponse
+from fastapi.responses import RedirectResponse, HTMLResponse, JSONResponse
 from starlette.datastructures import URL
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import (
@@ -60,22 +60,28 @@ DB_URL = "sqlite:////data/db.sqlite"
 # environment variable when the backend starts.
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "change-me")
 
-TWITCH_CLIENT_ID = os.getenv("TWITCH_CLIENT_ID")
-TWITCH_CLIENT_SECRET = os.getenv("TWITCH_CLIENT_SECRET")
-TWITCH_REDIRECT_URI = os.getenv("TWITCH_REDIRECT_URI")
-BOT_TWITCH_REDIRECT_URI = os.getenv("BOT_TWITCH_REDIRECT_URI")
-TWITCH_SCOPES = os.getenv(
-    "TWITCH_SCOPES", "channel:bot channel:read:subscriptions channel:read:vips"
-).split()
-BOT_NICK = os.getenv("BOT_NICK")
-
-BOT_APP_SCOPES = os.getenv(
-    "BOT_APP_SCOPES", "user:read:chat user:write:chat user:bot"
-).split()
-
 ADMIN_SESSION_COOKIE = "admin_oauth_token"
 
 YTMUSIC_AUTH_FILE = os.getenv("YTMUSIC_AUTH_FILE")
+
+SETTINGS_ENV_MAP: Dict[str, str] = {
+    "twitch_client_id": "TWITCH_CLIENT_ID",
+    "twitch_client_secret": "TWITCH_CLIENT_SECRET",
+    "twitch_redirect_uri": "TWITCH_REDIRECT_URI",
+    "bot_redirect_uri": "BOT_TWITCH_REDIRECT_URI",
+    "twitch_scopes": "TWITCH_SCOPES",
+    "bot_app_scopes": "BOT_APP_SCOPES",
+}
+
+SETTINGS_DEFAULTS: Dict[str, Optional[str]] = {
+    "twitch_scopes": "channel:bot channel:read:subscriptions channel:read:vips",
+    "bot_app_scopes": "user:read:chat user:write:chat user:bot",
+}
+
+SETUP_REQUIRED_KEYS = ("twitch_client_id", "twitch_client_secret")
+
+DEFAULT_TWITCH_SCOPES = SETTINGS_DEFAULTS["twitch_scopes"].split()
+DEFAULT_BOT_APP_SCOPES = SETTINGS_DEFAULTS["bot_app_scopes"].split()
 
 APP_ACCESS_TOKEN: Optional[str] = None
 APP_TOKEN_EXPIRES = 0
@@ -90,18 +96,207 @@ engine = create_engine(DB_URL, connect_args={"check_same_thread": False} if DB_U
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 Base = declarative_base()
 
+class AppSetting(Base):
+    __tablename__ = "app_settings"
+
+    key = Column(String, primary_key=True)
+    value = Column(Text, nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
 _ytmusic_client: Optional[YTMusic] = None
 _ytmusic_lock = Lock()
+
+
+def _load_settings_from_db() -> Dict[str, Optional[str]]:
+    db = SessionLocal()
+    try:
+        rows = db.query(AppSetting).all()
+        values = {row.key: row.value for row in rows}
+    finally:
+        db.close()
+    for key, default in SETTINGS_DEFAULTS.items():
+        values.setdefault(key, default)
+    return values
+
+
+class SettingsStore:
+    __slots__ = ("_cache", "_lock")
+
+    def __init__(self) -> None:
+        self._cache: Optional[Dict[str, Optional[str]]] = None
+        self._lock = Lock()
+
+    def snapshot(self) -> Dict[str, Optional[str]]:
+        with self._lock:
+            if self._cache is None:
+                self._cache = _load_settings_from_db()
+            return dict(self._cache)
+
+    def get(self, key: str, default: Optional[str] = None) -> Optional[str]:
+        value = self.snapshot().get(key, default)
+        if value is None:
+            return default
+        value_str = str(value).strip()
+        return value_str or default
+
+    def get_list(self, key: str) -> list[str]:
+        raw = self.get(key)
+        if not raw:
+            return []
+        parts = re.split(r"[\s,]+", raw)
+        return [part for part in parts if part]
+
+    def invalidate(self) -> None:
+        with self._lock:
+            self._cache = None
+
+
+settings_store = SettingsStore()
+
+
+def _settings_requirements_met(values: Mapping[str, Optional[str]]) -> bool:
+    for key in SETUP_REQUIRED_KEYS:
+        if not str(values.get(key) or "").strip():
+            return False
+    return True
+
+
+def bootstrap_settings_from_env() -> None:
+    db = SessionLocal()
+    try:
+        existing_rows = {row.key: row for row in db.query(AppSetting).all()}
+        values: Dict[str, Optional[str]] = {key: row.value for key, row in existing_rows.items()}
+        changed = False
+
+        for key, env_name in SETTINGS_ENV_MAP.items():
+            env_value = os.getenv(env_name)
+            if env_value is None:
+                continue
+            trimmed = env_value.strip()
+            if not trimmed:
+                continue
+            if key in existing_rows:
+                if not existing_rows[key].value:
+                    existing_rows[key].value = trimmed
+                    values[key] = trimmed
+                    changed = True
+            else:
+                db.add(AppSetting(key=key, value=trimmed))
+                values[key] = trimmed
+                changed = True
+
+        for key, default in SETTINGS_DEFAULTS.items():
+            if key not in values:
+                db.add(AppSetting(key=key, value=default))
+                values[key] = default
+                changed = True
+
+        setup_value = values.get("setup_complete")
+        if setup_value is None:
+            complete = "1" if _settings_requirements_met(values) else "0"
+            db.add(AppSetting(key="setup_complete", value=complete))
+            values["setup_complete"] = complete
+            changed = True
+
+        if changed:
+            db.commit()
+        else:
+            db.rollback()
+    finally:
+        db.close()
+    settings_store.invalidate()
+
+
+def _persist_settings(db: Session, updates: Mapping[str, Optional[str]]) -> None:
+    for key, value in updates.items():
+        row = db.get(AppSetting, key)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            normalized = None
+        else:
+            normalized = value.strip() if isinstance(value, str) else str(value)
+        if row:
+            row.value = normalized
+        else:
+            db.add(AppSetting(key=key, value=normalized))
+
+
+def set_settings(db: Session, updates: Mapping[str, Optional[str]]) -> Dict[str, Optional[str]]:
+    _persist_settings(db, updates)
+    db.commit()
+    settings_store.invalidate()
+    return settings_store.snapshot()
+
+
+def get_setting(key: str, default: Optional[str] = None) -> Optional[str]:
+    return settings_store.get(key, default)
+
+
+def get_scopes_setting(key: str, default: Optional[list[str]] = None) -> list[str]:
+    scopes = settings_store.get_list(key)
+    if scopes:
+        return scopes
+    return list(default or [])
+
+
+def is_setup_complete() -> bool:
+    value = get_setting("setup_complete", "0")
+    return str(value).strip() in {"1", "true", "yes", "on"}
+
+
+def get_twitch_client_id() -> Optional[str]:
+    value = get_setting("twitch_client_id")
+    return value.strip() if value else None
+
+
+def get_twitch_client_secret() -> Optional[str]:
+    value = get_setting("twitch_client_secret")
+    return value.strip() if value else None
+
+
+def get_twitch_redirect_uri() -> Optional[str]:
+    value = get_setting("twitch_redirect_uri")
+    return value.strip() if value else None
+
+
+def get_bot_redirect_uri() -> Optional[str]:
+    value = get_setting("bot_redirect_uri")
+    return value.strip() if value else None
+
+
+def get_twitch_scopes() -> list[str]:
+    scopes = get_scopes_setting("twitch_scopes", DEFAULT_TWITCH_SCOPES)
+    return scopes or list(DEFAULT_TWITCH_SCOPES)
+
+
+def get_bot_app_scopes() -> list[str]:
+    scopes = get_scopes_setting("bot_app_scopes", DEFAULT_BOT_APP_SCOPES)
+    return scopes or list(DEFAULT_BOT_APP_SCOPES)
+
+
+def _system_config_payload() -> Dict[str, Any]:
+    return {
+        "setup_complete": is_setup_complete(),
+        "twitch_client_id": get_twitch_client_id(),
+        "twitch_client_secret_set": bool(get_twitch_client_secret()),
+        "twitch_redirect_uri": get_twitch_redirect_uri(),
+        "bot_redirect_uri": get_bot_redirect_uri(),
+        "twitch_scopes": get_twitch_scopes(),
+        "bot_app_scopes": get_bot_app_scopes(),
+    }
 
 
 def get_app_access_token() -> str:
     global APP_ACCESS_TOKEN, APP_TOKEN_EXPIRES
     if not APP_ACCESS_TOKEN or time.time() > APP_TOKEN_EXPIRES:
+        client_id = get_twitch_client_id()
+        client_secret = get_twitch_client_secret()
+        if not client_id or not client_secret:
+            raise RuntimeError("twitch oauth credentials are not configured")
         response = requests.post(
             "https://id.twitch.tv/oauth2/token",
             data={
-                "client_id": TWITCH_CLIENT_ID,
-                "client_secret": TWITCH_CLIENT_SECRET,
+                "client_id": client_id,
+                "client_secret": client_secret,
                 "grant_type": "client_credentials",
             },
             timeout=5,
@@ -131,19 +326,21 @@ def get_bot_user_id() -> Optional[str]:
     global BOT_USER_ID
     if BOT_USER_ID:
         return BOT_USER_ID
-    login = BOT_NICK
-    if not login:
-        db = SessionLocal()
-        try:
-            cfg = db.query(BotConfig).order_by(BotConfig.id.asc()).first()
-            if cfg and cfg.login:
-                login = cfg.login
-        finally:
-            db.close()
+    login: Optional[str] = None
+    db = SessionLocal()
+    try:
+        cfg = db.query(BotConfig).order_by(BotConfig.id.asc()).first()
+        if cfg and cfg.login:
+            login = cfg.login
+    finally:
+        db.close()
     if not login:
         return None
+    client_id = get_twitch_client_id()
+    if not client_id:
+        return None
     token = get_app_access_token()
-    headers = {"Authorization": f"Bearer {token}", "Client-Id": TWITCH_CLIENT_ID}
+    headers = {"Authorization": f"Bearer {token}", "Client-Id": client_id}
     resp = requests.get(
         "https://api.twitch.tv/helix/users",
         params={"login": login},
@@ -393,6 +590,7 @@ class PlaylistItem(Base):
 # DB bootstrap
 # =====================================
 Base.metadata.create_all(bind=engine)
+bootstrap_settings_from_env()
 
 # =====================================
 # Schemas
@@ -505,6 +703,30 @@ class BotLogAckOut(BaseModel):
 
 class BotOAuthStartIn(BaseModel):
     return_url: Optional[str] = None
+
+
+class SystemConfigOut(BaseModel):
+    setup_complete: bool
+    twitch_client_id: Optional[str]
+    twitch_client_secret_set: bool
+    twitch_redirect_uri: Optional[str]
+    bot_redirect_uri: Optional[str]
+    twitch_scopes: List[str]
+    bot_app_scopes: List[str]
+
+
+class SystemConfigUpdate(BaseModel):
+    twitch_client_id: Optional[str] = None
+    twitch_client_secret: Optional[str] = None
+    twitch_redirect_uri: Optional[str] = None
+    bot_redirect_uri: Optional[str] = None
+    twitch_scopes: Optional[List[str]] = None
+    bot_app_scopes: Optional[List[str]] = None
+    setup_complete: Optional[bool] = None
+
+
+class SystemStatusOut(BaseModel):
+    setup_complete: bool
 
 
 class PlaylistCreate(BaseModel):
@@ -778,6 +1000,25 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+SETUP_BYPASS_PREFIXES = ("/system", "/docs", "/openapi", "/redoc")
+
+
+@app.middleware("http")
+async def enforce_initial_setup(request: FastAPIRequest, call_next):
+    if is_setup_complete():
+        return await call_next(request)
+
+    path = request.url.path
+    for prefix in SETUP_BYPASS_PREFIXES:
+        if path.startswith(prefix):
+            return await call_next(request)
+
+    token = request.headers.get("X-Admin-Token")
+    if token and secrets.compare_digest(token, ADMIN_TOKEN):
+        return await call_next(request)
+
+    return JSONResponse({"detail": "setup incomplete"}, status_code=503)
 
 class _ChannelBroker:
     __slots__ = ("channel_pk", "listeners")
@@ -1125,8 +1366,9 @@ def _apply_forwarded_headers(request: FastAPIRequest, url: URL) -> URL:
 
 
 def _bot_redirect_uri(request: FastAPIRequest) -> str:
-    if BOT_TWITCH_REDIRECT_URI:
-        return BOT_TWITCH_REDIRECT_URI
+    configured = get_bot_redirect_uri()
+    if configured:
+        return configured
     url = URL(str(request.url_for("bot_oauth_callback")))
     adjusted = _apply_forwarded_headers(request, url)
     return str(adjusted)
@@ -1202,7 +1444,7 @@ def _normalize_scope_list(scopes: Iterable[str]) -> list[str]:
 
 def _ensure_bot_config_scopes(cfg: "BotConfig") -> bool:
     current = _normalize_scope_list((cfg.scopes or "").split())
-    required = _normalize_scope_list(BOT_APP_SCOPES)
+    required = _normalize_scope_list(get_bot_app_scopes())
     missing = [scope for scope in required if scope not in current]
     if missing:
         current.extend(missing)
@@ -1214,7 +1456,7 @@ def _ensure_bot_config_scopes(cfg: "BotConfig") -> bool:
 def _get_bot_config(db: Session) -> BotConfig:
     cfg = db.query(BotConfig).order_by(BotConfig.id.asc()).first()
     if not cfg:
-        default_scopes = _normalize_scope_list(BOT_APP_SCOPES)
+        default_scopes = _normalize_scope_list(get_bot_app_scopes())
         scopes = " ".join(default_scopes) if default_scopes else ""
         cfg = BotConfig(scopes=scopes or None, enabled=False)
         db.add(cfg)
@@ -1239,11 +1481,15 @@ def _serialize_bot_config(cfg: BotConfig, *, include_tokens: bool = False) -> Di
     if include_tokens:
         data["access_token"] = cfg.access_token
         data["refresh_token"] = cfg.refresh_token
-        data["client_id"] = TWITCH_CLIENT_ID
-        data["client_secret"] = TWITCH_CLIENT_SECRET
+        client_id = get_twitch_client_id()
+        client_secret = get_twitch_client_secret()
+        if client_id:
+            data["client_id"] = client_id
+        if client_secret:
+            data["client_secret"] = client_secret
         try:
             data["bot_user_id"] = get_bot_user_id()
-        except requests.RequestException:
+        except (requests.RequestException, RuntimeError):
             data["bot_user_id"] = None
     return data
 
@@ -1444,17 +1690,19 @@ def auth_login(
     request: FastAPIRequest,
     return_url: Optional[str] = Query(None),
 ):
-    if not TWITCH_CLIENT_ID or not TWITCH_CLIENT_SECRET:
+    client_id = get_twitch_client_id()
+    client_secret = get_twitch_client_secret()
+    if not client_id or not client_secret:
         raise HTTPException(status_code=500, detail="Twitch OAuth not configured")
-    scope = "+".join(TWITCH_SCOPES)
-    redirect_uri = TWITCH_REDIRECT_URI or str(request.url_for("auth_callback"))
+    scope = "+".join(get_twitch_scopes())
+    redirect_uri = get_twitch_redirect_uri() or str(request.url_for("auth_callback"))
     state_payload = {"channel": channel}
     if return_url:
         state_payload["return_url"] = return_url
     state_param = quote(json.dumps(state_payload, separators=(",", ":")), safe="")
     url = (
         "https://id.twitch.tv/oauth2/authorize"
-        f"?response_type=code&client_id={TWITCH_CLIENT_ID}"
+        f"?response_type=code&client_id={client_id}"
         f"&redirect_uri={redirect_uri}&scope={scope}&state={state_param}"
     )
     return {"auth_url": url}
@@ -1466,14 +1714,16 @@ def auth_callback(
     request: FastAPIRequest,
     db: Session = Depends(get_db),
 ):
-    if not TWITCH_CLIENT_ID or not TWITCH_CLIENT_SECRET:
+    client_id = get_twitch_client_id()
+    client_secret = get_twitch_client_secret()
+    if not client_id or not client_secret:
         raise HTTPException(status_code=500, detail="Twitch OAuth not configured")
-    redirect_uri = TWITCH_REDIRECT_URI or str(request.url_for("auth_callback"))
+    redirect_uri = get_twitch_redirect_uri() or str(request.url_for("auth_callback"))
     token_resp = requests.post(
         "https://id.twitch.tv/oauth2/token",
         data={
-            "client_id": TWITCH_CLIENT_ID,
-            "client_secret": TWITCH_CLIENT_SECRET,
+            "client_id": client_id,
+            "client_secret": client_secret,
             "code": code,
             "grant_type": "authorization_code",
             "redirect_uri": redirect_uri,
@@ -1497,7 +1747,7 @@ def auth_callback(
             return_to = state_data.get("return_url")
         elif isinstance(state_data, str):
             channel_name = state_data
-    headers = {"Authorization": f"Bearer {access_token}", "Client-Id": TWITCH_CLIENT_ID}
+    headers = {"Authorization": f"Bearer {access_token}", "Client-Id": client_id}
     user_info = requests.get("https://api.twitch.tv/helix/users", headers=headers).json()["data"][0]
     user = db.query(TwitchUser).filter_by(twitch_id=user_info["id"]).one_or_none()
     if not user:
@@ -1689,20 +1939,23 @@ def bot_oauth_start(
     request: FastAPIRequest,
     payload: Optional[BotOAuthStartIn] = Body(default=None),
     db: Session = Depends(get_db),
-):
-    if not TWITCH_CLIENT_ID or not TWITCH_CLIENT_SECRET:
+): 
+    client_id = get_twitch_client_id()
+    client_secret = get_twitch_client_secret()
+    if not client_id or not client_secret:
         raise HTTPException(status_code=500, detail="Twitch OAuth not configured")
     cfg = _get_bot_config(db)
     configured_scopes = (cfg.scopes or "").split()
     seen: set[str] = set()
     scopes: list[str] = []
-    for scope in configured_scopes or BOT_APP_SCOPES:
+    default_scopes = get_bot_app_scopes()
+    for scope in configured_scopes or default_scopes:
         scope_value = scope.strip()
         if scope_value and scope_value not in seen:
             seen.add(scope_value)
             scopes.append(scope_value)
     if not scopes:
-        scopes = BOT_APP_SCOPES[:]
+        scopes = list(default_scopes)
     redirect_uri = _bot_redirect_uri(request)
     nonce = secrets.token_urlsafe(24)
     _cleanup_bot_oauth_states()
@@ -1712,7 +1965,7 @@ def bot_oauth_start(
         state_payload["return_url"] = return_url
     state_param = quote(json.dumps(state_payload, separators=(",", ":")), safe="")
     scope_param = quote(" ".join(scopes), safe="")
-    client_id_param = quote(TWITCH_CLIENT_ID, safe="")
+    client_id_param = quote(client_id, safe="")
     redirect_param = quote(redirect_uri, safe="")
     auth_url = (
         "https://id.twitch.tv/oauth2/authorize"
@@ -1736,7 +1989,9 @@ def bot_oauth_callback(
 ):
     pending: Optional[Dict[str, Any]] = None
     try:
-        if not TWITCH_CLIENT_ID or not TWITCH_CLIENT_SECRET:
+        client_id = get_twitch_client_id()
+        client_secret = get_twitch_client_secret()
+        if not client_id or not client_secret:
             raise HTTPException(status_code=500, detail="Twitch OAuth not configured")
         if not state:
             raise HTTPException(status_code=400, detail="missing state")
@@ -1751,14 +2006,14 @@ def bot_oauth_callback(
         if not pending:
             raise HTTPException(status_code=400, detail="state expired or invalid")
         redirect_url = pending.get("return_url") if pending else None
-        expected_scopes = pending.get("scopes") or BOT_APP_SCOPES
+        expected_scopes = pending.get("scopes") or get_bot_app_scopes()
         redirect_uri = _bot_redirect_uri(request)
         try:
             token_response = requests.post(
                 "https://id.twitch.tv/oauth2/token",
                 data={
-                    "client_id": TWITCH_CLIENT_ID,
-                    "client_secret": TWITCH_CLIENT_SECRET,
+                    "client_id": client_id,
+                    "client_secret": client_secret,
                     "code": code,
                     "grant_type": "authorization_code",
                     "redirect_uri": redirect_uri,
@@ -1813,7 +2068,7 @@ def bot_oauth_callback(
             expires_at = datetime.utcnow() + timedelta(seconds=int(expires_in))
         headers = {
             "Authorization": f"Bearer {access_token}",
-            "Client-Id": TWITCH_CLIENT_ID,
+            "Client-Id": client_id,
         }
         try:
             user_response = requests.get(
@@ -1944,11 +2199,12 @@ def me(current: TwitchUser = Depends(get_current_user)):
         "display_name": current.username,
         "profile_image_url": None,
     }
-    if TWITCH_CLIENT_ID and current.access_token:
+    client_id = get_twitch_client_id()
+    if client_id and current.access_token:
         try:
             headers = {
                 "Authorization": f"Bearer {current.access_token}",
-                "Client-Id": TWITCH_CLIENT_ID,
+                "Client-Id": client_id,
             }
             resp = requests.get(
                 "https://api.twitch.tv/helix/users",
@@ -2476,6 +2732,77 @@ seed_default_data()
 # =====================================
 # Routes: System
 # =====================================
+@app.get("/system/status", response_model=SystemStatusOut)
+def system_status():
+    return {"setup_complete": is_setup_complete()}
+
+
+@app.get("/system/config", response_model=SystemConfigOut)
+def system_config():
+    return _system_config_payload()
+
+
+@app.put("/system/config", response_model=SystemConfigOut)
+def update_system_config(
+    payload: SystemConfigUpdate,
+    x_admin_token: Optional[str] = Header(None),
+):
+    if x_admin_token != ADMIN_TOKEN:
+        raise HTTPException(status_code=401, detail="invalid admin token")
+
+    updates: Dict[str, Optional[str]] = {}
+    credentials_changed = False
+
+    if payload.twitch_client_id is not None:
+        updates["twitch_client_id"] = payload.twitch_client_id.strip() or None
+        credentials_changed = True
+    if payload.twitch_client_secret is not None:
+        updates["twitch_client_secret"] = payload.twitch_client_secret.strip() or None
+        credentials_changed = True
+    if payload.twitch_redirect_uri is not None:
+        updates["twitch_redirect_uri"] = payload.twitch_redirect_uri.strip() or None
+    if payload.bot_redirect_uri is not None:
+        updates["bot_redirect_uri"] = payload.bot_redirect_uri.strip() or None
+    if payload.twitch_scopes is not None:
+        normalized_scopes = _normalize_scope_list(payload.twitch_scopes)
+        updates["twitch_scopes"] = " ".join(normalized_scopes) if normalized_scopes else None
+    if payload.bot_app_scopes is not None:
+        normalized_bot_scopes = _normalize_scope_list(payload.bot_app_scopes)
+        updates["bot_app_scopes"] = " ".join(normalized_bot_scopes) if normalized_bot_scopes else None
+
+    current = settings_store.snapshot()
+    merged: Dict[str, Optional[str]] = dict(current)
+    for key, value in updates.items():
+        merged[key] = value
+    if payload.setup_complete is not None:
+        merged["setup_complete"] = "1" if payload.setup_complete else "0"
+
+    requirements_met = _settings_requirements_met(merged)
+    if payload.setup_complete and not requirements_met:
+        raise HTTPException(
+            status_code=400,
+            detail="Twitch client ID and secret must be configured before completing setup",
+        )
+
+    if payload.setup_complete is not None:
+        updates["setup_complete"] = "1" if payload.setup_complete else "0"
+    elif not requirements_met:
+        updates["setup_complete"] = "0"
+
+    if updates:
+        db = SessionLocal()
+        try:
+            set_settings(db, updates)
+        finally:
+            db.close()
+    if credentials_changed:
+        global APP_ACCESS_TOKEN, APP_TOKEN_EXPIRES, BOT_USER_ID
+        APP_ACCESS_TOKEN = None
+        APP_TOKEN_EXPIRES = 0
+        BOT_USER_ID = None
+    return _system_config_payload()
+
+
 @app.get("/system/health")
 def health():
     try:
@@ -3098,11 +3425,12 @@ def _iter_twitch_collection(url: str, headers: Mapping[str, str], params: dict[s
         if not channel_obj or not channel_obj.owner or not channel_obj.channel_id:
             return set(), {}
         owner = channel_obj.owner
-        if not TWITCH_CLIENT_ID or not owner.access_token:
+        client_id = get_twitch_client_id()
+        if not client_id or not owner.access_token:
             return set(), {}
         headers = {
             "Authorization": f"Bearer {owner.access_token}",
-            "Client-Id": TWITCH_CLIENT_ID,
+            "Client-Id": client_id,
         }
         params = {"broadcaster_id": channel_obj.channel_id}
     vip_ids: set[str] = set()

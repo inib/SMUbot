@@ -13,19 +13,29 @@ Additional directories include:
 - **admin/** – static assets for the Admin control panel used to manage the shared bot account and view channel stats.
 - **data/** – persistent SQLite database storage.
 
+## Deployment setup flow
+When the stack starts for the first time, the backend remains locked until an
+administrator opens the Admin panel and saves the Twitch application
+credentials. The `/system/status` endpoint reports whether setup is complete,
+and all browser UIs display a guard banner while the deployment is locked. Once
+the required fields are saved (client ID, client secret, redirect URIs, and any
+desired scope overrides) the admin can mark the deployment as ready, which
+unlocks the API for the bot, queue manager, and public web frontend.
+
 ## Running with Docker
 1. Copy `example.env` to `stack.env` and adjust values such as `ADMIN_TOKEN`,
-   `ADMIN_BASIC_AUTH_USERNAME`, `ADMIN_BASIC_AUTH_PASSWORD`, `TWITCH_CLIENT_ID`,
-   and `TWITCH_CLIENT_SECRET`. When exposing the stack outside of Docker, set
-   `BACKEND_URL` to the public URL of the API so the bot and web UI can reach
-   it. Bot credentials are now managed through the backend at `/bot/config`
-   instead of `.env` entries.
+   `ADMIN_BASIC_AUTH_USERNAME`, `ADMIN_BASIC_AUTH_PASSWORD`, and `BACKEND_URL`
+   (the bot uses it to reach the API). Twitch OAuth credentials, bot scopes,
+   and overlay settings are now configured inside the Admin panel after the
+   services start, so they no longer live in the environment file.
 2. Start the stack:
    ```bash
    docker-compose --env-file stack.env up --build
    ```
    This launches the API on port 7070, the bot, and the web UI on port 7000
-   (overridden with `WEB_PORT`).
+   (overridden with `WEB_PORT`). On first boot, visit the Admin panel to
+   complete the “Deployment Setup” flow before the API, queue manager, or bot
+   pages are accessible.
 
 ## Backend Highlights
 - Uses a SQLite database stored at `/data/db.sqlite` and defines models for channels, songs, users, stream sessions, and requests.

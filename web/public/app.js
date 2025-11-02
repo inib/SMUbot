@@ -1,9 +1,91 @@
-// Configuration is primarily driven by environment variables exposed via
-// `config.js`. Query parameters still allow overrides for debugging:
-// ?backend=http://localhost:7070&channel=example_channel
+const DEFAULT_BACKEND = (() => {
+  try {
+    const current = new URL(window.location.href);
+    current.port = '7070';
+    current.pathname = '';
+    current.search = '';
+    current.hash = '';
+    return current.toString().replace(/\/$/, '');
+  } catch (err) {
+    return 'http://localhost:7070';
+  }
+})();
+
+function resolveBackendBase(value) {
+  const fallback = DEFAULT_BACKEND;
+  if (!value) return fallback;
+  const trimmed = value.trim();
+  if (!trimmed) return fallback;
+  const httpLike = /^https?:\/\//i;
+  try {
+    if (trimmed.startsWith('/')) {
+      return new URL(trimmed, window.location.origin).toString().replace(/\/$/, '');
+    }
+    if (!httpLike.test(trimmed) && !trimmed.includes('://')) {
+      return new URL(`http://${trimmed}`, window.location.origin).toString().replace(/\/$/, '');
+    }
+    return new URL(trimmed, window.location.origin).toString().replace(/\/$/, '');
+  } catch (err) {
+    console.warn('invalid backend URL, falling back to default', err);
+    return fallback;
+  }
+}
+
 const qs = new URLSearchParams(location.search);
-const BACKEND = (qs.get('backend') || window.BACKEND_URL || 'http://localhost:7070').replace(/\/$/, '');
+const BACKEND_STORAGE_KEY = 'queue-manager.backendUrl';
+const backendOverride = qs.get('backend') || '';
+if (backendOverride) {
+  try {
+    window.localStorage.setItem(BACKEND_STORAGE_KEY, backendOverride);
+  } catch (err) {
+    console.warn('failed to persist backend override', err);
+  }
+}
+let storedBackend = '';
+try {
+  storedBackend = window.localStorage.getItem(BACKEND_STORAGE_KEY) || '';
+} catch (err) {
+  storedBackend = '';
+}
+const BACKEND = resolveBackendBase(backendOverride || storedBackend || '');
+try {
+  window.localStorage.setItem(BACKEND_STORAGE_KEY, BACKEND);
+} catch (err) {
+  // ignore persistence failures
+}
 const CHANNEL = qs.get('channel') || 'example_channel';
+const setupGuardEl = document.getElementById('setup-guard');
+
+function showSetupGuard(message) {
+  if (!setupGuardEl) return;
+  if (!message) {
+    setupGuardEl.hidden = true;
+    setupGuardEl.textContent = '';
+  } else {
+    setupGuardEl.hidden = false;
+    setupGuardEl.textContent = message;
+  }
+}
+
+async function ensureSetupComplete() {
+  try {
+    const res = await fetch(`${BACKEND}/system/status`, { cache: 'no-store' });
+    if (!res.ok) {
+      throw new Error(`status ${res.status}`);
+    }
+    const data = await res.json();
+    if (!data || !data.setup_complete) {
+      showSetupGuard('Deployment setup is incomplete. Finish configuration in the admin panel to unlock the queue view.');
+      throw new Error('setup incomplete');
+    }
+  } catch (err) {
+    const isSetupError = err instanceof Error && err.message === 'setup incomplete';
+    if (!isSetupError) {
+      showSetupGuard('Unable to reach the backend API. Check your deployment settings and try again.');
+    }
+    throw err;
+  }
+}
 
 const el = (sel) => document.querySelector(sel);
 const queueEl   = el('#queue');
@@ -124,10 +206,36 @@ function sse(){
   }catch(e){ console.error(e); }
 }
 
+async function bootstrap(){
+  try {
+    await ensureSetupComplete();
+    showSetupGuard('');
+  } catch (err) {
+    console.error('Queue view unavailable until deployment setup completes.', err);
+    return;
+  }
+
+  try {
+    await refreshCurrent();
+  } catch (err) {
+    console.error('Failed to load current queue', err);
+  }
+  try {
+    sse();
+  } catch (err) {
+    console.error('Failed to start queue stream', err);
+  }
+  const footer = el('#footer-note');
+  if (footer) {
+    footer.textContent = `Backend: ${BACKEND} • Channel: ${CHANNEL}`;
+  }
+}
+
 document.addEventListener('DOMContentLoaded', ()=>{
+  if (chBadge) {
+    chBadge.textContent = `channel: ${CHANNEL}`;
+  }
   tabCur.onclick = ()=>{ tabCur.classList.add('active'); tabArc.classList.remove('active'); viewCur.style.display='block'; viewArc.style.display='none'; };
   tabArc.onclick = ()=>{ tabArc.classList.add('active'); tabCur.classList.remove('active'); viewCur.style.display='none'; viewArc.style.display='block'; loadStreams(); };
-  refreshCurrent();
-  sse();
-  el('#footer-note').textContent = `Backend: ${BACKEND} • Channel: ${CHANNEL}`;
+  bootstrap();
 });

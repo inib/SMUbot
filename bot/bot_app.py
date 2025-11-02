@@ -15,9 +15,6 @@ from twitchio.payloads import TokenRefreshedPayload
 BACKEND_URL = os.getenv('BACKEND_URL', 'http://api:7070')
 # Token used for privileged requests to the backend.
 ADMIN_TOKEN = os.getenv('ADMIN_TOKEN', 'change-me')
-TWITCH_CLIENT_ID_ENV = os.getenv('TWITCH_CLIENT_ID')
-TWITCH_CLIENT_SECRET_ENV = os.getenv('TWITCH_CLIENT_SECRET')
-BOT_USER_ID_ENV = os.getenv('BOT_USER_ID') or os.getenv('TWITCH_BOT_USER_ID')
 MESSAGES_PATH = Path(os.getenv("BOT_MESSAGES_PATH", "/bot/messages.yml"))
 
 COMMANDS_FILE = os.getenv('COMMANDS_FILE', '/bot/commands.yml')
@@ -1493,13 +1490,9 @@ class BotService:
         token = config.get('access_token') or config.get('token')
         refresh = config.get('refresh_token')
         login = config.get('login') or config.get('bot_login')
-        client_id = config.get('client_id') or TWITCH_CLIENT_ID_ENV
-        client_secret = config.get('client_secret') or TWITCH_CLIENT_SECRET_ENV
-        bot_user_id = (
-            config.get('bot_user_id')
-            or config.get('bot_id')
-            or BOT_USER_ID_ENV
-        )
+        client_id = config.get('client_id')
+        client_secret = config.get('client_secret')
+        bot_user_id = config.get('bot_user_id') or config.get('bot_id')
         raw_scopes = config.get('scopes') or []
         if isinstance(raw_scopes, str):
             scopes = [scope for scope in raw_scopes.split() if scope]

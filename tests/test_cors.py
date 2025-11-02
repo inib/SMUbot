@@ -71,18 +71,35 @@ class CorsConfigTests(unittest.TestCase):
 
 class GetAppAccessTokenTests(unittest.TestCase):
     def setUp(self) -> None:
-        self._client_id = backend_app.TWITCH_CLIENT_ID
-        self._client_secret = backend_app.TWITCH_CLIENT_SECRET
-        backend_app.TWITCH_CLIENT_ID = "client"
-        backend_app.TWITCH_CLIENT_SECRET = "secret"
+        self._settings_snapshot = backend_app.settings_store.snapshot()
+        db = backend_app.SessionLocal()
+        try:
+            db.query(backend_app.AppSetting).delete()
+            backend_app.set_settings(
+                db,
+                {
+                    "twitch_client_id": "client",
+                    "twitch_client_secret": "secret",
+                    "setup_complete": "1",
+                    "twitch_scopes": "channel:bot channel:read:subscriptions channel:read:vips",
+                    "bot_app_scopes": "user:read:chat user:write:chat user:bot",
+                },
+            )
+        finally:
+            db.close()
         backend_app.APP_ACCESS_TOKEN = None
         backend_app.APP_TOKEN_EXPIRES = 0
 
     def tearDown(self) -> None:
-        backend_app.TWITCH_CLIENT_ID = self._client_id
-        backend_app.TWITCH_CLIENT_SECRET = self._client_secret
         backend_app.APP_ACCESS_TOKEN = None
         backend_app.APP_TOKEN_EXPIRES = 0
+        db = backend_app.SessionLocal()
+        try:
+            db.query(backend_app.AppSetting).delete()
+            if self._settings_snapshot:
+                backend_app.set_settings(db, self._settings_snapshot)
+        finally:
+            db.close()
 
     def test_missing_access_token_raises_http_error(self) -> None:
         class FakeResponse:
@@ -101,10 +118,43 @@ class GetAppAccessTokenTests(unittest.TestCase):
 
 class AuthSessionCORSTest(unittest.TestCase):
     def setUp(self) -> None:
+        self._settings_snapshot = backend_app.settings_store.snapshot()
+        db = backend_app.SessionLocal()
+        try:
+            db.query(backend_app.BotConfig).delete()
+            db.query(backend_app.TwitchUser).delete()
+            db.query(backend_app.AppSetting).delete()
+            backend_app.set_settings(
+                db,
+                {
+                    "twitch_client_id": "client",
+                    "twitch_client_secret": "secret",
+                    "setup_complete": "1",
+                    "twitch_scopes": "channel:bot channel:read:subscriptions channel:read:vips",
+                    "bot_app_scopes": "user:read:chat user:write:chat user:bot",
+                },
+            )
+        finally:
+            db.close()
+        backend_app.APP_ACCESS_TOKEN = None
+        backend_app.APP_TOKEN_EXPIRES = 0
+        backend_app.BOT_USER_ID = None
         self.client = TestClient(backend_app.app)
 
     def tearDown(self) -> None:
         self.client.close()
+        backend_app.APP_ACCESS_TOKEN = None
+        backend_app.APP_TOKEN_EXPIRES = 0
+        backend_app.BOT_USER_ID = None
+        db = backend_app.SessionLocal()
+        try:
+            db.query(backend_app.BotConfig).delete()
+            db.query(backend_app.TwitchUser).delete()
+            db.query(backend_app.AppSetting).delete()
+            if self._settings_snapshot:
+                backend_app.set_settings(db, self._settings_snapshot)
+        finally:
+            db.close()
 
     def test_auth_session_network_error_still_returns_cors_headers(self) -> None:
         origin = "https://qadmin.alpen.bot"
