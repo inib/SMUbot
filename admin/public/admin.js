@@ -1,5 +1,18 @@
+const DEFAULT_BACKEND = (() => {
+  try {
+    const current = new URL(window.location.href);
+    current.port = '7070';
+    current.pathname = '';
+    current.search = '';
+    current.hash = '';
+    return current.toString().replace(/\/$/, '');
+  } catch (err) {
+    return 'http://localhost:7070';
+  }
+})();
+
 function resolveBackendBase(value) {
-  const fallback = 'http://localhost:7070';
+  const fallback = DEFAULT_BACKEND;
   if (!value) return fallback;
   const trimmed = value.trim();
   if (!trimmed) return fallback;
@@ -18,7 +31,29 @@ function resolveBackendBase(value) {
   }
 }
 
-const API = resolveBackendBase(window.BACKEND_URL);
+const params = new URLSearchParams(window.location.search);
+const BACKEND_STORAGE_KEY = 'admin.backendUrl';
+const ADMIN_TOKEN_STORAGE_KEY = 'admin.token';
+const backendOverride = params.get('backend');
+if (backendOverride) {
+  try {
+    window.localStorage.setItem(BACKEND_STORAGE_KEY, backendOverride);
+  } catch (err) {
+    console.warn('failed to persist backend override', err);
+  }
+}
+let storedBackend = '';
+try {
+  storedBackend = window.localStorage.getItem(BACKEND_STORAGE_KEY) || '';
+} catch (err) {
+  storedBackend = '';
+}
+const API = resolveBackendBase(backendOverride || storedBackend || '');
+try {
+  window.localStorage.setItem(BACKEND_STORAGE_KEY, API);
+} catch (err) {
+  // ignore storage failures
+}
 const API_ORIGIN = (() => {
   try {
     return new URL(API).origin;
@@ -28,6 +63,35 @@ const API_ORIGIN = (() => {
   }
 })();
 const statusEl = document.getElementById('status');
+const setupStatusEl = document.getElementById('setup-status');
+const setupAlertEl = document.getElementById('setup-alert');
+const tabButtons = Array.from(document.querySelectorAll('.tab-bar .tab'));
+const tabPanels = Array.from(document.querySelectorAll('.tab-panel'));
+const credentialsForm = document.getElementById('credentials-form');
+const credentialsClientIdInput = document.getElementById('credentials-client-id');
+const credentialsSecretInput = document.getElementById('credentials-client-secret');
+const credentialsSecretHint = document.getElementById('credentials-secret-hint');
+const credentialsRedirectInput = document.getElementById('credentials-redirect');
+const credentialsBotRedirectInput = document.getElementById('credentials-bot-redirect');
+const scopesForm = document.getElementById('scopes-form');
+const twitchScopesInput = document.getElementById('twitch-scopes-input');
+const botScopesInput = document.getElementById('bot-scopes-input');
+const advancedForm = document.getElementById('advanced-form');
+const adminTokenInput = document.getElementById('admin-token-input');
+const adminTokenSaveBtn = document.getElementById('admin-token-save');
+const backendUrlInput = document.getElementById('backend-url-input');
+const backendUrlSaveBtn = document.getElementById('backend-url-save');
+const setupToggleBtn = document.getElementById('setup-complete-toggle');
+const state = {
+  systemConfig: null,
+  adminToken: (() => {
+    try {
+      return window.localStorage.getItem(ADMIN_TOKEN_STORAGE_KEY) || '';
+    } catch (err) {
+      return '';
+    }
+  })(),
+};
 const channelListEl = document.getElementById('channel-list');
 const treeEl = document.getElementById('channel-tree');
 const botPanelEl = document.getElementById('bot-panel');
@@ -48,6 +112,293 @@ const botScopeCustomInput = document.getElementById('bot-scope-custom');
 const botConsoleLog = document.getElementById('bot-console-log');
 const botConsoleClearBtn = document.getElementById('bot-console-clear');
 const botConsoleStatus = document.getElementById('bot-console-status');
+
+function adminHeaders(extra = {}) {
+  const headers = new Headers(extra);
+  if (state.adminToken) {
+    headers.set('X-Admin-Token', state.adminToken);
+  }
+  return headers;
+}
+
+function arraysEqual(a, b) {
+  if (!Array.isArray(a) || !Array.isArray(b)) return false;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
+function parseScopesInput(value) {
+  return value
+    .split(/\s+/)
+    .map(scope => scope.trim())
+    .filter(Boolean);
+}
+
+function setSetupStatus(text, variant) {
+  if (!setupStatusEl) return;
+  setupStatusEl.textContent = text;
+  setupStatusEl.classList.remove('ok', 'warn', 'error');
+  if (variant) {
+    setupStatusEl.classList.add(variant);
+  }
+}
+
+function showSetupAlert(message, variant = 'info') {
+  if (!setupAlertEl) return;
+  if (!message) {
+    setupAlertEl.hidden = true;
+    setupAlertEl.textContent = '';
+    setupAlertEl.className = 'notice';
+    return;
+  }
+  setupAlertEl.hidden = false;
+  setupAlertEl.textContent = message;
+  setupAlertEl.className = `notice ${variant}`;
+}
+
+function updateAdminToken(token) {
+  state.adminToken = token || '';
+  if (adminTokenInput && adminTokenInput.value !== state.adminToken) {
+    adminTokenInput.value = state.adminToken;
+  }
+  if (setupToggleBtn) {
+    setupToggleBtn.disabled = !state.adminToken;
+  }
+  try {
+    if (state.adminToken) {
+      window.localStorage.setItem(ADMIN_TOKEN_STORAGE_KEY, state.adminToken);
+    } else {
+      window.localStorage.removeItem(ADMIN_TOKEN_STORAGE_KEY);
+    }
+  } catch (err) {
+    // ignore storage issues
+  }
+}
+
+function updateSetupToggleLabel() {
+  if (!setupToggleBtn) return;
+  if (state.systemConfig && state.systemConfig.setup_complete) {
+    setupToggleBtn.textContent = 'Lock deployment';
+  } else {
+    setupToggleBtn.textContent = 'Unlock deployment';
+  }
+}
+
+function applySystemConfig(config) {
+  state.systemConfig = config || null;
+  const complete = Boolean(state.systemConfig && state.systemConfig.setup_complete);
+  setSetupStatus(complete ? 'setup: complete' : 'setup: locked', complete ? 'ok' : 'warn');
+  updateSetupToggleLabel();
+
+  if (credentialsClientIdInput) {
+    credentialsClientIdInput.value = state.systemConfig?.twitch_client_id || '';
+  }
+  if (credentialsRedirectInput) {
+    credentialsRedirectInput.value = state.systemConfig?.twitch_redirect_uri || '';
+  }
+  if (credentialsBotRedirectInput) {
+    credentialsBotRedirectInput.value = state.systemConfig?.bot_redirect_uri || '';
+  }
+  if (credentialsSecretInput) {
+    credentialsSecretInput.value = '';
+  }
+  if (credentialsSecretHint) {
+    if (state.systemConfig?.twitch_client_secret_set) {
+      credentialsSecretHint.textContent = 'Secret stored securely. Leave blank to keep the current value.';
+    } else {
+      credentialsSecretHint.textContent = 'No client secret stored yet.';
+    }
+  }
+  if (twitchScopesInput) {
+    twitchScopesInput.value = (state.systemConfig?.twitch_scopes || []).join('\n');
+  }
+  if (botScopesInput) {
+    botScopesInput.value = (state.systemConfig?.bot_app_scopes || []).join('\n');
+  }
+  if (backendUrlInput) {
+    backendUrlInput.value = API;
+  }
+  botScopeCatalog = new Set(getDefaultBotScopes());
+}
+
+async function loadSystemConfig() {
+  setSetupStatus('setup: loading…');
+  try {
+    const res = await fetch(`${API}/system/config`);
+    if (!res.ok) {
+      throw new Error(`status ${res.status}`);
+    }
+    const data = await res.json();
+    applySystemConfig(data);
+    showSetupAlert('');
+    return data;
+  } catch (err) {
+    console.error('failed to load system config', err);
+    setSetupStatus('setup: error', 'error');
+    showSetupAlert('Unable to load system configuration from the backend.', 'error');
+    throw err;
+  }
+}
+
+async function saveSystemConfig(patch) {
+  if (!state.adminToken) {
+    showSetupAlert('Enter the admin API token before updating settings.', 'warn');
+    throw new Error('admin token required');
+  }
+  try {
+    const res = await fetch(`${API}/system/config`, {
+      method: 'PUT',
+      headers: adminHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify(patch || {}),
+    });
+    if (!res.ok) {
+      let detail = `status ${res.status}`;
+      try {
+        const payload = await res.json();
+        if (payload && typeof payload.detail === 'string') {
+          detail = payload.detail;
+        }
+      } catch (err) {
+        // ignore parse errors
+      }
+      throw new Error(detail);
+    }
+    const data = await res.json();
+    applySystemConfig(data);
+    showSetupAlert('Settings saved successfully.', 'info');
+    return data;
+  } catch (err) {
+    console.error('failed to save system config', err);
+    showSetupAlert(err instanceof Error ? err.message : 'Failed to save configuration.', 'error');
+    throw err;
+  }
+}
+
+async function handleCredentialsSubmit(event) {
+  event.preventDefault();
+  if (!state.systemConfig) {
+    state.systemConfig = {};
+  }
+  const patch = {};
+  if (credentialsClientIdInput) {
+    const clientId = credentialsClientIdInput.value.trim();
+    if ((state.systemConfig.twitch_client_id || '') !== clientId) {
+      patch.twitch_client_id = clientId || null;
+    }
+  }
+  if (credentialsSecretInput) {
+    const secret = credentialsSecretInput.value.trim();
+    if (secret) {
+      patch.twitch_client_secret = secret;
+    }
+  }
+  if (credentialsRedirectInput) {
+    const redirect = credentialsRedirectInput.value.trim();
+    if ((state.systemConfig.twitch_redirect_uri || '') !== redirect) {
+      patch.twitch_redirect_uri = redirect || null;
+    }
+  }
+  if (credentialsBotRedirectInput) {
+    const botRedirect = credentialsBotRedirectInput.value.trim();
+    if ((state.systemConfig.bot_redirect_uri || '') !== botRedirect) {
+      patch.bot_redirect_uri = botRedirect || null;
+    }
+  }
+  if (!Object.keys(patch).length) {
+    showSetupAlert('No credential changes detected.', 'info');
+    return;
+  }
+  await saveSystemConfig(patch);
+  if (credentialsSecretInput) {
+    credentialsSecretInput.value = '';
+  }
+}
+
+async function handleScopesSubmit(event) {
+  event.preventDefault();
+  const ownerScopes = parseScopesInput(twitchScopesInput ? twitchScopesInput.value : '');
+  const botScopes = parseScopesInput(botScopesInput ? botScopesInput.value : '');
+  const patch = {};
+  if (!arraysEqual(ownerScopes, state.systemConfig?.twitch_scopes || [])) {
+    patch.twitch_scopes = ownerScopes;
+  }
+  if (!arraysEqual(botScopes, state.systemConfig?.bot_app_scopes || [])) {
+    patch.bot_app_scopes = botScopes;
+  }
+  if (!Object.keys(patch).length) {
+    showSetupAlert('Scopes unchanged.', 'info');
+    return;
+  }
+  await saveSystemConfig(patch);
+  botScopeCatalog = new Set(getDefaultBotScopes());
+  renderBotScopes(getDefaultBotScopes(), { disabled: !currentUser });
+}
+
+function handleBackendUrlSave() {
+  if (!backendUrlInput) return;
+  const value = backendUrlInput.value.trim();
+  try {
+    if (value) {
+      window.localStorage.setItem(BACKEND_STORAGE_KEY, value);
+    } else {
+      window.localStorage.removeItem(BACKEND_STORAGE_KEY);
+    }
+  } catch (err) {
+    console.warn('failed to persist backend url override', err);
+  }
+  showSetupAlert('Backend URL saved. Reloading…', 'info');
+  setTimeout(() => {
+    if (value) {
+      const encoded = encodeURIComponent(value);
+      window.location.href = `${window.location.pathname}?backend=${encoded}`;
+    } else {
+      window.location.href = window.location.pathname;
+    }
+  }, 300);
+}
+
+async function handleSetupToggle() {
+  if (!state.systemConfig) return;
+  const target = !state.systemConfig.setup_complete;
+  if (!setupToggleBtn) {
+    await saveSystemConfig({ setup_complete: target });
+    return;
+  }
+  const previousLabel = setupToggleBtn.textContent;
+  setupToggleBtn.disabled = true;
+  try {
+    await saveSystemConfig({ setup_complete: target });
+    if (state.systemConfig && state.systemConfig.setup_complete) {
+      setStatus('status: ok', 'ok');
+      showSetupAlert('Deployment unlocked. Public endpoints are now available.', 'info');
+      init();
+      refreshBotControls().catch(err => {
+        console.error('failed to prepare bot controls', err);
+      });
+    } else {
+      setStatus('status: setup required', 'warn');
+      showSetupAlert('Deployment locked. Public endpoints are disabled until setup completes.', 'warn');
+    }
+  } catch (err) {
+    setupToggleBtn.textContent = previousLabel;
+  } finally {
+    setupToggleBtn.disabled = !state.adminToken;
+  }
+}
+
+function setActiveTab(name) {
+  tabButtons.forEach(btn => {
+    const active = btn.dataset.tab === name;
+    btn.classList.toggle('active', active);
+  });
+  tabPanels.forEach(panel => {
+    const active = panel.dataset.panel === name;
+    panel.classList.toggle('active', active);
+  });
+}
 
 const songCache = new Map();
 const userCache = new Map();
@@ -405,10 +756,9 @@ function showBotAlert(message, variant = 'info') {
 }
 
 function getDefaultBotScopes() {
-  const configured = (window.BOT_APP_SCOPES || '')
-    .split(/\s+/)
-    .map(scope => scope.trim())
-    .filter(Boolean);
+  const configured = Array.isArray(state.systemConfig?.bot_app_scopes)
+    ? state.systemConfig.bot_app_scopes.filter(scope => typeof scope === 'string').map(scope => scope.trim()).filter(Boolean)
+    : [];
   const base = ['user:read:chat', 'user:write:chat', 'user:bot'];
   const unique = new Set([...base, ...configured]);
   return Array.from(unique);
@@ -715,12 +1065,11 @@ function addCustomScope() {
 }
 
 function buildLoginScopes() {
-  const configured = (window.BOT_APP_SCOPES || window.TWITCH_SCOPES || '')
-    .split(/\s+/)
-    .map(scope => scope.trim())
-    .filter(Boolean);
+  const configured = Array.isArray(state.systemConfig?.twitch_scopes)
+    ? state.systemConfig.twitch_scopes.filter(scope => typeof scope === 'string').map(scope => scope.trim()).filter(Boolean)
+    : [];
   const scopes = configured.length
-    ? configured
+    ? configured.slice()
     : ['user:read:chat', 'user:write:chat', 'user:bot'];
   if (!scopes.includes('user:read:email')) {
     scopes.push('user:read:email');
@@ -729,7 +1078,7 @@ function buildLoginScopes() {
 }
 
 function startOwnerLogin() {
-  const client = window.TWITCH_CLIENT_ID || '';
+  const client = state.systemConfig?.twitch_client_id || '';
   if (!client) {
     alert('Twitch OAuth is not configured.');
     return;
@@ -895,7 +1244,7 @@ async function logoutOwner() {
   }
 }
 
-async function initBotControls() {
+function initBotControls() {
   if (!botPanelEl || !botGuardEl) return;
   botScopeCatalog = new Set(getDefaultBotScopes());
   renderBotScopes(getDefaultBotScopes(), { disabled: true });
@@ -949,12 +1298,18 @@ async function initBotControls() {
   if (botConsoleClearBtn) {
     botConsoleClearBtn.addEventListener('click', clearBotConsole);
   }
+}
 
+async function refreshBotControls() {
   await handleAuthHash();
   await refreshCurrentUser();
 }
 
 async function init() {
+  if (!state.systemConfig || !state.systemConfig.setup_complete) {
+    setStatus('status: setup required', 'warn');
+    return;
+  }
   setStatus('status: loading…');
   try {
     const channels = await fetchJson('/channels');
@@ -981,8 +1336,60 @@ async function init() {
 }
 
 window.addEventListener('DOMContentLoaded', () => {
-  init();
-  initBotControls().catch(err => {
-    console.error('failed to initialize bot controls', err);
+  setActiveTab('credentials');
+  updateAdminToken(state.adminToken);
+  if (backendUrlInput) {
+    backendUrlInput.value = API;
+  }
+  tabButtons.forEach(btn => {
+    btn.addEventListener('click', () => {
+      const name = btn.dataset.tab || 'credentials';
+      setActiveTab(name);
+    });
   });
+  if (credentialsForm) {
+    credentialsForm.addEventListener('submit', handleCredentialsSubmit);
+  }
+  if (scopesForm) {
+    scopesForm.addEventListener('submit', handleScopesSubmit);
+  }
+  if (advancedForm) {
+    advancedForm.addEventListener('submit', event => {
+      event.preventDefault();
+      const value = adminTokenInput ? adminTokenInput.value.trim() : '';
+      updateAdminToken(value);
+      showSetupAlert('Admin token saved locally.', 'info');
+    });
+  }
+  if (backendUrlSaveBtn) {
+    backendUrlSaveBtn.addEventListener('click', event => {
+      event.preventDefault();
+      handleBackendUrlSave();
+    });
+  }
+  if (setupToggleBtn) {
+    setupToggleBtn.addEventListener('click', async event => {
+      event.preventDefault();
+      await handleSetupToggle();
+    });
+  }
+
+  initBotControls();
+
+  loadSystemConfig()
+    .then(() => {
+      if (state.systemConfig && state.systemConfig.setup_complete) {
+        init();
+        refreshBotControls().catch(err => {
+          console.error('failed to prepare bot controls', err);
+        });
+      } else {
+        setStatus('status: setup required', 'warn');
+        showSetupAlert('Complete the deployment setup to unlock the admin features.', 'warn');
+      }
+    })
+    .catch(err => {
+      console.error('failed to load setup configuration', err);
+      setStatus('status: error', 'error');
+    });
 });

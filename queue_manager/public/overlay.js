@@ -1,6 +1,60 @@
 (function(){
-  const API = window.BACKEND_URL || '';
+  const DEFAULT_BACKEND = (() => {
+    try {
+      const current = new URL(window.location.href);
+      current.port = '7070';
+      current.pathname = '';
+      current.search = '';
+      current.hash = '';
+      return current.toString().replace(/\/$/, '');
+    } catch (err) {
+      return 'http://localhost:7070';
+    }
+  })();
+
+  function resolveBackendBase(value) {
+    const fallback = DEFAULT_BACKEND;
+    if (!value) return fallback;
+    const trimmed = value.trim();
+    if (!trimmed) return fallback;
+    const httpLike = /^https?:\/\//i;
+    try {
+      if (trimmed.startsWith('/')) {
+        return new URL(trimmed, window.location.origin).toString().replace(/\/$/, '');
+      }
+      if (!httpLike.test(trimmed) && !trimmed.includes('://')) {
+        return new URL(`http://${trimmed}`, window.location.origin).toString().replace(/\/$/, '');
+      }
+      return new URL(trimmed, window.location.origin).toString().replace(/\/$/, '');
+    } catch (err) {
+      console.warn('invalid backend URL, falling back to default', err);
+      return fallback;
+    }
+  }
+
   const params = new URLSearchParams(window.location.search);
+  const BACKEND_STORAGE_KEY = 'queue-manager.backendUrl';
+  const backendOverride = params.get('backend') || params.get('api') || '';
+  if (backendOverride) {
+    try {
+      window.localStorage.setItem(BACKEND_STORAGE_KEY, backendOverride);
+    } catch (err) {
+      console.warn('failed to persist backend override', err);
+    }
+  }
+  let storedBackend = '';
+  try {
+    storedBackend = window.localStorage.getItem(BACKEND_STORAGE_KEY) || '';
+  } catch (err) {
+    storedBackend = '';
+  }
+  const API = resolveBackendBase(backendOverride || storedBackend || '');
+  try {
+    window.localStorage.setItem(BACKEND_STORAGE_KEY, API);
+  } catch (err) {
+    // ignore persistence failures
+  }
+
   const channel = params.get('channel');
   const layout = (params.get('layout') || 'full').toLowerCase();
   const theme = (params.get('theme') || 'violet').toLowerCase();
@@ -63,7 +117,37 @@
   let pendingFetch = null;
   let pollTimer = null;
 
-  init();
+  bootstrap();
+
+  async function ensureSetupComplete() {
+    try {
+      const res = await fetch(`${API}/system/status`, { cache: 'no-store' });
+      if (!res.ok) {
+        throw new Error(`status ${res.status}`);
+      }
+      const data = await res.json();
+      if (!data || !data.setup_complete) {
+        showMessage('Deployment setup is incomplete. Finish configuration in the admin panel to unlock overlays.');
+        throw new Error('setup incomplete');
+      }
+    } catch (err) {
+      const isSetupError = err instanceof Error && err.message === 'setup incomplete';
+      if (!isSetupError) {
+        showMessage('Unable to reach the backend API. Check your deployment settings and try again.');
+      }
+      throw err;
+    }
+  }
+
+  async function bootstrap() {
+    try {
+      await ensureSetupComplete();
+    } catch (err) {
+      console.error('Queue overlay unavailable until deployment setup completes.', err);
+      return;
+    }
+    init();
+  }
 
   function init() {
     refreshQueue();

@@ -13,6 +13,84 @@
       <span id="status" class="badge">status: loading…</span>
     </header>
 
+    <section class="card" id="setup-card">
+      <div class="card-head">
+        <h2>Deployment Setup</h2>
+        <span id="setup-status" class="badge">setup: loading…</span>
+      </div>
+      <div id="setup-alert" class="notice" hidden></div>
+      <div class="tab-bar" role="tablist">
+        <button type="button" class="tab active" data-tab="credentials">Credentials</button>
+        <button type="button" class="tab" data-tab="scopes">Scopes</button>
+        <button type="button" class="tab" data-tab="advanced">Advanced</button>
+      </div>
+      <div class="tab-panels">
+        <div class="tab-panel active" data-panel="credentials">
+          <form id="credentials-form" class="form-grid">
+            <label class="field">
+              <span>Twitch Client ID</span>
+              <input type="text" id="credentials-client-id" autocomplete="off" placeholder="client id" />
+            </label>
+            <label class="field">
+              <span>Twitch Client Secret</span>
+              <input type="password" id="credentials-client-secret" autocomplete="new-password" placeholder="leave blank to keep current" />
+              <span id="credentials-secret-hint" class="form-hint"></span>
+            </label>
+            <label class="field">
+              <span>Owner Redirect URI</span>
+              <input type="text" id="credentials-redirect" autocomplete="off" placeholder="https://admin.example.com/auth/callback" />
+            </label>
+            <label class="field">
+              <span>Bot Redirect URI</span>
+              <input type="text" id="credentials-bot-redirect" autocomplete="off" placeholder="https://admin.example.com/bot/callback" />
+            </label>
+            <div class="form-actions">
+              <button type="submit" id="credentials-save">Save credentials</button>
+            </div>
+          </form>
+        </div>
+        <div class="tab-panel" data-panel="scopes">
+          <form id="scopes-form" class="form-grid">
+            <label class="field">
+              <span>Owner OAuth scopes</span>
+              <textarea id="twitch-scopes-input" rows="3" placeholder="channel:bot channel:read:subscriptions"></textarea>
+              <span class="form-hint">Separate scopes with spaces or new lines.</span>
+            </label>
+            <label class="field">
+              <span>Bot token scopes</span>
+              <textarea id="bot-scopes-input" rows="3" placeholder="user:read:chat user:write:chat user:bot"></textarea>
+            </label>
+            <div class="form-actions">
+              <button type="submit" id="scopes-save">Save scopes</button>
+            </div>
+          </form>
+        </div>
+        <div class="tab-panel" data-panel="advanced">
+          <form id="advanced-form" class="form-grid">
+            <label class="field">
+              <span>Admin API token</span>
+              <input type="password" id="admin-token-input" autocomplete="off" placeholder="required to edit settings" />
+              <span class="form-hint">Stored locally in this browser only.</span>
+            </label>
+            <div class="form-actions">
+              <button type="submit" id="admin-token-save">Save admin token</button>
+            </div>
+            <label class="field">
+              <span>Backend API URL</span>
+              <input type="text" id="backend-url-input" autocomplete="off" placeholder="http://localhost:7070" />
+              <span class="form-hint">Optional override stored locally for this browser.</span>
+            </label>
+            <div class="form-actions">
+              <button type="button" id="backend-url-save">Save backend URL</button>
+            </div>
+            <div class="form-actions">
+              <button type="button" id="setup-complete-toggle">Unlock deployment</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </section>
+
     <section class="card">
       <h2>Registered Channels</h2>
       <div id="channel-list" class="channel-list"></div>
@@ -88,7 +166,6 @@
     </section>
   </div>
 
-  <script src="config.js"></script>
   <script src="admin.js"></script>
 </body>
 </html>

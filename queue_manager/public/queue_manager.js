@@ -1,4 +1,126 @@
-const API = window.BACKEND_URL;
+const DEFAULT_BACKEND = (() => {
+  try {
+    const current = new URL(window.location.href);
+    current.port = '7070';
+    current.pathname = '';
+    current.search = '';
+    current.hash = '';
+    return current.toString().replace(/\/$/, '');
+  } catch (err) {
+    return 'http://localhost:7070';
+  }
+})();
+
+function resolveBackendBase(value) {
+  const fallback = DEFAULT_BACKEND;
+  if (!value) return fallback;
+  const trimmed = value.trim();
+  if (!trimmed) return fallback;
+  const httpLike = /^https?:\/\//i;
+  try {
+    if (trimmed.startsWith('/')) {
+      return new URL(trimmed, window.location.origin).toString().replace(/\/$/, '');
+    }
+    if (!httpLike.test(trimmed) && !trimmed.includes('://')) {
+      return new URL(`http://${trimmed}`, window.location.origin).toString().replace(/\/$/, '');
+    }
+    return new URL(trimmed, window.location.origin).toString().replace(/\/$/, '');
+  } catch (err) {
+    console.warn('invalid backend URL, falling back to default', err);
+    return fallback;
+  }
+}
+
+const params = new URLSearchParams(window.location.search);
+const BACKEND_STORAGE_KEY = 'queue-manager.backendUrl';
+const backendOverride = params.get('backend');
+if (backendOverride) {
+  try {
+    window.localStorage.setItem(BACKEND_STORAGE_KEY, backendOverride);
+  } catch (err) {
+    console.warn('failed to persist backend override', err);
+  }
+}
+let storedBackend = '';
+try {
+  storedBackend = window.localStorage.getItem(BACKEND_STORAGE_KEY) || '';
+} catch (err) {
+  storedBackend = '';
+}
+const API = resolveBackendBase(backendOverride || storedBackend || '');
+try {
+  window.localStorage.setItem(BACKEND_STORAGE_KEY, API);
+} catch (err) {
+  // ignore
+}
+const state = {
+  systemConfig: null,
+};
+const setupGuardEl = document.getElementById('setup-guard');
+
+function showSetupGuard(message) {
+  if (!setupGuardEl) return;
+  if (!message) {
+    setupGuardEl.hidden = true;
+    setupGuardEl.textContent = '';
+  } else {
+    setupGuardEl.hidden = false;
+    setupGuardEl.textContent = message;
+  }
+}
+
+async function ensureSetupComplete() {
+  try {
+    const res = await fetch(`${API}/system/status`);
+    if (!res.ok) {
+      throw new Error(`status ${res.status}`);
+    }
+    const data = await res.json();
+    if (!data || !data.setup_complete) {
+      showSetupGuard('Deployment setup is incomplete. Access is locked until an administrator finishes configuration.');
+      throw new Error('setup incomplete');
+    }
+    showSetupGuard('');
+  } catch (err) {
+    if (!setupGuardEl?.textContent) {
+      showSetupGuard('Unable to reach the backend API. Please verify the deployment.');
+    }
+    throw err;
+  }
+}
+
+async function loadSystemConfig() {
+  try {
+    const res = await fetch(`${API}/system/config`);
+    if (!res.ok) {
+      throw new Error(`status ${res.status}`);
+    }
+    state.systemConfig = await res.json();
+    return state.systemConfig;
+  } catch (err) {
+    console.error('failed to load system config', err);
+    state.systemConfig = null;
+    throw err;
+  }
+}
+
+function getOwnerScopes() {
+  if (Array.isArray(state.systemConfig?.twitch_scopes)) {
+    return state.systemConfig.twitch_scopes.filter(scope => typeof scope === 'string').map(scope => scope.trim()).filter(Boolean);
+  }
+  return [];
+}
+
+function getBotScopes() {
+  if (Array.isArray(state.systemConfig?.bot_app_scopes)) {
+    return state.systemConfig.bot_app_scopes.filter(scope => typeof scope === 'string').map(scope => scope.trim()).filter(Boolean);
+  }
+  return [];
+}
+
+function getTwitchClientId() {
+  return state.systemConfig?.twitch_client_id || '';
+}
 let channelName = '';
 let userLogin = '';
 let userInfo = null;
@@ -1717,6 +1839,9 @@ function buildOverlayUrl() {
   base.searchParams.set('channel', channelName);
   base.searchParams.set('layout', overlayLayoutSelect.value);
   base.searchParams.set('theme', overlayThemeSelect.value);
+  if (API) {
+    base.searchParams.set('backend', API);
+  }
   if (config.detail && overlayDetailSelect) {
     base.searchParams.set('detail', overlayDetailSelect.value || 'summary');
   }
@@ -1842,11 +1967,9 @@ function initOverlayBuilder() {
   updateOverlayBuilder();
 }
 
-initOverlayBuilder();
-
 // ===== Landing page & login =====
 function buildLoginScopes() {
-  const configured = (window.TWITCH_SCOPES || '').split(/\s+/).filter(Boolean);
+  const configured = getOwnerScopes();
   const scopes = configured.length ? configured : ['channel:bot', 'channel:read:subscriptions', 'channel:read:vips'];
   if (!scopes.includes('user:read:email')) {
     scopes.push('user:read:email');
@@ -1854,18 +1977,21 @@ function buildLoginScopes() {
   return scopes;
 }
 
-qs('login-btn').onclick = () => {
-  const client = window.TWITCH_CLIENT_ID || '';
-  if (!client) {
-    alert('Twitch OAuth is not configured.');
-    return;
-  }
-  const scopes = buildLoginScopes();
-  const redirectUri = encodeURIComponent(window.location.href.split('#')[0]);
-  const scopeParam = encodeURIComponent(scopes.join(' '));
-  const url = `https://id.twitch.tv/oauth2/authorize?response_type=token&client_id=${client}&redirect_uri=${redirectUri}&scope=${scopeParam}&force_verify=true`;
-  location.href = url;
-};
+const loginButton = qs('login-btn');
+if (loginButton) {
+  loginButton.onclick = () => {
+    const client = getTwitchClientId();
+    if (!client) {
+      alert('Twitch OAuth is not configured.');
+      return;
+    }
+    const scopes = buildLoginScopes();
+    const redirectUri = encodeURIComponent(window.location.href.split('#')[0]);
+    const scopeParam = encodeURIComponent(scopes.join(' '));
+    const url = `https://id.twitch.tv/oauth2/authorize?response_type=token&client_id=${client}&redirect_uri=${redirectUri}&scope=${scopeParam}&force_verify=true`;
+    location.href = url;
+  };
+}
 
 async function updateRegButton() {
   const btn = qs('reg-btn');
@@ -2242,4 +2368,34 @@ async function initToken() {
   }
 }
 
-initToken();
+async function bootstrap() {
+  try {
+    await ensureSetupComplete();
+  } catch (err) {
+    console.error('Queue Manager unavailable until deployment setup is complete.', err);
+    return;
+  }
+
+  try {
+    await loadSystemConfig();
+    showSetupGuard('');
+  } catch (err) {
+    showSetupGuard('Unable to load deployment configuration. Please try again later or finish the setup in the admin panel.');
+    console.error('Failed to load system configuration', err);
+    return;
+  }
+
+  try {
+    initOverlayBuilder();
+  } catch (err) {
+    console.error('Failed to initialise overlay builder', err);
+  }
+
+  try {
+    await initToken();
+  } catch (err) {
+    console.error('Failed to initialise Queue Manager session', err);
+  }
+}
+
+bootstrap();

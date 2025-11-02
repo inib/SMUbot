@@ -121,6 +121,111 @@ a:hover {
   cursor: not-allowed;
 }
 
+.notice {
+  background: #1e2233;
+  border: 1px solid #2c3147;
+  border-radius: 8px;
+  padding: 12px;
+  color: var(--muted);
+}
+
+.notice.info {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.notice.warn {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
+.notice.error {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.tab-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.tab {
+  background: #1a1d2a;
+  border: 1px solid #23273a;
+  border-radius: 999px;
+  padding: 6px 14px;
+  color: var(--muted);
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.tab:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.tab.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.tab-panels {
+  position: relative;
+}
+
+.tab-panel {
+  display: none;
+}
+
+.tab-panel.active {
+  display: block;
+}
+
+.form-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.field span {
+  display: block;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.field input,
+.field textarea {
+  width: 100%;
+  border-radius: 8px;
+  border: 1px solid #262a3e;
+  background: #0c0f1a;
+  color: var(--text);
+  padding: 8px 10px;
+  font: inherit;
+}
+
+.field textarea {
+  min-height: 96px;
+  resize: vertical;
+}
+
+.form-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.form-hint {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: 4px;
+}
+
 .card button:not(:disabled):hover {
   background: #2b3047;
   border-color: #3d4466;
