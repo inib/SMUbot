@@ -1,15 +1,16 @@
 (function(){
   const DEFAULT_BACKEND = (() => {
-    try {
-      const current = new URL(window.location.href);
-      current.port = '7070';
-      current.pathname = '';
-      current.search = '';
-      current.hash = '';
-      return current.toString().replace(/\/$/, '');
-    } catch (err) {
-      return 'http://localhost:7070';
+    const configured = window.__SONGBOT_CONFIG__?.backendOrigin;
+    if (typeof configured === 'string') {
+      const normalized = configured.trim().replace(/\/+$, '');
+      if (normalized) {
+        return normalized;
+      }
     }
+    const origin = typeof window !== 'undefined' && window.location && typeof window.location.origin === 'string'
+      ? window.location.origin
+      : '';
+    return origin.replace(/\/+$/, '');
   })();
 
   function resolveBackendBase(value) {
