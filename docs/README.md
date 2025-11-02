@@ -28,6 +28,13 @@ unlocks the API for the bot, queue manager, and public web frontend.
    (the bot uses it to reach the API). Twitch OAuth credentials, bot scopes,
    and overlay settings are now configured inside the Admin panel after the
    services start, so they no longer live in the environment file.
+   When deploying, set `PUBLIC_BACKEND_ORIGIN` to the canonical HTTPS origin of
+   the API (for example `https://api.example.com`). The static web, queue
+   manager, and admin images expose this value through a small `config.js`
+   snippet so browsers can call the backend without relying on localhost
+   defaults. If you prefer to derive per-service subdomains from a shared base
+   domain, that logic can also live in the Nginx entrypoint before the config
+   file is generated.
 2. Start the stack:
    ```bash
    docker-compose --env-file stack.env up --build
