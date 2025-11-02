@@ -1,7 +1,7 @@
 services:
   api:
     build: .
-    container_name: twitch-q-backend
+    container_name: songq-backend-dev
     environment:
       ADMIN_TOKEN: ${ADMIN_TOKEN}
     env_file:
@@ -14,6 +14,7 @@ services:
     build:
       context: .
       dockerfile: bot/Dockerfile
+    container_name: songq-bot-dev
     environment:
       BACKEND_URL: ${BACKEND_URL:-http://api:7070}
       ADMIN_TOKEN: ${ADMIN_TOKEN}
@@ -31,7 +32,7 @@ services:
     build:
       context: .
       dockerfile: web/Dockerfile
-    container_name: songqueue-web
+    container_name: songq-web-dev
     env_file:
       - stack.env
     ports:
@@ -43,7 +44,7 @@ services:
     build:
       context: .
       dockerfile: queue_manager/Dockerfile
-    container_name: songqueue-queue-manager
+    container_name: songq-manager-dev
     env_file:
       - stack.env
     ports:
@@ -55,7 +56,7 @@ services:
     build:
       context: .
       dockerfile: admin/Dockerfile
-    container_name: songqueue-admin
+    container_name: songq-admin-dev
     environment:
       ADMIN_BASIC_AUTH_USERNAME: ${ADMIN_BASIC_AUTH_USERNAME}
       ADMIN_BASIC_AUTH_PASSWORD: ${ADMIN_BASIC_AUTH_PASSWORD}
