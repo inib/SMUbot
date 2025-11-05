@@ -9,7 +9,7 @@ services:
     ports:
       - "${API_PORT:-7070}:7070"
     volumes:
-      - ./data:/data
+      - /mnt/alpenbot-dev/data:/data
   bot:
     build:
       context: .
