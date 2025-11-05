@@ -1,60 +1,29 @@
 (function(){
-  const DEFAULT_BACKEND = (() => {
+  function resolveBackendOrigin() {
     const configured = window.__SONGBOT_CONFIG__?.backendOrigin;
     if (typeof configured === 'string') {
-      const normalized = configured.trim().replace(/\/+$, '');
-      if (normalized) {
-        return normalized;
+      const trimmed = configured.trim();
+      if (trimmed) {
+        return trimmed.replace(/\/+$/, '');
       }
     }
-    const origin = typeof window !== 'undefined' && window.location && typeof window.location.origin === 'string'
-      ? window.location.origin
-      : '';
-    return origin.replace(/\/+$/, '');
-  })();
+    if (typeof window !== 'undefined' && window.location && typeof window.location.origin === 'string') {
+      const origin = window.location.origin;
+      if (origin) {
+        return origin.replace(/\/+$/, '');
+      }
+    }
+    throw new Error('Backend origin is not configured.');
+  }
 
-  function resolveBackendBase(value) {
-    const fallback = DEFAULT_BACKEND;
-    if (!value) return fallback;
-    const trimmed = value.trim();
-    if (!trimmed) return fallback;
-    const httpLike = /^https?:\/\//i;
-    try {
-      if (trimmed.startsWith('/')) {
-        return new URL(trimmed, window.location.origin).toString().replace(/\/$/, '');
-      }
-      if (!httpLike.test(trimmed) && !trimmed.includes('://')) {
-        return new URL(`http://${trimmed}`, window.location.origin).toString().replace(/\/$/, '');
-      }
-      return new URL(trimmed, window.location.origin).toString().replace(/\/$/, '');
-    } catch (err) {
-      console.warn('invalid backend URL, falling back to default', err);
-      return fallback;
-    }
+  let API = '';
+  try {
+    API = resolveBackendOrigin();
+  } catch (err) {
+    console.error('Failed to determine backend origin', err);
   }
 
   const params = new URLSearchParams(window.location.search);
-  const BACKEND_STORAGE_KEY = 'queue-manager.backendUrl';
-  const backendOverride = params.get('backend') || params.get('api') || '';
-  if (backendOverride) {
-    try {
-      window.localStorage.setItem(BACKEND_STORAGE_KEY, backendOverride);
-    } catch (err) {
-      console.warn('failed to persist backend override', err);
-    }
-  }
-  let storedBackend = '';
-  try {
-    storedBackend = window.localStorage.getItem(BACKEND_STORAGE_KEY) || '';
-  } catch (err) {
-    storedBackend = '';
-  }
-  const API = resolveBackendBase(backendOverride || storedBackend || '');
-  try {
-    window.localStorage.setItem(BACKEND_STORAGE_KEY, API);
-  } catch (err) {
-    // ignore persistence failures
-  }
 
   const channel = params.get('channel');
   const layout = (params.get('layout') || 'full').toLowerCase();

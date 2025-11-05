@@ -14,6 +14,11 @@ chmod 640 /etc/nginx/.htpasswd
 unset ADMIN_BASIC_AUTH_PASSWORD
 
 BACKEND_ORIGIN="${PUBLIC_BACKEND_ORIGIN:-}"
+if [ -z "$BACKEND_ORIGIN" ]; then
+  echo "Error: PUBLIC_BACKEND_ORIGIN environment variable must be set." >&2
+  exit 1
+fi
+BACKEND_ORIGIN=$(printf '%s' "$BACKEND_ORIGIN" | sed -e 's#/*$##')
 ESCAPED_BACKEND_ORIGIN=$(printf '%s' "$BACKEND_ORIGIN" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')
 
 mkdir -p /usr/share/nginx/html
