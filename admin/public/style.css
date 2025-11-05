@@ -208,6 +208,12 @@ a:hover {
   font: inherit;
 }
 
+.field input[readonly] {
+  background: #10162d;
+  color: var(--muted);
+  cursor: default;
+}
+
 .field textarea {
   min-height: 96px;
   resize: vertical;
@@ -407,6 +413,18 @@ a:hover {
   display: flex;
   gap: 12px;
   flex-wrap: wrap;
+}
+
+.bot-meta .value.ok {
+  color: var(--ok);
+}
+
+.bot-meta .value.error {
+  color: var(--danger);
+}
+
+.bot-meta .value.muted {
+  color: var(--muted);
 }
 
 .bot-meta-block {

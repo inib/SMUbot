@@ -1,5 +1,5 @@
 from __future__ import annotations
-import os, re, asyncio, json, yaml
+import os, re, asyncio, json, yaml, logging
 from typing import Optional, Dict, List, Tuple, Callable, Awaitable, Set
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,6 +11,16 @@ from twitchio.ext import commands
 from twitchio.payloads import TokenRefreshedPayload
 
 # ---- Env ----
+# Configure logging before other components so that early startup messages are visible.
+LOG_LEVEL = os.getenv("BOT_LOG_LEVEL", "INFO").upper()
+logger = logging.getLogger("songbot.bot")
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+    logger.addHandler(handler)
+logger.setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
+logger.propagate = False
+
 # Full URL of the backend API, defaulting to the docker-compose service name.
 BACKEND_URL = os.getenv('BACKEND_URL', 'http://api:7070')
 # Token used for privileged requests to the backend.
@@ -277,6 +287,22 @@ async def push_console_event(
     event: Optional[str] = None,
     metadata: Optional[Dict[str, object]] = None,
 ):
+    level_key = (level or "").lower()
+    log_level = {
+        "debug": logging.DEBUG,
+        "info": logging.INFO,
+        "warning": logging.WARNING,
+        "warn": logging.WARNING,
+        "error": logging.ERROR,
+        "critical": logging.CRITICAL,
+    }.get(level_key, logging.INFO)
+    extra = ""
+    if metadata:
+        try:
+            extra = f" | {json.dumps(metadata, sort_keys=True)}"
+        except Exception:
+            extra = f" | {metadata}"
+    logger.log(log_level, f"{message}{extra}")
     meta = dict(metadata or {})
     if event:
         meta.setdefault('event', event)
