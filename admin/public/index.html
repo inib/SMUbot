@@ -127,12 +127,17 @@
             <span class="label">Token expires</span>
             <span id="bot-expiry" class="value">—</span>
           </div>
+          <div class="bot-meta-block">
+            <span class="label">Token status</span>
+            <span id="bot-token-status" class="value">Not generated</span>
+          </div>
         </div>
         <div id="bot-alert" class="bot-alert" hidden></div>
         <div class="bot-settings">
           <label class="field">
             <span>Bot account login</span>
-            <input type="text" id="bot-account-login" placeholder="Login" autocomplete="off"/>
+            <input type="text" id="bot-account-login" placeholder="Login" autocomplete="off" readonly/>
+            <span class="form-hint">Set automatically after generating a bot token.</span>
           </label>
           <label class="toggle">
             <input type="checkbox" id="bot-enabled"/>

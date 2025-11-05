@@ -79,6 +79,7 @@ class BotConfigApiTests(unittest.TestCase):
         self.assertIsNone(data.get("login"))
         self.assertFalse(data["enabled"])
         self.assertEqual(data["scopes"], backend_app.get_bot_app_scopes())
+        self.assertFalse(data["token_present"])
 
     def test_existing_config_missing_required_scopes_is_healed(self) -> None:
         db = backend_app.SessionLocal()
@@ -118,6 +119,7 @@ class BotConfigApiTests(unittest.TestCase):
         data = response.json()
         self.assertTrue(data["enabled"])
         self.assertEqual(data["scopes"], payload["scopes"])
+        self.assertFalse(data["token_present"])
 
     def test_fetch_config_includes_tokens_for_admin_header(self) -> None:
         db = backend_app.SessionLocal()
@@ -143,6 +145,7 @@ class BotConfigApiTests(unittest.TestCase):
         self.assertEqual(data["client_id"], "client")
         self.assertEqual(data["client_secret"], "secret")
         self.assertEqual(data["bot_user_id"], "1234")
+        self.assertTrue(data["token_present"])
 
     def test_fetch_config_hides_tokens_for_admin_session(self) -> None:
         db = backend_app.SessionLocal()
@@ -175,6 +178,7 @@ class BotConfigApiTests(unittest.TestCase):
         self.assertNotIn("client_id", data)
         self.assertNotIn("client_secret", data)
         self.assertNotIn("bot_user_id", data)
+        self.assertTrue(data["token_present"])
 
     def test_bot_oauth_start_returns_authorize_url(self) -> None:
         self._update_settings(

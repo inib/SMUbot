@@ -71,6 +71,7 @@ const botOwnerEl = document.getElementById('bot-owner');
 const botAccountEl = document.getElementById('bot-account');
 const botExpiryEl = document.getElementById('bot-expiry');
 const botAlertEl = document.getElementById('bot-alert');
+const botTokenStatusEl = document.getElementById('bot-token-status');
 const botAccountInput = document.getElementById('bot-account-login');
 const botEnabledInput = document.getElementById('bot-enabled');
 const botScopeList = document.getElementById('bot-scope-list');
@@ -912,6 +913,7 @@ function applyBotConfig(config) {
     if (botAccountInput) {
       botAccountInput.disabled = !hasConfig;
       botAccountInput.value = hasConfig ? (config.login || '') : '';
+      botAccountInput.readOnly = true;
     }
     if (botEnabledInput) {
       botEnabledInput.disabled = !hasConfig;
@@ -947,6 +949,19 @@ function applyBotConfig(config) {
     botAuthorizeBtn.textContent = hasConfig && config && config.expires_at
       ? 'Refresh Bot Token'
       : 'Generate Bot Token';
+  }
+  if (botTokenStatusEl) {
+    if (!hasConfig) {
+      botTokenStatusEl.textContent = 'Unknown';
+      botTokenStatusEl.classList.remove('ok', 'error');
+      botTokenStatusEl.classList.add('muted');
+    } else {
+      const tokenPresent = Boolean(config.token_present || config.access_token);
+      botTokenStatusEl.textContent = tokenPresent ? 'Stored' : 'Missing';
+      botTokenStatusEl.classList.remove('muted');
+      botTokenStatusEl.classList.toggle('ok', tokenPresent);
+      botTokenStatusEl.classList.toggle('error', !tokenPresent);
+    }
   }
 }
 
@@ -1207,11 +1222,8 @@ function initBotControls() {
     botAuthorizeBtn.addEventListener('click', startBotOAuthFlow);
   }
   if (botAccountInput) {
-    botAccountInput.addEventListener('change', () => {
-      if (suspendBotInputs || !currentUser) return;
-      const value = botAccountInput.value.trim();
-      updateBotConfig({ login: value, display_name: value });
-    });
+    botAccountInput.readOnly = true;
+    botAccountInput.title = 'Set automatically after generating a bot token.';
   }
   if (botEnabledInput) {
     botEnabledInput.addEventListener('change', () => {

@@ -668,6 +668,7 @@ class BotConfigOut(BaseModel):
     scopes: List[str] = Field(default_factory=list)
     enabled: bool
     expires_at: Optional[datetime]
+    token_present: bool = False
     access_token: Optional[str] = None
     refresh_token: Optional[str] = None
     client_id: Optional[str] = None
@@ -1477,6 +1478,7 @@ def _serialize_bot_config(cfg: BotConfig, *, include_tokens: bool = False) -> Di
         "scopes": scopes,
         "enabled": bool(cfg.enabled),
         "expires_at": cfg.expires_at,
+        "token_present": bool(cfg.access_token and cfg.refresh_token),
     }
     if include_tokens:
         data["access_token"] = cfg.access_token
