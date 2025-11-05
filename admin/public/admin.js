@@ -1,60 +1,27 @@
-const DEFAULT_BACKEND = (() => {
+function resolveBackendOrigin() {
   const configured = window.__SONGBOT_CONFIG__?.backendOrigin;
   if (typeof configured === 'string') {
-    const normalized = configured.trim().replace(/\/+$, '');
-    if (normalized) {
-      return normalized;
+    const trimmed = configured.trim();
+    if (trimmed) {
+      return trimmed.replace(/\/+$/, '');
     }
   }
-  const origin = typeof window !== 'undefined' && window.location && typeof window.location.origin === 'string'
-    ? window.location.origin
-    : '';
-  return origin.replace(/\/+$/, '');
-})();
-
-function resolveBackendBase(value) {
-  const fallback = DEFAULT_BACKEND;
-  if (!value) return fallback;
-  const trimmed = value.trim();
-  if (!trimmed) return fallback;
-  const httpLike = /^https?:\/\//i;
-  try {
-    if (trimmed.startsWith('/')) {
-      return new URL(trimmed, window.location.origin).toString().replace(/\/$/, '');
+  if (typeof window !== 'undefined' && window.location && typeof window.location.origin === 'string') {
+    const origin = window.location.origin;
+    if (origin) {
+      return origin.replace(/\/+$/, '');
     }
-    if (!httpLike.test(trimmed) && !trimmed.includes('://')) {
-      return new URL(`http://${trimmed}`, window.location.origin).toString().replace(/\/$/, '');
-    }
-    return new URL(trimmed, window.location.origin).toString().replace(/\/$/, '');
-  } catch (err) {
-    console.warn('invalid BACKEND_URL, falling back to default', err);
-    return fallback;
   }
+  throw new Error('Backend origin is not configured.');
 }
 
-const params = new URLSearchParams(window.location.search);
-const BACKEND_STORAGE_KEY = 'admin.backendUrl';
+let API = '';
+try {
+  API = resolveBackendOrigin();
+} catch (err) {
+  console.error('Failed to determine backend origin', err);
+}
 const ADMIN_TOKEN_STORAGE_KEY = 'admin.token';
-const backendOverride = params.get('backend');
-if (backendOverride) {
-  try {
-    window.localStorage.setItem(BACKEND_STORAGE_KEY, backendOverride);
-  } catch (err) {
-    console.warn('failed to persist backend override', err);
-  }
-}
-let storedBackend = '';
-try {
-  storedBackend = window.localStorage.getItem(BACKEND_STORAGE_KEY) || '';
-} catch (err) {
-  storedBackend = '';
-}
-const API = resolveBackendBase(backendOverride || storedBackend || '');
-try {
-  window.localStorage.setItem(BACKEND_STORAGE_KEY, API);
-} catch (err) {
-  // ignore storage failures
-}
 const API_ORIGIN = (() => {
   try {
     return new URL(API).origin;
@@ -221,6 +188,9 @@ function applySystemConfig(config) {
   }
   if (backendUrlInput) {
     backendUrlInput.value = API;
+    backendUrlInput.readOnly = true;
+    backendUrlInput.classList.add('readonly');
+    backendUrlInput.title = 'Backend URL is managed by the deployment configuration.';
   }
   botScopeCatalog = new Set(getDefaultBotScopes());
 }
@@ -336,29 +306,6 @@ async function handleScopesSubmit(event) {
   await saveSystemConfig(patch);
   botScopeCatalog = new Set(getDefaultBotScopes());
   renderBotScopes(getDefaultBotScopes(), { disabled: !currentUser });
-}
-
-function handleBackendUrlSave() {
-  if (!backendUrlInput) return;
-  const value = backendUrlInput.value.trim();
-  try {
-    if (value) {
-      window.localStorage.setItem(BACKEND_STORAGE_KEY, value);
-    } else {
-      window.localStorage.removeItem(BACKEND_STORAGE_KEY);
-    }
-  } catch (err) {
-    console.warn('failed to persist backend url override', err);
-  }
-  showSetupAlert('Backend URL saved. Reloading…', 'info');
-  setTimeout(() => {
-    if (value) {
-      const encoded = encodeURIComponent(value);
-      window.location.href = `${window.location.pathname}?backend=${encoded}`;
-    } else {
-      window.location.href = window.location.pathname;
-    }
-  }, 300);
 }
 
 async function handleSetupToggle() {
@@ -1341,6 +1288,9 @@ window.addEventListener('DOMContentLoaded', () => {
   updateAdminToken(state.adminToken);
   if (backendUrlInput) {
     backendUrlInput.value = API;
+    backendUrlInput.readOnly = true;
+    backendUrlInput.classList.add('readonly');
+    backendUrlInput.title = 'Backend URL is managed by the deployment configuration.';
   }
   tabButtons.forEach(btn => {
     btn.addEventListener('click', () => {
@@ -1363,10 +1313,9 @@ window.addEventListener('DOMContentLoaded', () => {
     });
   }
   if (backendUrlSaveBtn) {
-    backendUrlSaveBtn.addEventListener('click', event => {
-      event.preventDefault();
-      handleBackendUrlSave();
-    });
+    backendUrlSaveBtn.disabled = true;
+    backendUrlSaveBtn.textContent = 'Managed by deployment';
+    backendUrlSaveBtn.title = 'Backend URL overrides are no longer supported.';
   }
   if (setupToggleBtn) {
     setupToggleBtn.addEventListener('click', async event => {
