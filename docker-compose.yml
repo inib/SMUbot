@@ -35,6 +35,8 @@ services:
     container_name: songq-web-dev
     env_file:
       - stack.env
+    environment:
+      PUBLIC_BACKEND_ORIGIN: ${PUBLIC_BACKEND_ORIGIN}
     ports:
       - "${WEB_PORT:-7000}:80"
     restart: unless-stopped
@@ -47,6 +49,8 @@ services:
     container_name: songq-manager-dev
     env_file:
       - stack.env
+    environment:
+      PUBLIC_BACKEND_ORIGIN: ${PUBLIC_BACKEND_ORIGIN}
     ports:
       - "${QUEUE_MANAGER_PORT:-7100}:80"
     restart: unless-stopped
@@ -58,6 +62,7 @@ services:
       dockerfile: admin/Dockerfile
     container_name: songq-admin-dev
     environment:
+      PUBLIC_BACKEND_ORIGIN: ${PUBLIC_BACKEND_ORIGIN}
       ADMIN_BASIC_AUTH_USERNAME: ${ADMIN_BASIC_AUTH_USERNAME}
       ADMIN_BASIC_AUTH_PASSWORD: ${ADMIN_BASIC_AUTH_PASSWORD}
     env_file:
