@@ -119,7 +119,6 @@ const eventAutoscrollInput = qs('event-autoscroll');
 const playlistForm = qs('playlist-form');
 const playlistUrlInput = qs('playlist-url');
 const playlistKeywordsInput = qs('playlist-keywords');
-const playlistVisibilitySelect = qs('playlist-visibility');
 const playlistStatusEl = qs('playlist-status');
 const playlistsContainer = qs('playlists');
 
@@ -699,7 +698,6 @@ function setPlaylistStatus(message, isError) {
 function resetPlaylistForm() {
   if (playlistUrlInput) { playlistUrlInput.value = ''; }
   if (playlistKeywordsInput) { playlistKeywordsInput.value = ''; }
-  if (playlistVisibilitySelect) { playlistVisibilitySelect.value = 'public'; }
 }
 
 function formatDuration(seconds) {
@@ -813,7 +811,11 @@ function renderPlaylists(playlists) {
     const meta = document.createElement('div');
     meta.className = 'playlist-meta muted';
     const keywords = (pl.keywords && pl.keywords.length) ? pl.keywords.join(', ') : 'none';
-    meta.textContent = `${pl.item_count} songs • visibility: ${pl.visibility} • keywords: ${keywords}`;
+    const parts = [`${pl.item_count} songs`];
+    if (keywords !== 'none') {
+      parts.push(`keywords: ${keywords}`);
+    }
+    meta.textContent = parts.join(' • ');
     info.appendChild(meta);
     const linkRow = document.createElement('div');
     linkRow.className = 'playlist-meta-link';
@@ -934,14 +936,13 @@ async function fetchPlaylists() {
 
 async function addPlaylist() {
   if (!channelName) { return; }
-  if (!playlistUrlInput || !playlistVisibilitySelect) { return; }
+  if (!playlistUrlInput) { return; }
   const url = playlistUrlInput.value.trim();
   if (!url) {
     setPlaylistStatus('Enter a playlist link to continue.', true);
     return;
   }
   const keywords = parsePlaylistKeywords(playlistKeywordsInput ? playlistKeywordsInput.value : '');
-  const visibility = playlistVisibilitySelect.value || 'public';
   const encodedChannel = encodeURIComponent(channelName);
   const submitBtn = playlistForm ? playlistForm.querySelector('button[type="submit"]') : null;
   if (submitBtn) { submitBtn.disabled = true; }
@@ -952,7 +953,7 @@ async function addPlaylist() {
       method: 'POST',
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url, keywords, visibility }),
+      body: JSON.stringify({ url, keywords }),
     });
     if (!resp.ok) {
       let detail = `Failed to save playlist (status ${resp.status})`;
