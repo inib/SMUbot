@@ -1,7 +1,7 @@
 from __future__ import annotations
 import math
 import contextlib
-from typing import Optional, List, Any, Dict, Mapping, Iterable, Literal
+from typing import Optional, List, Any, Dict, Mapping, Iterable, Literal, Sequence
 from threading import Lock
 import os
 import json
@@ -611,6 +611,12 @@ class ChannelOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class ChannelLiveStatusOut(BaseModel):
+    channel_name: str
+    channel_id: str
+    is_live: bool
 
 
 class ChannelOAuthOut(BaseModel):
@@ -2824,6 +2830,67 @@ def list_channels(db: Session = Depends(get_db)):
         if not channel.bot_state:
             channel.bot_state = get_or_create_bot_state(db, channel.id)
     return channels
+
+
+def _chunk(items: Sequence[str], size: int) -> Iterable[Sequence[str]]:
+    for index in range(0, len(items), size):
+        yield items[index : index + size]
+
+
+@app.get("/channels/live_status", response_model=List[ChannelLiveStatusOut])
+def get_channel_live_status(db: Session = Depends(get_db)):
+    client_id = get_twitch_client_id()
+    if not client_id:
+        raise HTTPException(status_code=503, detail="twitch client id not configured")
+
+    try:
+        token = get_app_access_token()
+    except RuntimeError as exc:  # pragma: no cover - defensive, validated via tests
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    channels = db.query(ActiveChannel.channel_id, ActiveChannel.channel_name).all()
+    if not channels:
+        return []
+
+    headers = {"Authorization": f"Bearer {token}", "Client-Id": client_id}
+    channel_ids = [channel.channel_id for channel in channels if channel.channel_id]
+    live_map: dict[str, bool] = {channel.channel_id: False for channel in channels if channel.channel_id}
+
+    for batch in _chunk(channel_ids, 100):
+        params = [("user_id", channel_id) for channel_id in batch]
+        try:
+            response = requests.get(
+                "https://api.twitch.tv/helix/streams",
+                headers=headers,
+                params=params,
+                timeout=5,
+            )
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            raise HTTPException(status_code=502, detail="twitch live status request failed") from exc
+
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise HTTPException(status_code=502, detail="invalid twitch response") from exc
+
+        data = payload.get("data")
+        if isinstance(data, list):
+            for row in data:
+                user_id = row.get("user_id")
+                if not isinstance(user_id, str):
+                    continue
+                live_map[user_id] = (row.get("type") or "").lower() == "live"
+
+    return [
+        ChannelLiveStatusOut(
+            channel_name=channel.channel_name,
+            channel_id=channel.channel_id,
+            is_live=live_map.get(channel.channel_id, False),
+        )
+        for channel in channels
+    ]
+
 
 @app.post("/channels", response_model=ChannelOut, dependencies=[Depends(require_token)])
 def add_channel(payload: ChannelIn, db: Session = Depends(get_db)):

@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import Mock, patch
 
 from fastapi.testclient import TestClient
 
@@ -140,6 +141,38 @@ class QueueApiTests(unittest.TestCase):
                 backend_app.set_settings(db, self._settings_snapshot)
         finally:
             db.close()
+
+    def test_channel_live_status(self) -> None:
+        db = backend_app.SessionLocal()
+        try:
+            channel_name, _ = _seed_queue_fixture(db)
+        finally:
+            db.close()
+
+        mock_response = Mock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = {
+            "data": [
+                {"user_id": "123", "type": "live"},
+            ]
+        }
+
+        with patch("backend_app.get_app_access_token", return_value="token"), patch(
+            "backend_app.requests.get", return_value=mock_response
+        ):
+            response = self._client.get("/channels/live_status")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(
+            response.json(),
+            [
+                {
+                    "channel_name": channel_name,
+                    "channel_id": "123",
+                    "is_live": True,
+                }
+            ],
+        )
 
     def test_queue_full_coerces_invalid_user_counts(self) -> None:
         db = backend_app.SessionLocal()

@@ -103,9 +103,13 @@ async function loadLandingChannels(manual = false) {
   }
 
   try {
-    const channels = await api('/channels').catch((err) => {
-      throw err;
-    });
+    const [channels, liveStatuses] = await Promise.all([
+      api('/channels'),
+      api('/channels/live_status').catch((err) => {
+        console.warn('Failed to load Twitch live status', err);
+        return null;
+      })
+    ]);
 
     if (!Array.isArray(channels) || channels.length === 0) {
       grid.innerHTML = '<div class="channels__placeholder">No channels have registered yet. Once a broadcaster links Alpenbot, their snowy beacon will appear here.</div>';
@@ -113,10 +117,18 @@ async function loadLandingChannels(manual = false) {
         channelCountEl.textContent = '0 channels on the ridge';
       }
       if (liveCountEl) {
-        liveCountEl.textContent = '0 live with open queues';
+        liveCountEl.textContent = '0 live on Twitch with open queues';
       }
       landingLoading = false;
       return;
+    }
+
+    const liveMap = new Map();
+    if (Array.isArray(liveStatuses)) {
+      liveStatuses.forEach((row) => {
+        if (!row || typeof row.channel_id !== 'string') return;
+        liveMap.set(row.channel_id, row.is_live === true);
+      });
     }
 
     const enriched = await Promise.all(
@@ -131,8 +143,13 @@ async function loadLandingChannels(manual = false) {
         const pending = Array.isArray(queue) ? queue.filter((item) => !item.played).length : 0;
         const listening = Boolean(channel.bot_active);
         const requestsOpen = channel.join_active === 1 || channel.join_active === true;
-        const isLive = listening && requestsOpen && pending > 0;
-        return { ...channel, pending, listening, requestsOpen, isLive };
+        let twitchLive = null;
+        if (liveMap.has(channel.channel_id)) {
+          twitchLive = liveMap.get(channel.channel_id) === true;
+        }
+        const fallbackLive = listening && requestsOpen && pending > 0;
+        const isLive = twitchLive === null ? fallbackLive : (twitchLive && requestsOpen);
+        return { ...channel, pending, listening, requestsOpen, isLive, twitchLive };
       })
     );
 
@@ -147,13 +164,15 @@ async function loadLandingChannels(manual = false) {
     });
 
     const total = enriched.length;
-    const live = enriched.filter((c) => c.isLive).length;
+    const live = (liveMap.size > 0)
+      ? enriched.filter((c) => c.twitchLive === true && c.requestsOpen).length
+      : enriched.filter((c) => c.isLive).length;
 
     if (channelCountEl) {
       channelCountEl.textContent = `${total} ${formatPlural(total, 'channel', 'channels')} on the ridge`;
     }
     if (liveCountEl) {
-      liveCountEl.textContent = `${live} ${formatPlural(live, 'channel is', 'channels are')} live with open queues`;
+      liveCountEl.textContent = `${live} ${formatPlural(live, 'channel is', 'channels are')} live on Twitch with open queues`;
     }
 
     grid.innerHTML = '';
@@ -182,7 +201,13 @@ function renderChannelCard(channel) {
     : `${channel.pending} waiting ${formatPlural(channel.pending, 'request', 'requests')}`;
 
   let statusText = 'Sleeping in the valley';
-  if (channel.isLive) {
+  if (channel.twitchLive === true) {
+    statusText = channel.requestsOpen
+      ? `Live on Twitch • ${channel.pending} ${formatPlural(channel.pending, 'request', 'requests')} queued`
+      : 'Live on Twitch • Requests closed';
+  } else if (channel.twitchLive === false) {
+    statusText = channel.requestsOpen ? 'Twitch offline • Queue open' : 'Twitch offline';
+  } else if (channel.isLive) {
     statusText = `Live • ${channel.pending} ${formatPlural(channel.pending, 'request', 'requests')} queued`;
   } else if (channel.listening) {
     statusText = channel.pending > 0 ? `Listening • ${pendingText}` : 'Listening for echoes';
@@ -192,6 +217,11 @@ function renderChannelCard(channel) {
 
   const botStatus = channel.listening ? 'Awake' : 'Offline';
   const queueStatus = channel.requestsOpen ? 'Accepting requests' : 'Queue paused';
+  const streamStatus = channel.twitchLive === null
+    ? 'Unknown'
+    : channel.twitchLive
+      ? 'Live on Twitch'
+      : 'Offline on Twitch';
 
   card.innerHTML = `
     <div class="channel-card__header">
@@ -206,6 +236,7 @@ function renderChannelCard(channel) {
       <div><span class="label">Queue</span>${pendingText}</div>
       <div><span class="label">Bot</span>${botStatus}</div>
       <div><span class="label">Mode</span>${queueStatus}</div>
+      <div><span class="label">Stream</span>${streamStatus}</div>
     </div>
     ${channel.bot_last_error ? `<div class="channel-card__warning">Last error: ${channel.bot_last_error}</div>` : ''}
     <div class="channel-card__links">
