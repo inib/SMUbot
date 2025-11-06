@@ -83,6 +83,18 @@ SETUP_REQUIRED_KEYS = ("twitch_client_id", "twitch_client_secret")
 DEFAULT_TWITCH_SCOPES = SETTINGS_DEFAULTS["twitch_scopes"].split()
 DEFAULT_BOT_APP_SCOPES = SETTINGS_DEFAULTS["bot_app_scopes"].split()
 
+API_VERSION = "0.1.0"
+
+
+def _env_flag(value: Optional[str]) -> bool:
+    if value is None:
+        return False
+    normalized = value.strip().lower()
+    return normalized in {"1", "true", "yes", "on"}
+
+
+DEV_MODE = _env_flag(os.getenv("DEV"))
+
 APP_ACCESS_TOKEN: Optional[str] = None
 APP_TOKEN_EXPIRES = 0
 BOT_USER_ID: Optional[str] = None
@@ -736,6 +748,11 @@ class SystemStatusOut(BaseModel):
     setup_complete: bool
 
 
+class SystemMetaOut(BaseModel):
+    version: str
+    dev_mode: bool
+
+
 class PlaylistCreate(BaseModel):
     url: str = Field(..., min_length=1, max_length=1024)
     keywords: List[str] = Field(default_factory=list)
@@ -916,7 +933,7 @@ class StreamOut(BaseModel):
 # =====================================
 # FastAPI app and deps
 # =====================================
-app = FastAPI(title="Twitch Song Request Backend", version="1.0.0")
+app = FastAPI(title="Twitch Song Request Backend", version=API_VERSION)
 
 DEFAULT_CORS_ALLOW_ORIGIN_REGEX = r"https?://.*"
 
@@ -2743,6 +2760,11 @@ seed_default_data()
 @app.get("/system/status", response_model=SystemStatusOut)
 def system_status():
     return {"setup_complete": is_setup_complete()}
+
+
+@app.get("/system/meta", response_model=SystemMetaOut)
+def system_meta():
+    return {"version": API_VERSION, "dev_mode": DEV_MODE}
 
 
 @app.get("/system/config", response_model=SystemConfigOut)

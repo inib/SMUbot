@@ -22,6 +22,7 @@
   </div>
 </div>
 <div id="landing" class="landing">
+  <div class="dev-stamp" id="qm-landing-dev-stamp" hidden aria-hidden="true">DEV</div>
   <h1>ALPEN.BOT SONGQ</h1>
   <button id="login-btn">log in with Twitch</button>
   <div id="channel-list" class="channel-list"></div>
@@ -34,6 +35,7 @@
       <span id="ch-badge" class="badge">channel: ?</span>
       <span id="bot-status" class="badge" hidden>bot: unknown</span>
       <button id="reg-btn" style="display:none"></button>
+      <div class="dev-stamp" id="qm-app-dev-stamp" hidden aria-hidden="true">DEV</div>
     </div>
 
     <div class="grid">
@@ -45,6 +47,7 @@
           <button id="tab-settings" class="tab">Settings</button>
           <button id="tab-events" class="tab">Events</button>
           <button id="tab-overlays" class="tab">Overlays</button>
+          <button id="tab-dev" class="tab" hidden>Dev</button>
         </div>
 
         <div id="queue-view">
@@ -202,10 +205,18 @@
           </div>
           <p class="overlay-hint muted">Add a new Browser Source in OBS, paste the link, and use the recommended size. The overlay updates itself whenever your channel data changes.</p>
         </div>
+
+        <div id="dev-view" class="dev-view" style="display:none">
+          <h2>Developer Notes</h2>
+          <p class="dev-placeholder">Lorem ipsum dolor sit amet, consectetur adipiscing elit. Suspendisse varius enim in eros elementum tristique.</p>
+        </div>
       </div>
     </div>
   </div>
 </div>
+
+<footer class="app-footer" id="manager-footer" hidden></footer>
+
   <script src="config.js"></script>
   <script src="queue_manager.js"></script>
 </body>

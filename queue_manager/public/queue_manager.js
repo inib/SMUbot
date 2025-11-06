@@ -98,6 +98,73 @@ let channelsCache = [];
 
 function qs(id) { return document.getElementById(id); }
 
+const systemMeta = {
+  version: null,
+  devMode: false,
+};
+
+function updateFooter() {
+  const footer = qs('manager-footer');
+  if (!footer) { return; }
+  const parts = ['Queue Manager'];
+  if (systemMeta.version) {
+    parts.push(`Version ${systemMeta.version}`);
+  }
+  if (API) {
+    parts.push(`API: ${API}`);
+  }
+  footer.textContent = parts.join(' • ');
+  footer.hidden = false;
+}
+
+function applySystemMeta() {
+  const isDev = systemMeta.devMode === true;
+  const landingStamp = qs('qm-landing-dev-stamp');
+  if (landingStamp) {
+    landingStamp.hidden = !isDev;
+  }
+  const appStamp = qs('qm-app-dev-stamp');
+  if (appStamp) {
+    appStamp.hidden = !isDev;
+  }
+  const devTab = qs('tab-dev');
+  if (devTab) {
+    devTab.hidden = !isDev;
+    if (!isDev) {
+      devTab.classList.remove('active');
+    }
+  }
+  const devView = qs('dev-view');
+  if (devView && !isDev) {
+    devView.style.display = 'none';
+  }
+  updateFooter();
+}
+
+async function loadSystemMeta() {
+  if (!API) {
+    applySystemMeta();
+    return systemMeta;
+  }
+  try {
+    const res = await fetch(`${API}/system/meta`, { cache: 'no-store' });
+    if (!res.ok) {
+      throw new Error(`status ${res.status}`);
+    }
+    const payload = await res.json();
+    const version = typeof payload?.version === 'string' ? payload.version.trim() : '';
+    systemMeta.version = version || null;
+    systemMeta.devMode = payload?.dev_mode === true;
+  } catch (err) {
+    console.warn('failed to load system metadata', err);
+  } finally {
+    applySystemMeta();
+  }
+  return systemMeta;
+}
+
+const BASE_TAB_KEYS = ['queue', 'playlists', 'users', 'settings', 'events', 'overlays'];
+
 const botStatusEl = qs('bot-status');
 const previewVideoEl = qs('preview-video');
 const previewIframe = qs('preview-frame');
@@ -325,10 +392,27 @@ if (logoutPermBtn) {
   };
 }
 
+function tabKeys() {
+  const keys = BASE_TAB_KEYS.slice();
+  if (systemMeta.devMode) {
+    keys.push('dev');
+  }
+  return keys;
+}
+
 function showTab(name) {
-  ['queue', 'playlists', 'users', 'settings', 'events', 'overlays'].forEach(t => {
-    qs(t+'-view').style.display = (t===name) ? '' : 'none';
-    qs('tab-'+t).classList.toggle('active', t===name);
+  if (name === 'dev' && !systemMeta.devMode) {
+    name = 'queue';
+  }
+  tabKeys().forEach(t => {
+    const view = qs(`${t}-view`);
+    if (view) {
+      view.style.display = (t === name) ? '' : 'none';
+    }
+    const tabBtn = qs(`tab-${t}`);
+    if (tabBtn) {
+      tabBtn.classList.toggle('active', t === name);
+    }
   });
 }
 
@@ -338,6 +422,10 @@ qs('tab-users').onclick = () => showTab('users');
 qs('tab-settings').onclick = () => showTab('settings');
 qs('tab-events').onclick = () => showTab('events');
 qs('tab-overlays').onclick = () => showTab('overlays');
+const tabDevBtn = qs('tab-dev');
+if (tabDevBtn) {
+  tabDevBtn.onclick = () => showTab('dev');
+}
 
 // ===== Queue functions =====
 function ytId(url) {
@@ -2340,6 +2428,11 @@ async function initToken() {
 }
 
 async function bootstrap() {
+  try {
+    await loadSystemMeta();
+  } catch (err) {
+    console.warn('Failed to load system metadata before bootstrap', err);
+  }
   try {
     await ensureSetupComplete();
   } catch (err) {

@@ -143,6 +143,29 @@ a:hover {
   position: relative;
 }
 
+.dev-stamp {
+  position: absolute;
+  top: -18px;
+  right: -18px;
+  padding: 0.45rem 1.75rem;
+  border: 2px solid rgba(255, 94, 135, 0.65);
+  border-radius: 0.5rem;
+  background: rgba(255, 94, 135, 0.18);
+  color: rgba(255, 145, 180, 0.95);
+  font-weight: 800;
+  font-size: 1.1rem;
+  letter-spacing: 0.35rem;
+  transform: rotate(-12deg);
+  text-transform: uppercase;
+  pointer-events: none;
+  user-select: none;
+  box-shadow: 0 12px 30px rgba(255, 94, 135, 0.2);
+}
+
+.dev-stamp[hidden] {
+  display: none !important;
+}
+
 .hero__logo {
   display: inline-flex;
   gap: 0.35rem;
@@ -446,6 +469,7 @@ body[data-mode="queue"] .header {
   gap: 16px;
   align-items: center;
   margin-bottom: 16px;
+  position: relative;
 }
 
 body[data-mode="queue"] .brand {
@@ -474,6 +498,17 @@ body[data-mode="queue"] .card {
   border: 1px solid #24283b;
   border-radius: 12px;
   padding: 14px;
+}
+
+.dev-view {
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.dev-placeholder {
+  margin: 0;
+  font-style: italic;
+  opacity: 0.85;
 }
 
 body[data-mode="queue"] .card h2 {
@@ -590,6 +625,20 @@ body[data-mode="queue"] .footer {
   margin-top: 10px;
   color: var(--muted);
   font-size: 12px;
+}
+
+.site-footer {
+  max-width: var(--w);
+  margin: 0 auto 32px;
+  padding: 12px 16px 48px;
+  text-align: center;
+  font-size: 0.85rem;
+  color: rgba(214, 225, 255, 0.72);
+  letter-spacing: 0.03em;
+}
+
+.site-footer[hidden] {
+  display: none !important;
 }
 
 @media (max-width: 860px) {
