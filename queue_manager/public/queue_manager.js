@@ -2007,7 +2007,7 @@ async function updateRegButton() {
     if (found && found.authorized) {
       const channel = found.channel_name;
       const joinActive = !!found.join_active;
-      btn.textContent = joinActive ? 'make the bot leave/mute' : 'join the bot to chat';
+      btn.textContent = joinActive ? 'mute the bot' : 'join the bot to chat';
       btn.onclick = async () => {
         btn.disabled = true;
         const desired = joinActive ? 0 : 1;
