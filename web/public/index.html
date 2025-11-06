@@ -18,6 +18,7 @@
 
 <main id="landing" class="landing">
   <header class="hero">
+    <div class="dev-stamp" id="landing-dev-stamp" hidden aria-hidden="true">DEV</div>
     <div class="hero__logo">ALPEN<span>BOT</span></div>
     <h1>A lonely alpine signal for song queues.</h1>
     <p>ALPENbot keeps every request echoing through the snowbound night until it finds a home. Inspired my many other services, that just not did what I wanted.</p>
@@ -50,6 +51,7 @@
       <div class="brand">Song Queue</div>
       <span id="ch-badge" class="badge">channel: ?</span>
       <span id="stat-badge" class="badge">status: idle</span>
+      <div class="dev-stamp" id="queue-dev-stamp" hidden aria-hidden="true">DEV</div>
     </div>
 
     <div class="grid">
@@ -57,6 +59,7 @@
         <div class="tabs">
           <button id="tab-current" class="tab active">Current</button>
           <button id="tab-archive" class="tab">Archive</button>
+          <button id="tab-dev" class="tab" hidden>Dev</button>
         </div>
 
         <div id="current-view">
@@ -78,6 +81,11 @@
           <h2>Played</h2>
           <div id="arch-played" class="queue"></div>
         </div>
+
+        <div id="dev-view" class="dev-view" style="display:none">
+          <h2>Developer Notes</h2>
+          <p class="dev-placeholder">Lorem ipsum dolor sit amet, consectetur adipiscing elit. Suspendisse varius enim in eros elementum tristique.</p>
+        </div>
       </div>
 
       <div class="card info">
@@ -92,6 +100,8 @@
     </div>
   </div>
 </div>
+
+<footer class="site-footer" id="site-footer" hidden></footer>
 
 <script src="config.js"></script>
 <script src="app.js"></script>

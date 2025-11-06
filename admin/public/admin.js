@@ -30,6 +30,50 @@ const API_ORIGIN = (() => {
     return null;
   }
 })();
+
+const systemMeta = {
+  version: null,
+  devMode: false,
+};
+
+function updateFooter() {
+  const footer = document.getElementById('admin-footer');
+  if (!footer) {
+    return;
+  }
+  const parts = ['Admin Panel'];
+  if (systemMeta.version) {
+    parts.push(`Version ${systemMeta.version}`);
+  }
+  if (API) {
+    parts.push(`API: ${API}`);
+  }
+  footer.textContent = parts.join(' • ');
+  footer.hidden = false;
+}
+
+async function loadSystemMeta() {
+  if (!API) {
+    updateFooter();
+    return systemMeta;
+  }
+  try {
+    const res = await fetch(`${API}/system/meta`, { cache: 'no-store' });
+    if (!res.ok) {
+      throw new Error(`status ${res.status}`);
+    }
+    const data = await res.json();
+    const version = typeof data?.version === 'string' ? data.version.trim() : '';
+    systemMeta.version = version || null;
+    systemMeta.devMode = data?.dev_mode === true;
+  } catch (err) {
+    console.warn('failed to load system metadata', err);
+  } finally {
+    updateFooter();
+  }
+  return systemMeta;
+}
+
 const statusEl = document.getElementById('status');
 const setupStatusEl = document.getElementById('setup-status');
 const setupAlertEl = document.getElementById('setup-alert');
@@ -1296,6 +1340,7 @@ async function init() {
 }
 
 window.addEventListener('DOMContentLoaded', () => {
+  loadSystemMeta().catch(() => {});
   setActiveTab('credentials');
   updateAdminToken(state.adminToken);
   if (backendUrlInput) {
