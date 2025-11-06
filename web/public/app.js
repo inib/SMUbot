@@ -23,8 +23,14 @@ try {
 }
 
 const qs = new URLSearchParams(location.search);
-const CHANNEL = qs.get('channel') || 'example_channel';
+const CHANNEL = (qs.get('channel') || '').trim();
 const setupGuardEl = document.getElementById('setup-guard');
+const landingRoot = document.getElementById('landing');
+const queueRoot = document.getElementById('queue-app');
+
+let queueCtx = null;
+let landingInterval = null;
+let landingLoading = false;
 
 function showSetupGuard(message) {
   if (!setupGuardEl) return;
@@ -38,6 +44,9 @@ function showSetupGuard(message) {
 }
 
 async function ensureSetupComplete() {
+  if (!BACKEND) {
+    throw new Error('No backend origin set.');
+  }
   try {
     const res = await fetch(`${BACKEND}/system/status`, { cache: 'no-store' });
     if (!res.ok) {
@@ -45,7 +54,7 @@ async function ensureSetupComplete() {
     }
     const data = await res.json();
     if (!data || !data.setup_complete) {
-      showSetupGuard('Deployment setup is incomplete. Finish configuration in the admin panel to unlock the queue view.');
+      showSetupGuard('Deployment setup is incomplete. Finish configuration in the admin panel to unlock live data.');
       throw new Error('setup incomplete');
     }
   } catch (err) {
@@ -57,50 +66,184 @@ async function ensureSetupComplete() {
   }
 }
 
-const el = (sel) => document.querySelector(sel);
-const queueEl   = el('#queue');
-const playedEl  = el('#played');
-const archQEl   = el('#arch-queue');
-const archPEl   = el('#arch-played');
-const streamsEl = el('#streams');
-const statBadge = el('#stat-badge');
-const chBadge   = el('#ch-badge');
-const tabCur    = el('#tab-current');
-const tabArc    = el('#tab-archive');
-const viewCur   = el('#current-view');
-const viewArc   = el('#archive-view');
+function api(path, options = {}) {
+  if (!BACKEND) {
+    return Promise.reject(new Error('Backend origin missing'));
+  }
+  const url = `${BACKEND}${path}`;
+  const opts = { cache: 'no-store', ...options };
+  return fetch(url, opts).then((r) => {
+    if (!r.ok) {
+      const err = new Error(`${r.status}`);
+      err.status = r.status;
+      throw err;
+    }
+    return r.json();
+  });
+}
 
-chBadge.textContent = `channel: ${CHANNEL}`;
+function formatPlural(count, single, plural) {
+  return count === 1 ? single : plural;
+}
 
-function api(path){ return fetch(`${BACKEND}${path}`).then(r => {
-  if(!r.ok) throw new Error(`${r.status}`); return r.json()
-})}
+async function loadLandingChannels(manual = false) {
+  if (landingLoading) return;
+  landingLoading = true;
+  const grid = document.getElementById('channels-grid');
+  if (!grid) {
+    landingLoading = false;
+    return;
+  }
 
-function ytId(url){
-  if(!url) return null;
+  const channelCountEl = document.getElementById('channel-count');
+  const liveCountEl = document.getElementById('live-count');
+
+  if (!grid.children.length || manual) {
+    grid.innerHTML = '<div class="channels__placeholder">Mapping the alpine airwaves…</div>';
+  }
+
+  try {
+    const channels = await api('/channels').catch((err) => {
+      throw err;
+    });
+
+    if (!Array.isArray(channels) || channels.length === 0) {
+      grid.innerHTML = '<div class="channels__placeholder">No channels have registered yet. Once a broadcaster links Alpenbot, their snowy beacon will appear here.</div>';
+      if (channelCountEl) {
+        channelCountEl.textContent = '0 channels on the ridge';
+      }
+      if (liveCountEl) {
+        liveCountEl.textContent = '0 live with open queues';
+      }
+      landingLoading = false;
+      return;
+    }
+
+    const enriched = await Promise.all(
+      channels.map(async (channel) => {
+        const name = channel.channel_name;
+        let queue = [];
+        try {
+          queue = await api(`/channels/${encodeURIComponent(name)}/queue`);
+        } catch (err) {
+          console.warn('Failed to load queue for channel', name, err);
+        }
+        const pending = Array.isArray(queue) ? queue.filter((item) => !item.played).length : 0;
+        const listening = Boolean(channel.bot_active);
+        const requestsOpen = channel.join_active === 1 || channel.join_active === true;
+        const isLive = listening && requestsOpen && pending > 0;
+        return { ...channel, pending, listening, requestsOpen, isLive };
+      })
+    );
+
+    enriched.sort((a, b) => {
+      if (a.isLive !== b.isLive) {
+        return a.isLive ? -1 : 1;
+      }
+      if (a.listening !== b.listening) {
+        return a.listening ? -1 : 1;
+      }
+      return a.channel_name.localeCompare(b.channel_name);
+    });
+
+    const total = enriched.length;
+    const live = enriched.filter((c) => c.isLive).length;
+
+    if (channelCountEl) {
+      channelCountEl.textContent = `${total} ${formatPlural(total, 'channel', 'channels')} on the ridge`;
+    }
+    if (liveCountEl) {
+      liveCountEl.textContent = `${live} ${formatPlural(live, 'channel is', 'channels are')} live with open queues`;
+    }
+
+    grid.innerHTML = '';
+    enriched.forEach((channel) => grid.appendChild(renderChannelCard(channel)));
+  } catch (err) {
+    console.error('Failed to load channels', err);
+    grid.innerHTML = '<div class="channels__placeholder error">Unable to reach the backend right now. The mountain pass is closed—try refreshing in a moment.</div>';
+  } finally {
+    landingLoading = false;
+  }
+}
+
+function renderChannelCard(channel) {
+  const card = document.createElement('article');
+  card.className = 'channel-card';
+  if (channel.isLive) {
+    card.classList.add('live');
+  } else if (channel.listening) {
+    card.dataset.state = 'listening';
+  }
+
+  const queueHref = `?channel=${encodeURIComponent(channel.channel_name)}`;
+  const twitchHref = `https://twitch.tv/${encodeURIComponent(channel.channel_name)}`;
+  const pendingText = channel.pending === 0
+    ? 'Empty horizon'
+    : `${channel.pending} waiting ${formatPlural(channel.pending, 'request', 'requests')}`;
+
+  let statusText = 'Sleeping in the valley';
+  if (channel.isLive) {
+    statusText = `Live • ${channel.pending} ${formatPlural(channel.pending, 'request', 'requests')} queued`;
+  } else if (channel.listening) {
+    statusText = channel.pending > 0 ? `Listening • ${pendingText}` : 'Listening for echoes';
+  } else if (!channel.requestsOpen) {
+    statusText = 'Requests closed';
+  }
+
+  const botStatus = channel.listening ? 'Awake' : 'Offline';
+  const queueStatus = channel.requestsOpen ? 'Accepting requests' : 'Queue paused';
+
+  card.innerHTML = `
+    <div class="channel-card__header">
+      <h3>${channel.channel_name}</h3>
+      <span class="channel-card__id">ID ${channel.channel_id}</span>
+    </div>
+    <div class="channel-card__status">
+      <span class="status-dot"></span>
+      <span>${statusText}</span>
+    </div>
+    <div class="channel-card__meta">
+      <div><span class="label">Queue</span>${pendingText}</div>
+      <div><span class="label">Bot</span>${botStatus}</div>
+      <div><span class="label">Mode</span>${queueStatus}</div>
+    </div>
+    ${channel.bot_last_error ? `<div class="channel-card__warning">Last error: ${channel.bot_last_error}</div>` : ''}
+    <div class="channel-card__links">
+      <a class="btn" href="${queueHref}">Open queue</a>
+      <a class="btn ghost" href="${twitchHref}" target="_blank" rel="noopener">Visit Twitch</a>
+    </div>
+  `;
+
+  return card;
+}
+
+function ytId(url) {
+  if (!url) return null;
   const m = url.match(/(?:youtube\.com\/.*v=|youtu\.be\/)([\w-]{11})/i);
   return m ? m[1] : null;
 }
-function thumb(url){
+
+function thumb(url) {
   const id = ytId(url);
   return id ? `https://img.youtube.com/vi/${id}/hqdefault.jpg` : null;
 }
 
-function itemNode(q, song, user){
+function itemNode(q, song, user) {
   const pri = q.is_priority === 1 || q.is_priority === true;
   const played = q.played === 1 || q.played === true;
   const t = thumb(song.youtube_link);
 
   const div = document.createElement('div');
-  div.className = `item${pri?' prio':''}${played?' played':''}`;
-  const link = song.youtube_link ? `<a href="${song.youtube_link}" target="_blank" rel="noopener">${(song.artist||'')+' - '+(song.title||'')}</a>`
-                                 : `${(song.artist||'')+' - '+(song.title||'')}`;
+  div.className = `item${pri ? ' prio' : ''}${played ? ' played' : ''}`;
+  const link = song.youtube_link
+    ? `<a href="${song.youtube_link}" target="_blank" rel="noopener">${(song.artist || '') + ' - ' + (song.title || '')}</a>`
+    : `${(song.artist || '') + ' - ' + (song.title || '')}`;
 
   div.innerHTML = `
     <div class="thumb">${t ? `<img src="${t}" width="56" height="42" style="border-radius:6px;object-fit:cover"/>` : '?'}</div>
     <div>
       <div class="title">${link}</div>
-      <div class="muted">by ${user.username||'?'}</div>
+      <div class="muted">by ${user.username || '?'}</div>
     </div>
     <div class="meta">
       ${pri ? '<span class="badge" style="border-color:var(--accent);color:#fff">bumped</span>' : ''}
@@ -109,74 +252,96 @@ function itemNode(q, song, user){
   return div;
 }
 
-async function expand(items){
-  return Promise.all(items.map(async it => {
-    const [song, user] = await Promise.all([
-      api(`/channels/${CHANNEL}/songs/${it.song_id}`),
-      api(`/channels/${CHANNEL}/users/${it.user_id}`)
-    ]);
-    return { q: it, song, user };
-  }));
+async function expand(items) {
+  return Promise.all(
+    items.map(async (it) => {
+      const [song, user] = await Promise.all([
+        api(`/channels/${encodeURIComponent(CHANNEL)}/songs/${it.song_id}`),
+        api(`/channels/${encodeURIComponent(CHANNEL)}/users/${it.user_id}`)
+      ]);
+      return { q: it, song, user };
+    })
+  );
 }
 
-function render(list, container){
+function render(list, container) {
   container.innerHTML = '';
-  list.forEach(({q, song, user}) => container.appendChild(itemNode(q, song, user)));
+  list.forEach(({ q, song, user }) => container.appendChild(itemNode(q, song, user)));
 }
 
-async function refreshCurrent(){
+async function refreshCurrent() {
+  if (!queueCtx) return;
+  const { queueEl, playedEl, statBadge } = queueCtx;
   statBadge.textContent = 'status: loading';
-  const queue = await api(`/channels/${CHANNEL}/queue?include_played=1`).catch(()=>[]);
-  const pending = queue.filter(x=>!x.played);
-  const played  = queue.filter(x=> x.played);
+  const queue = await api(`/channels/${encodeURIComponent(CHANNEL)}/queue`).catch(() => []);
+  const pending = queue.filter((x) => !x.played);
+  const played = queue.filter((x) => x.played);
 
-  // priority first, then by backend-provided order
-  const sortQ = (a,b)=> (b.is_priority - a.is_priority) || 0;
+  const sortQ = (a, b) => (b.is_priority - a.is_priority) || 0;
   pending.sort(sortQ);
 
   const [exQ, exP] = await Promise.all([expand(pending), expand(played)]);
   render(exQ, queueEl);
   render(exP, playedEl);
-  statBadge.textContent = `status: live`;
+  statBadge.textContent = 'status: live';
 }
 
-async function loadStreams(){
+async function loadStreams() {
+  if (!queueCtx) return;
+  const { streamsEl } = queueCtx;
   streamsEl.innerHTML = '';
-  const rows = await api(`/channels/${CHANNEL}/streams`).catch(err=>{console.error(err);return [];});
-  rows.sort((a,b)=> new Date(b.started_at) - new Date(a.started_at));
+  const rows = await api(`/channels/${encodeURIComponent(CHANNEL)}/streams`).catch((err) => {
+    console.error(err);
+    return [];
+  });
+  rows.sort((a, b) => new Date(b.started_at) - new Date(a.started_at));
   let first = null;
-  rows.forEach(s=>{
+  rows.forEach((s) => {
     const div = document.createElement('div');
     div.className = 'stream';
     div.textContent = `${new Date(s.started_at).toLocaleString()} ${s.ended_at ? '— ended' : ''}`;
-    div.onclick = ()=> selectStream(s.id, div);
+    div.onclick = () => selectStream(s.id, div);
     streamsEl.appendChild(div);
-    if(!first) first = { id: s.id, node: div };
+    if (!first) first = { id: s.id, node: div };
   });
-  if(first) selectStream(first.id, first.node);
+  if (first) selectStream(first.id, first.node);
 }
-async function selectStream(streamId, node){
-  [...streamsEl.children].forEach(x=>x.classList.remove('active'));
+
+async function selectStream(streamId, node) {
+  if (!queueCtx) return;
+  const { streamsEl, archQEl, archPEl } = queueCtx;
+  [...streamsEl.children].forEach((x) => x.classList.remove('active'));
   node.classList.add('active');
-  const q = await api(`/channels/${CHANNEL}/streams/${streamId}/queue`).catch(()=>[]);
-  const pending = q.filter(x=>!x.played), played = q.filter(x=>x.played);
+  const q = await api(`/channels/${encodeURIComponent(CHANNEL)}/streams/${streamId}/queue`).catch(() => []);
+  const pending = q.filter((x) => !x.played);
+  const played = q.filter((x) => x.played);
   const [exQ, exP] = await Promise.all([expand(pending), expand(played)]);
-  render(exQ, archQEl); render(exP, archPEl);
+  render(exQ, archQEl);
+  render(exP, archPEl);
 }
 
-function sse(){
-  try{
-    const es = new EventSource(`${BACKEND}/channels/${CHANNEL}/queue/stream`);
-    es.onopen = ()=> statBadge.textContent = 'status: live';
-    es.onerror = ()=> statBadge.textContent = 'status: reconnecting';
-    es.addEventListener('queue', ()=>{
+function sse() {
+  if (!queueCtx) return;
+  try {
+    const es = new EventSource(`${BACKEND}/channels/${encodeURIComponent(CHANNEL)}/queue/stream`);
+    es.onopen = () => {
+      queueCtx.statBadge.textContent = 'status: live';
+    };
+    es.onerror = () => {
+      queueCtx.statBadge.textContent = 'status: reconnecting';
+    };
+    es.addEventListener('queue', () => {
       refreshCurrent();
-      if(tabArc.classList.contains('active')) loadStreams();
+      if (queueCtx.tabArc && queueCtx.tabArc.classList.contains('active')) {
+        loadStreams();
+      }
     });
-  }catch(e){ console.error(e); }
+  } catch (e) {
+    console.error(e);
+  }
 }
 
-async function bootstrap(){
+async function bootstrapQueue() {
   try {
     await ensureSetupComplete();
     showSetupGuard('');
@@ -195,17 +360,103 @@ async function bootstrap(){
   } catch (err) {
     console.error('Failed to start queue stream', err);
   }
-  const footer = el('#footer-note');
+  const footer = document.getElementById('footer-note');
   if (footer) {
     footer.textContent = `Backend: ${BACKEND} • Channel: ${CHANNEL}`;
   }
 }
 
-document.addEventListener('DOMContentLoaded', ()=>{
-  if (chBadge) {
-    chBadge.textContent = `channel: ${CHANNEL}`;
+function initLandingMode() {
+  if (queueRoot) {
+    queueRoot.hidden = true;
   }
-  tabCur.onclick = ()=>{ tabCur.classList.add('active'); tabArc.classList.remove('active'); viewCur.style.display='block'; viewArc.style.display='none'; };
-  tabArc.onclick = ()=>{ tabArc.classList.add('active'); tabCur.classList.remove('active'); viewCur.style.display='none'; viewArc.style.display='block'; loadStreams(); };
-  bootstrap();
+  if (landingRoot) {
+    landingRoot.hidden = false;
+  }
+  document.body.dataset.mode = 'landing';
+
+  const refreshBtn = document.getElementById('refresh-channels');
+  if (refreshBtn) {
+    refreshBtn.addEventListener('click', () => loadLandingChannels(true));
+  }
+
+  ensureSetupComplete()
+    .then(() => {
+      showSetupGuard('');
+      loadLandingChannels();
+      landingInterval = window.setInterval(() => loadLandingChannels(), 30000);
+    })
+    .catch((err) => {
+      console.error('Landing view unavailable until setup completes.', err);
+    });
+}
+
+function initQueueMode() {
+  if (landingRoot) {
+    landingRoot.hidden = true;
+  }
+  if (queueRoot) {
+    queueRoot.hidden = false;
+  }
+  document.body.dataset.mode = 'queue';
+
+  queueCtx = {
+    queueEl: queueRoot?.querySelector('#queue'),
+    playedEl: queueRoot?.querySelector('#played'),
+    archQEl: queueRoot?.querySelector('#arch-queue'),
+    archPEl: queueRoot?.querySelector('#arch-played'),
+    streamsEl: queueRoot?.querySelector('#streams'),
+    statBadge: queueRoot?.querySelector('#stat-badge'),
+    chBadge: queueRoot?.querySelector('#ch-badge'),
+    tabCur: queueRoot?.querySelector('#tab-current'),
+    tabArc: queueRoot?.querySelector('#tab-archive'),
+    viewCur: queueRoot?.querySelector('#current-view'),
+    viewArc: queueRoot?.querySelector('#archive-view'),
+  };
+
+  if (!queueCtx.queueEl || !queueCtx.playedEl || !queueCtx.statBadge) {
+    console.error('Queue view elements missing.');
+    return;
+  }
+
+  if (queueCtx.chBadge) {
+    queueCtx.chBadge.textContent = `channel: ${CHANNEL}`;
+  }
+
+  queueCtx.tabCur?.addEventListener('click', () => {
+    queueCtx.tabCur.classList.add('active');
+    queueCtx.tabArc?.classList.remove('active');
+    if (queueCtx.viewCur) queueCtx.viewCur.style.display = 'block';
+    if (queueCtx.viewArc) queueCtx.viewArc.style.display = 'none';
+  });
+
+  queueCtx.tabArc?.addEventListener('click', () => {
+    queueCtx.tabArc.classList.add('active');
+    queueCtx.tabCur?.classList.remove('active');
+    if (queueCtx.viewCur) queueCtx.viewCur.style.display = 'none';
+    if (queueCtx.viewArc) queueCtx.viewArc.style.display = 'block';
+    loadStreams();
+  });
+
+  bootstrapQueue();
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  if (CHANNEL) {
+    initQueueMode();
+  } else {
+    initLandingMode();
+  }
+});
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && !CHANNEL && document.body.dataset.mode === 'landing') {
+    loadLandingChannels();
+  }
+});
+
+document.addEventListener('beforeunload', () => {
+  if (landingInterval) {
+    window.clearInterval(landingInterval);
+  }
 });
