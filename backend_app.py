@@ -93,7 +93,7 @@ def _env_flag(value: Optional[str]) -> bool:
     return normalized in {"1", "true", "yes", "on"}
 
 
-DEV_MODE = _env_flag(os.getenv("DEV"))
+DEV_MODE = True
 
 APP_ACCESS_TOKEN: Optional[str] = None
 APP_TOKEN_EXPIRES = 0
