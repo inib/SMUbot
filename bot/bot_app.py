@@ -26,11 +26,10 @@ BACKEND_URL = os.getenv('BACKEND_URL', 'http://api:7070')
 # Token used for privileged requests to the backend.
 ADMIN_TOKEN = os.getenv('ADMIN_TOKEN', 'change-me')
 MESSAGES_PATH = Path(os.getenv("BOT_MESSAGES_PATH", "/bot/messages.yml"))
-
 COMMANDS_FILE = os.getenv('COMMANDS_FILE', '/bot/commands.yml')
 DEFAULT_COMMANDS = {
     'prefix': '!',
-    'request': ['request', 'req', 'r'],
+    'request': ['request', 'req', 'r', 'sr'],
     'prioritize': ['prioritize', 'prio', 'bump'],
     'points': ['points', 'pp'],
     'remove': ['remove', 'undo', 'del'],
