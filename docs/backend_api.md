@@ -39,6 +39,16 @@ This document summarizes the REST endpoints exposed by `backend_app.py`.
 | PUT | `/channels/{channel}/songs/{song_id}` | Update song details (admin). |
 | DELETE | `/channels/{channel}/songs/{song_id}` | Remove a song from the catalog (admin). |
 
+## Playlists
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/channels/{channel}/playlists` | List playlists configured for a channel. |
+| POST | `/channels/{channel}/playlists` | Add a new playlist from YouTube or manual entries (admin). |
+| GET | `/channels/{channel}/playlists/{playlist_id}/items` | List items contained in a playlist. |
+| POST | `/channels/{channel}/playlists/{playlist_id}/queue` | Queue a specific playlist item by ID (admin). |
+| POST | `/channels/{channel}/playlists/random_request` | Enqueue a random playlist item matching an optional keyword. |
+| POST | `/channels/{channel}/playlists/request` | Enqueue a playlist entry by providing its identifier and 1-based index. |
+
 ## Users
 | Method | Path | Description |
 |--------|------|-------------|

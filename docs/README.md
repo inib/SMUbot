@@ -56,6 +56,7 @@ unlocks the API for the bot, queue manager, and public web frontend.
 - Automatically discovers authorized channels from the backend and joins them.
 - Supports commands:
   - `!request` – add a song request.
+  - `!playlist <name> <index>` – queue a song from a saved playlist by position.
   - `!prioritize` – bump one of your requests using priority points.
   - `!points` – check remaining priority points.
   - `!remove` – delete your latest request.
