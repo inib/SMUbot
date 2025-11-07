@@ -463,6 +463,29 @@ class PlaylistApiTests(unittest.TestCase):
         finally:
             db.close()
 
+    def test_updating_keywords_with_existing_values(self) -> None:
+        playlist_id = self._create_sample_playlist()
+
+        response = self.client.put(
+            f"/channels/{self.channel_name}/playlists/{playlist_id}",
+            json={"keywords": ["Default", "Chill"]},
+            headers=self._admin_headers(),
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["keywords"], ["chill", "default"])
+
+        db = backend_app.SessionLocal()
+        try:
+            playlist = db.get(backend_app.Playlist, playlist_id)
+            self.assertIsNotNone(playlist)
+            if playlist:
+                stored_keywords = sorted(kw.keyword for kw in playlist.keywords)
+                self.assertEqual(stored_keywords, ["chill", "default"])
+        finally:
+            db.close()
+
     def test_delete_playlist_removes_related_rows(self) -> None:
         playlist_id = self._create_sample_playlist()
         response = self.client.delete(
