@@ -2495,9 +2495,14 @@ def _normalize_keywords(keywords: Iterable[str]) -> List[str]:
 
 def _replace_playlist_keywords(playlist: Playlist, keywords: Iterable[str]) -> List[str]:
     normalized = _normalize_keywords(keywords)
-    playlist.keywords.clear()
-    for keyword in normalized:
-        playlist.keywords.append(PlaylistKeyword(keyword=keyword))
+    existing_by_keyword = {kw.keyword: kw for kw in playlist.keywords}
+
+    # Reuse existing keyword objects when possible to avoid violating the
+    # (playlist_id, keyword) unique constraint during flush.
+    playlist.keywords[:] = [
+        existing_by_keyword.get(keyword, PlaylistKeyword(keyword=keyword))
+        for keyword in normalized
+    ]
     return normalized
 
 
