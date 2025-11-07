@@ -35,6 +35,7 @@ DEFAULT_COMMANDS = {
     'remove': ['remove', 'undo', 'del'],
     'archive': ['archive'],
     'random_request': ['random', 'rr', 'randomrequest'],
+    'playlist_request': ['playlist', 'pl'],
 }
 
 DEFAULT_MESSAGES = {
@@ -62,6 +63,10 @@ DEFAULT_MESSAGES = {
     'award_bits': 'Thx for cheering {amount} bits {username}, take {word} - you have now {points} {currency_plural}',
     'bot_joined': 'Song queue bot connected to chat.',
     'bot_left': 'Song queue bot disconnected from chat.',
+    'playlist_request_added': 'Added from {playlist}: {artist} - {title}',
+    'playlist_not_found': 'Playlist "{playlist}" not found',
+    'playlist_song_missing': 'Playlist "{playlist}" has no song #{index}',
+    'playlist_usage': 'Usage: !playlist <name> <index>',
 }
 
 # Channels that should never trigger Twitch joins/subscriptions even if they
@@ -188,6 +193,9 @@ class Backend:
             path += "?include_played=1"
         return await self._req('GET', path)
 
+    async def list_playlists(self, channel: str) -> List[dict]:
+        return await self._req('GET', f"/channels/{channel}/playlists")
+
     async def delete_request(self, channel: str, request_id: int):
         return await self._req('DELETE', f"/channels/{channel}/queue/{request_id}")
 
@@ -257,6 +265,16 @@ class Backend:
         if keyword:
             payload['keyword'] = keyword
         return await self._req('POST', f"/channels/{channel}/playlists/random_request", payload)
+
+    async def playlist_request(
+        self,
+        channel: str,
+        *,
+        identifier: str,
+        index: int,
+    ) -> Dict[str, object]:
+        payload = {'identifier': identifier, 'index': index}
+        return await self._req('POST', f"/channels/{channel}/playlists/request", payload)
 
 
 backend = Backend(BACKEND_URL, ADMIN_TOKEN)
@@ -788,6 +806,8 @@ class SongBot(commands.Bot):
             await self.handle_request(message, args)
         elif cmd_lower in self.commands_map['random_request']:
             await self.handle_random_request(message, args)
+        elif cmd_lower in self.commands_map['playlist_request']:
+            await self.handle_playlist_request(message, args)
         elif cmd_lower in self.commands_map['prioritize']:
             await self.handle_prioritize(message, args)
         elif cmd_lower in self.commands_map['points']:
@@ -948,6 +968,185 @@ class SongBot(commands.Bot):
                 login,
                 message_text,
                 metadata={'channel': channel, 'command': 'random_request', 'keyword': resolved_keyword or keyword},
+                reply_to=msg.id,
+                fallback_partial=msg.broadcaster,
+            )
+
+    async def handle_playlist_request(self, msg, arg: str) -> None:
+        login = self._channel_login(msg.broadcaster.name)
+        row = self.channel_map.get(login)
+        if not row:
+            await self._send_message(
+                login,
+                self.messages['channel_not_registered'],
+                metadata={'channel': msg.broadcaster.name, 'command': 'playlist_request'},
+                reply_to=msg.id,
+                fallback_partial=msg.broadcaster,
+            )
+            return
+        channel = row['channel_name']
+        arg = (arg or '').strip()
+        if not arg:
+            await self._send_message(
+                login,
+                self.messages.get('playlist_usage', 'Usage: !playlist <name> <index>'),
+                metadata={'channel': channel, 'command': 'playlist_request'},
+                reply_to=msg.id,
+                fallback_partial=msg.broadcaster,
+            )
+            return
+        name_part, sep, index_part = arg.rpartition(' ')
+        if not sep or not name_part.strip() or not index_part.strip():
+            await self._send_message(
+                login,
+                self.messages.get('playlist_usage', 'Usage: !playlist <name> <index>'),
+                metadata={'channel': channel, 'command': 'playlist_request'},
+                reply_to=msg.id,
+                fallback_partial=msg.broadcaster,
+            )
+            return
+        playlist_name = name_part.strip()
+        try:
+            index = int(index_part)
+        except ValueError:
+            await self._send_message(
+                login,
+                self.messages.get('playlist_usage', 'Usage: !playlist <name> <index>'),
+                metadata={'channel': channel, 'command': 'playlist_request'},
+                reply_to=msg.id,
+                fallback_partial=msg.broadcaster,
+            )
+            return
+        if index < 1:
+            await self._send_message(
+                login,
+                self.messages.get('playlist_usage', 'Usage: !playlist <name> <index>'),
+                metadata={'channel': channel, 'command': 'playlist_request'},
+                reply_to=msg.id,
+                fallback_partial=msg.broadcaster,
+            )
+            return
+        try:
+            playlists = await backend.list_playlists(channel)
+        except Exception as exc:
+            await push_console_event(
+                'error',
+                f'Failed to list playlists for {channel}: {exc}',
+                metadata={'channel': channel, 'command': 'playlist_request'},
+            )
+            await self._send_message(
+                login,
+                self.messages['failed'].format(error=exc),
+                metadata={'channel': channel, 'command': 'playlist_request'},
+                reply_to=msg.id,
+                fallback_partial=msg.broadcaster,
+            )
+            return
+        match = None
+        for entry in playlists or []:
+            title = str(entry.get('title', '')).strip()
+            if title.lower() == playlist_name.lower():
+                match = entry
+                break
+        if not match:
+            template = self.messages.get('playlist_not_found', 'Playlist "{playlist}" not found')
+            await self._send_message(
+                login,
+                template.format(playlist=playlist_name),
+                metadata={'channel': channel, 'command': 'playlist_request'},
+                reply_to=msg.id,
+                fallback_partial=msg.broadcaster,
+            )
+            return
+        identifier_value = match.get('id')
+        if identifier_value is None:
+            identifier_value = match.get('playlist_id') or playlist_name
+        playlist_title = str(match.get('title') or playlist_name)
+        try:
+            response = await backend.playlist_request(
+                channel,
+                identifier=str(identifier_value),
+                index=index,
+            )
+        except BackendError as exc:
+            detail = (exc.detail or '').lower()
+            if exc.status == 404 and 'playlist' in detail:
+                template = self.messages.get('playlist_not_found', 'Playlist "{playlist}" not found')
+                await self._send_message(
+                    login,
+                    template.format(playlist=playlist_title),
+                    metadata={'channel': channel, 'command': 'playlist_request'},
+                    reply_to=msg.id,
+                    fallback_partial=msg.broadcaster,
+                )
+                return
+            if exc.status in (400, 404) and any(keyword in detail for keyword in ('index', 'item')):
+                template = self.messages.get('playlist_song_missing', 'Playlist "{playlist}" has no song #{index}')
+                await self._send_message(
+                    login,
+                    template.format(playlist=playlist_title, index=index),
+                    metadata={'channel': channel, 'command': 'playlist_request'},
+                    reply_to=msg.id,
+                    fallback_partial=msg.broadcaster,
+                )
+                return
+            await push_console_event(
+                'error',
+                f'Failed playlist request for {msg.chatter.name}: {exc.detail}',
+                metadata={
+                    'channel': channel,
+                    'command': 'playlist_request',
+                    'status': exc.status,
+                    'playlist': playlist_title,
+                    'index': index,
+                },
+            )
+            await self._send_message(
+                login,
+                self.messages['failed'].format(error=exc.detail),
+                metadata={'channel': channel, 'command': 'playlist_request'},
+                reply_to=msg.id,
+                fallback_partial=msg.broadcaster,
+            )
+            return
+        except Exception as exc:
+            await push_console_event(
+                'error',
+                f'Failed playlist request for {msg.chatter.name}: {exc}',
+                metadata={'channel': channel, 'command': 'playlist_request'},
+            )
+            await self._send_message(
+                login,
+                self.messages['failed'].format(error=exc),
+                metadata={'channel': channel, 'command': 'playlist_request'},
+                reply_to=msg.id,
+                fallback_partial=msg.broadcaster,
+            )
+            return
+
+        song_payload = response.get('song') if isinstance(response, dict) else None
+        artist = song_payload.get('artist', '') if isinstance(song_payload, dict) else ''
+        title = song_payload.get('title', '') if isinstance(song_payload, dict) else ''
+        template = self.messages.get('playlist_request_added') or self.messages.get('request_added')
+        if template:
+            try:
+                message_text = template.format(
+                    playlist=playlist_title,
+                    artist=artist,
+                    title=title,
+                    index=index,
+                )
+            except KeyError:
+                message_text = template
+            await self._send_message(
+                login,
+                message_text,
+                metadata={
+                    'channel': channel,
+                    'command': 'playlist_request',
+                    'playlist': playlist_title,
+                    'index': index,
+                },
                 reply_to=msg.id,
                 fallback_partial=msg.broadcaster,
             )

@@ -202,6 +202,57 @@ class PlaylistApiTests(unittest.TestCase):
         finally:
             db.close()
 
+    def test_playlist_request_by_title_and_index(self) -> None:
+        playlist_id = self._create_sample_playlist()
+        items_response = self.client.get(
+            f"/channels/{self.channel_name}/playlists/{playlist_id}/items",
+            headers=self._admin_headers(),
+        )
+        self.assertEqual(items_response.status_code, 200, items_response.text)
+        playlist_items = items_response.json()
+        self.assertEqual(len(playlist_items), 2)
+
+        response = self.client.post(
+            f"/channels/{self.channel_name}/playlists/request",
+            json={"identifier": "test playlist", "index": 2},
+            headers=self._admin_headers(),
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertIn("request_id", payload)
+        self.assertEqual(payload["playlist_item_id"], playlist_items[1]["id"])
+        self.assertEqual(payload["song"]["title"], "Track Two")
+        self.assertEqual(payload["song"]["artist"], "Artist B")
+
+        db = backend_app.SessionLocal()
+        try:
+            requests = db.query(backend_app.Request).all()
+            self.assertEqual(len(requests), 1)
+            req = requests[0]
+            channel_pk = backend_app.get_channel_pk(self.channel_name, db)
+            self.assertEqual(req.channel_id, channel_pk)
+        finally:
+            db.close()
+
+    def test_playlist_request_index_out_of_range(self) -> None:
+        self._create_sample_playlist()
+        response = self.client.post(
+            f"/channels/{self.channel_name}/playlists/request",
+            json={"identifier": "Test Playlist", "index": 3},
+            headers=self._admin_headers(),
+        )
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertEqual(response.json().get("detail"), "index out of range")
+
+    def test_playlist_request_missing_playlist(self) -> None:
+        response = self.client.post(
+            f"/channels/{self.channel_name}/playlists/request",
+            json={"identifier": "Unknown", "index": 1},
+            headers=self._admin_headers(),
+        )
+        self.assertEqual(response.status_code, 404, response.text)
+        self.assertEqual(response.json().get("detail"), "playlist not found")
+
     def test_create_manual_playlist_and_items(self) -> None:
         response = self.client.post(
             f"/channels/{self.channel_name}/playlists",

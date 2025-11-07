@@ -44,7 +44,7 @@ from starlette.datastructures import URL
 from pydantic import BaseModel, Field, ValidationError, model_validator
 from sqlalchemy import (
     create_engine, Column, Integer, String, Text, DateTime, Boolean,
-    ForeignKey, UniqueConstraint, func, select, and_
+    ForeignKey, UniqueConstraint, func, select, and_, or_,
 )
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker, Session, joinedload, selectinload
 from sqlalchemy.exc import IntegrityError
@@ -824,6 +824,17 @@ class PlaylistSongPick(BaseModel):
     artist: str
     title: str
     youtube_link: Optional[str] = None
+
+
+class PlaylistRequestIn(BaseModel):
+    identifier: str = Field(..., min_length=1, max_length=255)
+    index: int = Field(..., ge=1)
+
+
+class PlaylistRequestOut(BaseModel):
+    request_id: int
+    playlist_item_id: int
+    song: PlaylistSongPick
 
 
 class RandomPlaylistRequestIn(BaseModel):
@@ -3539,6 +3550,67 @@ def queue_playlist_item(
         publish_channel_event(channel_pk, "request.bumped", payload_data)
     publish_queue_changed(channel_pk)
     return {"request_id": req.id}
+
+
+@app.post(
+    "/channels/{channel}/playlists/request",
+    response_model=PlaylistRequestOut,
+    dependencies=[Depends(require_token)],
+)
+def request_playlist_item(
+    channel: str,
+    payload: PlaylistRequestIn,
+    db: Session = Depends(get_db),
+):
+    channel_pk = get_channel_pk(channel, db)
+    identifier = payload.identifier.strip()
+    if not identifier:
+        raise HTTPException(status_code=400, detail="playlist identifier required")
+    identifier_lower = identifier.lower()
+    filters = [func.lower(Playlist.title) == identifier_lower, Playlist.playlist_id == identifier]
+    numeric_id: Optional[int]
+    try:
+        numeric_id = int(identifier)
+    except ValueError:
+        numeric_id = None
+    if numeric_id is not None:
+        filters.append(Playlist.id == numeric_id)
+    playlist = (
+        db.query(Playlist)
+        .options(selectinload(Playlist.items))
+        .filter(Playlist.channel_id == channel_pk)
+        .filter(or_(*filters))
+        .one_or_none()
+    )
+    if not playlist:
+        raise HTTPException(status_code=404, detail="playlist not found")
+    items = sorted(playlist.items, key=lambda entry: (entry.position or 0, entry.id))
+    if not items:
+        raise HTTPException(status_code=404, detail="playlist contains no items")
+    if payload.index > len(items):
+        raise HTTPException(status_code=400, detail="index out of range")
+    item = items[payload.index - 1]
+    playlist_user = _get_playlist_user(db, channel_pk)
+    song = _ensure_playlist_song(db, channel_pk, item)
+    req = _create_request_entry(db, channel_pk, playlist_user.id, song.id, bumped=False)
+    db.commit()
+    db.refresh(req)
+    payload_data = _serialize_request_event(db, req)
+    publish_channel_event(channel_pk, "request.added", payload_data)
+    if req.is_priority or req.bumped:
+        publish_channel_event(channel_pk, "request.bumped", payload_data)
+    publish_queue_changed(channel_pk)
+    pick = PlaylistSongPick(
+        id=song.id,
+        artist=song.artist,
+        title=song.title,
+        youtube_link=song.youtube_link,
+    )
+    return PlaylistRequestOut(
+        request_id=req.id,
+        playlist_item_id=item.id,
+        song=pick,
+    )
 
 
 @app.post(
