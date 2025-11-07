@@ -375,6 +375,45 @@ class PlaylistApiTests(unittest.TestCase):
         self.assertEqual(youtube_payload["slug"], "PL123")
         self.assertGreaterEqual(youtube_payload["item_count"], 1)
 
+    def test_schema_upgrade_allows_nullable_playlist_id(self) -> None:
+        with backend_app.engine.begin() as connection:
+            connection.execute(backend_app.text("DROP TABLE IF EXISTS playlist_items"))
+            connection.execute(backend_app.text("DROP TABLE IF EXISTS playlist_keywords"))
+            connection.execute(backend_app.text("DROP TABLE IF EXISTS playlists"))
+            connection.execute(
+                backend_app.text(
+                    """
+                    CREATE TABLE playlists (
+                        id INTEGER PRIMARY KEY,
+                        channel_id INTEGER NOT NULL,
+                        title VARCHAR NOT NULL,
+                        playlist_id VARCHAR NOT NULL,
+                        url TEXT,
+                        visibility VARCHAR NOT NULL DEFAULT 'public',
+                        created_at DATETIME NOT NULL,
+                        updated_at DATETIME NOT NULL,
+                        CONSTRAINT uq_playlists_channel_playlist UNIQUE (channel_id, playlist_id)
+                    )
+                    """
+                )
+            )
+
+        backend_app._ensure_playlist_schema()
+
+        with backend_app.engine.connect() as connection:
+            info = connection.execute(
+                backend_app.text("PRAGMA table_info('playlists')")
+            ).fetchall()
+
+        playlist_id_row = next(row for row in info if row[1] == "playlist_id")
+        self.assertEqual(playlist_id_row[3], 0)
+        column_names = {row[1] for row in info}
+        self.assertIn("description", column_names)
+        self.assertIn("source", column_names)
+        self.assertIn("visibility", column_names)
+
+        backend_app.Base.metadata.create_all(bind=backend_app.engine)
+
     def test_add_channel_seeds_favorites_playlist(self) -> None:
         _wipe_db()
         self.client.post(

@@ -649,6 +649,49 @@ def _ensure_playlist_schema() -> None:
                 )
             )
 
+        inspector = inspect(connection)
+        playlist_columns = {
+            column["name"]: column for column in inspector.get_columns("playlists")
+        }
+        playlist_id_column = playlist_columns.get("playlist_id")
+        if playlist_id_column and not playlist_id_column["nullable"]:
+            connection.execute(text("DROP TABLE IF EXISTS playlists_tmp"))
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE playlists_tmp (
+                        id INTEGER PRIMARY KEY,
+                        channel_id INTEGER NOT NULL REFERENCES active_channels(id) ON DELETE CASCADE,
+                        title VARCHAR NOT NULL,
+                        description TEXT,
+                        playlist_id VARCHAR,
+                        url TEXT,
+                        source VARCHAR NOT NULL DEFAULT 'youtube',
+                        visibility VARCHAR NOT NULL DEFAULT 'public',
+                        created_at DATETIME NOT NULL,
+                        updated_at DATETIME NOT NULL,
+                        CONSTRAINT uq_playlists_channel_playlist UNIQUE (channel_id, playlist_id)
+                    )
+                    """
+                )
+            )
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO playlists_tmp (
+                        id, channel_id, title, description, playlist_id, url, source,
+                        visibility, created_at, updated_at
+                    )
+                    SELECT
+                        id, channel_id, title, description, playlist_id, url, source,
+                        visibility, created_at, updated_at
+                    FROM playlists
+                    """
+                )
+            )
+            connection.execute(text("DROP TABLE playlists"))
+            connection.execute(text("ALTER TABLE playlists_tmp RENAME TO playlists"))
+
 
 _ensure_playlist_schema()
 bootstrap_settings_from_env()
