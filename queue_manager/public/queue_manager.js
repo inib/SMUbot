@@ -193,11 +193,11 @@ const playlistsContainer = qs('playlists');
 const playlistModeInputs = playlistForm ? Array.from(playlistForm.querySelectorAll('input[name="playlist-mode"]')) : [];
 const playlistSections = playlistForm ? Array.from(playlistForm.querySelectorAll('.playlist-form-section')) : [];
 const toastContainer = qs('toast-container');
-const playlistPickerEl = qs('playlist-picker');
-const playlistPickerSelect = qs('playlist-picker-select');
-const playlistPickerCancelBtn = qs('playlist-picker-cancel');
-const playlistPickerConfirmBtn = qs('playlist-picker-confirm');
-const playlistPickerSubtitle = qs('playlist-picker-subtitle');
+let playlistPickerEl = null;
+let playlistPickerSelect = null;
+let playlistPickerCancelBtn = null;
+let playlistPickerConfirmBtn = null;
+let playlistPickerSubtitle = null;
 
 let currentPreviewRequestId = null;
 let currentPreviewSourceKey = null;
@@ -211,6 +211,65 @@ const previewDefaultMessage = 'Select a request to load YouTube Music matches.';
 const playlistState = new Map();
 let playlistStatusTimer = null;
 let playlistPickerContext = null;
+
+function initPlaylistPickerElements() {
+  if (!playlistPickerEl) {
+    playlistPickerEl = qs('playlist-picker');
+  }
+  if (!playlistPickerSelect) {
+    playlistPickerSelect = qs('playlist-picker-select');
+  }
+  if (!playlistPickerCancelBtn) {
+    playlistPickerCancelBtn = qs('playlist-picker-cancel');
+    if (playlistPickerCancelBtn) {
+      playlistPickerCancelBtn.addEventListener('click', () => {
+        closePlaylistPicker();
+      });
+    }
+  }
+  if (!playlistPickerConfirmBtn) {
+    playlistPickerConfirmBtn = qs('playlist-picker-confirm');
+    if (playlistPickerConfirmBtn) {
+      playlistPickerConfirmBtn.addEventListener('click', async () => {
+        if (!playlistPickerContext || !playlistPickerSelect) {
+          closePlaylistPicker();
+          return;
+        }
+        const entry = playlistPickerContext.entry;
+        if (!entry || !entry.song) {
+          showToast('Song metadata is unavailable for this request.', 'error');
+          closePlaylistPicker();
+          return;
+        }
+        const selectedId = Number(playlistPickerSelect.value || '');
+        if (!selectedId) {
+          showToast('Select a playlist before adding the song.', 'error');
+          return;
+        }
+        playlistPickerConfirmBtn.disabled = true;
+        try {
+          const ok = await addSongToManualPlaylist(selectedId, entry.song);
+          if (ok) {
+            closePlaylistPicker();
+          }
+        } finally {
+          playlistPickerConfirmBtn.disabled = false;
+        }
+      });
+    }
+  }
+  if (!playlistPickerSubtitle) {
+    playlistPickerSubtitle = qs('playlist-picker-subtitle');
+  }
+  if (playlistPickerEl && !playlistPickerEl.dataset.initialized) {
+    playlistPickerEl.addEventListener('click', evt => {
+      if (evt.target === playlistPickerEl) {
+        closePlaylistPicker();
+      }
+    });
+    playlistPickerEl.dataset.initialized = 'true';
+  }
+}
 
 function clonePlaylistInfo(info) {
   if (!info) { return null; }
@@ -1544,6 +1603,7 @@ async function addSongToManualPlaylist(playlistId, song) {
 }
 
 function closePlaylistPicker() {
+  initPlaylistPickerElements();
   if (!playlistPickerEl) { return; }
   playlistPickerEl.hidden = true;
   if (playlistPickerConfirmBtn) { playlistPickerConfirmBtn.disabled = false; }
@@ -1551,6 +1611,7 @@ function closePlaylistPicker() {
 }
 
 function openPlaylistPicker(entry) {
+  initPlaylistPickerElements();
   if (!playlistPickerEl || !playlistPickerSelect) { return; }
   if (!entry || !entry.song) {
     showToast('This request is missing song details.', 'error');
@@ -1600,53 +1661,14 @@ if (playlistForm) {
   });
 }
 
-if (playlistPickerCancelBtn) {
-  playlistPickerCancelBtn.addEventListener('click', () => {
-    closePlaylistPicker();
-  });
-}
-
-if (playlistPickerEl) {
-  playlistPickerEl.addEventListener('click', evt => {
-    if (evt.target === playlistPickerEl) {
-      closePlaylistPicker();
-    }
-  });
-}
-
-if (playlistPickerConfirmBtn) {
-  playlistPickerConfirmBtn.addEventListener('click', async () => {
-    if (!playlistPickerContext || !playlistPickerSelect) {
-      closePlaylistPicker();
-      return;
-    }
-    const entry = playlistPickerContext.entry;
-    if (!entry || !entry.song) {
-      showToast('Song metadata is unavailable for this request.', 'error');
-      closePlaylistPicker();
-      return;
-    }
-    const selectedId = Number(playlistPickerSelect.value || '');
-    if (!selectedId) {
-      showToast('Select a playlist before adding the song.', 'error');
-      return;
-    }
-    playlistPickerConfirmBtn.disabled = true;
-    try {
-      const ok = await addSongToManualPlaylist(selectedId, entry.song);
-      if (ok) {
-        closePlaylistPicker();
-      }
-    } finally {
-      playlistPickerConfirmBtn.disabled = false;
-    }
-  });
-}
-
 document.addEventListener('keydown', evt => {
   if (evt.key === 'Escape' && playlistPickerContext && playlistPickerEl && !playlistPickerEl.hidden) {
     closePlaylistPicker();
   }
+});
+
+document.addEventListener('DOMContentLoaded', () => {
+  initPlaylistPickerElements();
 });
 
 function formatTier(tier) {
