@@ -124,6 +124,8 @@ class PlaylistApiTests(unittest.TestCase):
         self.assertEqual(playlist["visibility"], "unlisted")
         self.assertEqual(playlist["keywords"], ["chill", "default"])
         self.assertEqual(playlist["item_count"], 2)
+        self.assertEqual(playlist["source"], "youtube")
+        self.assertIsNone(playlist["description"])
 
         items_response = self.client.get(
             f"/channels/{self.channel_name}/playlists/{playlist_id}/items",
@@ -136,6 +138,7 @@ class PlaylistApiTests(unittest.TestCase):
         self.assertEqual(first["video_id"], "vid1")
         self.assertEqual(first["artist"], "Artist A")
         self.assertEqual(first["duration_seconds"], 215)
+        self.assertEqual(first["url"], "https://www.youtube.com/watch?v=vid1")
 
     def test_random_request_uses_default_keyword(self) -> None:
         self._create_sample_playlist()
@@ -196,6 +199,88 @@ class PlaylistApiTests(unittest.TestCase):
             self.assertIsNotNone(user)
             if user:
                 self.assertEqual(user.twitch_id, "__playlist__")
+        finally:
+            db.close()
+
+    def test_create_manual_playlist_and_items(self) -> None:
+        response = self.client.post(
+            f"/channels/{self.channel_name}/playlists",
+            json={
+                "manual": {"title": "Manual Mix", "description": "chill vibes"},
+                "keywords": ["Default", "Favorites"],
+                "visibility": "public",
+            },
+            headers=self._admin_headers(),
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        playlist_id = response.json()["id"]
+
+        add_item = self.client.post(
+            f"/channels/{self.channel_name}/playlists/{playlist_id}/items",
+            json={"title": "Song A", "artist": "Artist A", "video_id": "abc123"},
+            headers=self._admin_headers(),
+        )
+        self.assertEqual(add_item.status_code, 200, add_item.text)
+        payload = add_item.json()
+        self.assertEqual(payload["position"], 1)
+        self.assertEqual(payload["video_id"], "abc123")
+        self.assertEqual(payload["url"], "https://www.youtube.com/watch?v=abc123")
+
+        add_second = self.client.post(
+            f"/channels/{self.channel_name}/playlists/{playlist_id}/items",
+            json={"title": "Song B", "url": "https://youtu.be/xyz789"},
+            headers=self._admin_headers(),
+        )
+        self.assertEqual(add_second.status_code, 200, add_second.text)
+        second = add_second.json()
+        self.assertEqual(second["position"], 2)
+        self.assertEqual(second["video_id"], "xyz789")
+
+        list_response = self.client.get(
+            f"/channels/{self.channel_name}/playlists/{playlist_id}/items",
+            headers=self._admin_headers(),
+        )
+        self.assertEqual(list_response.status_code, 200, list_response.text)
+        items = list_response.json()
+        self.assertEqual(len(items), 2)
+        self.assertEqual(items[0]["video_id"], "abc123")
+
+        delete_response = self.client.delete(
+            f"/channels/{self.channel_name}/playlists/{playlist_id}/items/{second['id']}",
+            headers=self._admin_headers(),
+        )
+        self.assertEqual(delete_response.status_code, 204, delete_response.text)
+
+        dup_response = self.client.post(
+            f"/channels/{self.channel_name}/playlists/{playlist_id}/items",
+            json={"title": "Duplicate", "video_id": "abc123"},
+            headers=self._admin_headers(),
+        )
+        self.assertEqual(dup_response.status_code, 409, dup_response.text)
+
+    def test_add_channel_seeds_favorites_playlist(self) -> None:
+        _wipe_db()
+        self.client.post(
+            "/channels",
+            json={
+                "channel_name": "manualtester",
+                "channel_id": "manual123",
+                "join_active": 1,
+            },
+            headers=self._admin_headers(),
+        )
+        db = backend_app.SessionLocal()
+        try:
+            channel = db.query(backend_app.ActiveChannel).filter_by(channel_name="manualtester").one()
+            playlists = db.query(backend_app.Playlist).filter_by(channel_id=channel.id).all()
+            self.assertTrue(any(pl.source == "manual" and pl.title == "Favorites" for pl in playlists))
+            favorites = next(pl for pl in playlists if pl.title == "Favorites")
+            keywords = sorted(kw.keyword for kw in favorites.keywords)
+            self.assertEqual(keywords, ["default", "favorite"])
+            items = db.query(backend_app.PlaylistItem).filter_by(playlist_id=favorites.id).all()
+            self.assertEqual(len(items), 1)
+            self.assertEqual(items[0].video_id, "9Pzj6U5c2cs")
+            self.assertEqual(items[0].position, 1)
         finally:
             db.close()
 
