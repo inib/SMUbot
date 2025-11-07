@@ -814,6 +814,29 @@ class PlaylistItemOut(BaseModel):
     duration_seconds: Optional[int] = None
 
 
+class PublicPlaylistItemOut(BaseModel):
+    id: int
+    title: str
+    artist: Optional[str]
+    video_id: Optional[str]
+    url: Optional[str]
+    position: int
+    duration_seconds: Optional[int] = None
+
+
+class PublicPlaylistOut(BaseModel):
+    id: int
+    title: str
+    description: Optional[str]
+    slug: str
+    source: str
+    visibility: str
+    url: Optional[str]
+    keywords: List[str] = Field(default_factory=list)
+    item_count: int
+    items: List[PublicPlaylistItemOut] = Field(default_factory=list)
+
+
 class PlaylistQueueIn(BaseModel):
     item_id: int
     bumped: bool = False
@@ -3236,6 +3259,62 @@ def list_playlists(channel: str, db: Session = Depends(get_db)):
             )
         )
     return results
+
+
+@app.get(
+    "/channels/{channel}/public/playlists",
+    response_model=List[PublicPlaylistOut],
+)
+def list_public_playlists(
+    channel: str,
+    response: Response,
+    db: Session = Depends(get_db),
+):
+    channel_pk = get_channel_pk(channel, db)
+    rows: List[Playlist] = (
+        db.query(Playlist)
+        .options(selectinload(Playlist.items), selectinload(Playlist.keywords))
+        .filter(Playlist.channel_id == channel_pk, Playlist.visibility == "public")
+        .order_by(Playlist.title.asc(), Playlist.id.asc())
+        .all()
+    )
+    payload: List[PublicPlaylistOut] = []
+    for playlist in rows:
+        keywords = sorted(
+            {kw.keyword for kw in playlist.keywords if kw.keyword},
+        )
+        ordered_items = sorted(
+            playlist.items,
+            key=lambda entry: ((entry.position or 0), entry.id),
+        )
+        slug = playlist.playlist_id or str(playlist.id)
+        payload.append(
+            PublicPlaylistOut(
+                id=playlist.id,
+                title=playlist.title,
+                description=playlist.description,
+                slug=slug,
+                source=playlist.source,
+                visibility=playlist.visibility,
+                url=playlist.url,
+                keywords=keywords,
+                item_count=len(ordered_items),
+                items=[
+                    PublicPlaylistItemOut(
+                        id=item.id,
+                        title=item.title,
+                        artist=item.artist,
+                        video_id=item.video_id,
+                        url=item.url,
+                        position=item.position,
+                        duration_seconds=item.duration_seconds,
+                    )
+                    for item in ordered_items
+                ],
+            )
+        )
+    response.headers.setdefault("Cache-Control", "public, max-age=30")
+    return payload
 
 
 @app.post(
