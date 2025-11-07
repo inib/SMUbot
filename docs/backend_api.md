@@ -42,6 +42,7 @@ This document summarizes the REST endpoints exposed by `backend_app.py`.
 ## Playlists
 | Method | Path | Description |
 |--------|------|-------------|
+| GET | `/channels/{channel}/public/playlists` | Read-only view of public playlists (including manual sets) with their songs. |
 | GET | `/channels/{channel}/playlists` | List playlists configured for a channel. |
 | POST | `/channels/{channel}/playlists` | Add a new playlist from YouTube or manual entries (admin). |
 | GET | `/channels/{channel}/playlists/{playlist_id}/items` | List items contained in a playlist. |

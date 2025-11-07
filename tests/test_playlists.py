@@ -95,13 +95,13 @@ class PlaylistApiTests(unittest.TestCase):
     def _admin_headers(self) -> dict[str, str]:
         return {"X-Admin-Token": backend_app.ADMIN_TOKEN}
 
-    def _create_sample_playlist(self) -> int:
+    def _create_sample_playlist(self, visibility: str = "notlisted") -> int:
         response = self.client.post(
             f"/channels/{self.channel_name}/playlists",
             json={
                 "url": "https://www.youtube.com/playlist?list=PL123",
                 "keywords": ["Default", " chill "],
-                "visibility": "notlisted",
+                "visibility": visibility,
             },
             headers=self._admin_headers(),
         )
@@ -308,6 +308,72 @@ class PlaylistApiTests(unittest.TestCase):
             headers=self._admin_headers(),
         )
         self.assertEqual(dup_response.status_code, 409, dup_response.text)
+
+    def test_public_playlists_endpoint_includes_public_and_items(self) -> None:
+        hidden_resp = self.client.post(
+            f"/channels/{self.channel_name}/playlists",
+            json={
+                "manual": {"title": "Hidden Mix"},
+                "visibility": "notlisted",
+            },
+            headers=self._admin_headers(),
+        )
+        self.assertEqual(hidden_resp.status_code, 200, hidden_resp.text)
+        hidden_id = hidden_resp.json()["id"]
+
+        youtube_id = self._create_sample_playlist("public")
+
+        manual_resp = self.client.post(
+            f"/channels/{self.channel_name}/playlists",
+            json={
+                "manual": {"title": "Road Trip", "description": "Upbeat"},
+                "visibility": "public",
+            },
+            headers=self._admin_headers(),
+        )
+        self.assertEqual(manual_resp.status_code, 200, manual_resp.text)
+        manual_id = manual_resp.json()["id"]
+
+        first_item = self.client.post(
+            f"/channels/{self.channel_name}/playlists/{manual_id}/items",
+            json={"title": "Song A", "video_id": "aaa111"},
+            headers=self._admin_headers(),
+        )
+        self.assertEqual(first_item.status_code, 200, first_item.text)
+        second_item = self.client.post(
+            f"/channels/{self.channel_name}/playlists/{manual_id}/items",
+            json={"title": "Song B", "artist": "Band", "duration_seconds": 120},
+            headers=self._admin_headers(),
+        )
+        self.assertEqual(second_item.status_code, 200, second_item.text)
+
+        db = backend_app.SessionLocal()
+        try:
+            backend_app.set_settings(db, {"setup_complete": "1"})
+        finally:
+            db.close()
+
+        response = self.client.get(
+            f"/channels/{self.channel_name}/public/playlists",
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.headers.get("Cache-Control"), "public, max-age=30")
+        data = response.json()
+        ids = {entry["id"] for entry in data}
+        self.assertNotIn(hidden_id, ids)
+        self.assertIn(youtube_id, ids)
+        self.assertIn(manual_id, ids)
+
+        manual_payload = next(entry for entry in data if entry["id"] == manual_id)
+        self.assertEqual(manual_payload["slug"], str(manual_id))
+        self.assertEqual(manual_payload["item_count"], 2)
+        self.assertEqual(len(manual_payload["items"]), 2)
+        self.assertEqual(manual_payload["items"][0]["title"], "Song A")
+        self.assertEqual(manual_payload["items"][1]["position"], 2)
+
+        youtube_payload = next(entry for entry in data if entry["id"] == youtube_id)
+        self.assertEqual(youtube_payload["slug"], "PL123")
+        self.assertGreaterEqual(youtube_payload["item_count"], 1)
 
     def test_add_channel_seeds_favorites_playlist(self) -> None:
         _wipe_db()
