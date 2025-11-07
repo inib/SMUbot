@@ -44,7 +44,7 @@ from starlette.datastructures import URL
 from pydantic import BaseModel, Field, ValidationError, model_validator
 from sqlalchemy import (
     create_engine, Column, Integer, String, Text, DateTime, Boolean,
-    ForeignKey, UniqueConstraint, func, select, and_, or_,
+    ForeignKey, UniqueConstraint, func, select, and_, or_, inspect, text,
 )
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker, Session, joinedload, selectinload
 from sqlalchemy.exc import IntegrityError
@@ -604,6 +604,53 @@ class PlaylistItem(Base):
 # DB bootstrap
 # =====================================
 Base.metadata.create_all(bind=engine)
+
+
+def _ensure_playlist_schema() -> None:
+    """Ensure legacy databases have the latest playlist columns."""
+
+    with engine.begin() as connection:
+        inspector = inspect(connection)
+        if "playlists" not in inspector.get_table_names():
+            return
+
+        columns = {column["name"] for column in inspector.get_columns("playlists")}
+
+        if "description" not in columns:
+            connection.execute(text("ALTER TABLE playlists ADD COLUMN description TEXT"))
+
+        added_source = False
+        if "source" not in columns:
+            connection.execute(
+                text(
+                    "ALTER TABLE playlists ADD COLUMN source VARCHAR NOT NULL DEFAULT 'youtube'"
+                )
+            )
+            added_source = True
+
+        added_visibility = False
+        if "visibility" not in columns:
+            connection.execute(
+                text(
+                    "ALTER TABLE playlists ADD COLUMN visibility VARCHAR NOT NULL DEFAULT 'public'"
+                )
+            )
+            added_visibility = True
+
+        if added_source:
+            connection.execute(
+                text("UPDATE playlists SET source = 'youtube' WHERE source IS NULL OR source = ''")
+            )
+
+        if added_visibility:
+            connection.execute(
+                text(
+                    "UPDATE playlists SET visibility = 'public' WHERE visibility IS NULL OR visibility = ''"
+                )
+            )
+
+
+_ensure_playlist_schema()
 bootstrap_settings_from_env()
 
 # =====================================
