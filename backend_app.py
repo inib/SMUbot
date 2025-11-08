@@ -866,6 +866,7 @@ class PlaylistCreate(BaseModel):
 class PlaylistUpdate(BaseModel):
     keywords: Optional[List[str]] = None
     visibility: Optional[str] = None
+    slug: Optional[str] = Field(default=None, max_length=255)
 
 
 class PlaylistOut(BaseModel):
@@ -2744,7 +2745,11 @@ def _playlists_with_keyword(db: Session, channel_pk: int, keyword: str) -> List[
         db.query(Playlist)
         .join(PlaylistKeyword)
         .options(selectinload(Playlist.items))
-        .filter(Playlist.channel_id == channel_pk, PlaylistKeyword.keyword == keyword)
+        .filter(
+            Playlist.channel_id == channel_pk,
+            PlaylistKeyword.keyword == keyword,
+            Playlist.visibility == "public",
+        )
         .all()
     )
 
@@ -3510,6 +3515,28 @@ def update_playlist(
     )
     if not playlist:
         raise HTTPException(status_code=404, detail="playlist not found")
+    slug_included = "slug" in payload.model_fields_set
+    if slug_included:
+        if playlist.source != "manual" and playlist.playlist_id not in (None, ""):
+            raise HTTPException(status_code=400, detail="slug can only be changed for manual playlists")
+        if payload.slug is None:
+            slug_value: Optional[str] = None
+        else:
+            slug_value = payload.slug.strip()
+            if not slug_value:
+                slug_value = None
+        if slug_value:
+            existing = (
+                db.query(Playlist)
+                .filter(Playlist.channel_id == channel_pk)
+                .filter(Playlist.id != playlist.id)
+                .filter(Playlist.playlist_id == slug_value)
+                .one_or_none()
+            )
+            if existing:
+                raise HTTPException(status_code=409, detail="playlist slug already in use")
+        playlist.playlist_id = slug_value
+
     if payload.visibility is not None:
         playlist.visibility = _normalize_visibility(payload.visibility)
     if payload.keywords is not None:
@@ -3763,6 +3790,8 @@ def request_playlist_item(
         .one_or_none()
     )
     if not playlist:
+        raise HTTPException(status_code=404, detail="playlist not found")
+    if playlist.visibility != "public":
         raise HTTPException(status_code=404, detail="playlist not found")
     items = sorted(playlist.items, key=lambda entry: (entry.position or 0, entry.id))
     if not items:

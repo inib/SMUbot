@@ -133,6 +133,16 @@ a:hover{text-decoration:underline}
 .playlist-manage-actions{display:flex;flex-wrap:wrap;gap:8px}
 .playlist-manage-actions button{padding:.35rem .7rem;border-radius:8px;border:1px solid #24283b;background:#1a1d29;color:var(--text);cursor:pointer;font-size:12px;font-weight:600}
 .playlist-manage-actions button:hover{background:#24283b}
+.playlist-details-form{display:flex;flex-direction:column;gap:12px}
+.playlist-details-grid{display:flex;flex-wrap:wrap;gap:12px}
+.playlist-field{flex:1 1 200px;display:flex;flex-direction:column;gap:6px}
+.playlist-field label{font-size:13px;font-weight:600;color:var(--muted)}
+.playlist-field input,.playlist-field select{padding:.4rem .6rem;border-radius:8px;border:1px solid #24283b;background:#151824;color:var(--text);font-size:13px}
+.playlist-field input:disabled{opacity:.6;cursor:not-allowed}
+.playlist-field-hint{margin:0;font-size:12px;color:var(--muted)}
+.playlist-details-actions{display:flex;gap:8px}
+.playlist-details-actions button{padding:.35rem .7rem;border-radius:8px;border:1px solid #24283b;background:#1a1d29;color:var(--text);cursor:pointer;font-size:12px;font-weight:600}
+.playlist-details-actions button:hover{background:#24283b}
 .playlist-manual-hint{margin:0;font-size:11px;color:var(--muted)}
 .playlist-keywords-form{display:flex;flex-direction:column;gap:8px}
 .playlist-keywords-form label{font-weight:600;color:var(--text);font-size:13px}
