@@ -1043,9 +1043,24 @@ class SongBot(commands.Bot):
             )
             return
         match = None
+        playlist_lookup = playlist_name.lower()
         for entry in playlists or []:
             title = str(entry.get('title', '')).strip()
-            if title.lower() == playlist_name.lower():
+            if title and title.lower() == playlist_lookup:
+                match = entry
+                break
+            slug_candidates: Set[str] = set()
+            identifier = entry.get('playlist_id')
+            if isinstance(identifier, str):
+                slug = identifier.strip()
+                if slug:
+                    slug_candidates.add(slug.lower())
+            entry_id = entry.get('id')
+            if entry_id is not None:
+                entry_slug = str(entry_id).strip()
+                if entry_slug:
+                    slug_candidates.add(entry_slug.lower())
+            if playlist_lookup in slug_candidates:
                 match = entry
                 break
         if not match:

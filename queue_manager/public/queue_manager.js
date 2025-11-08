@@ -1225,6 +1225,110 @@ function renderPlaylists(playlists) {
       manage.appendChild(actionsBar);
     }
 
+    const detailsForm = document.createElement('form');
+    detailsForm.className = 'playlist-details-form';
+
+    const slugField = document.createElement('div');
+    slugField.className = 'playlist-field';
+    const slugLabel = document.createElement('label');
+    const slugInputId = `playlist-slug-${pl.id}`;
+    slugLabel.setAttribute('for', slugInputId);
+    slugLabel.textContent = 'Slug';
+    const slugInput = document.createElement('input');
+    slugInput.type = 'text';
+    slugInput.id = slugInputId;
+    slugInput.autocomplete = 'off';
+    slugInput.placeholder = info?.source === 'manual' ? 'letters, numbers, hyphen, or underscore' : '';
+    slugInput.value = info?.playlist_id || '';
+    if (info?.source !== 'manual') {
+      slugInput.disabled = true;
+    }
+    slugField.appendChild(slugLabel);
+    slugField.appendChild(slugInput);
+    if (info?.source !== 'manual') {
+      const slugHint = document.createElement('p');
+      slugHint.className = 'muted playlist-field-hint';
+      slugHint.textContent = 'Slug is managed automatically for imported playlists.';
+      slugField.appendChild(slugHint);
+    } else {
+      const slugHint = document.createElement('p');
+      slugHint.className = 'muted playlist-field-hint';
+      slugHint.textContent = 'Set a custom command slug. Leave blank to use the numeric ID.';
+      slugField.appendChild(slugHint);
+    }
+
+    const visibilityField = document.createElement('div');
+    visibilityField.className = 'playlist-field';
+    const visibilityLabel = document.createElement('label');
+    const visibilitySelectId = `playlist-visibility-${pl.id}`;
+    visibilityLabel.setAttribute('for', visibilitySelectId);
+    visibilityLabel.textContent = 'Visibility';
+    const visibilitySelect = document.createElement('select');
+    visibilitySelect.id = visibilitySelectId;
+    const publicOption = document.createElement('option');
+    publicOption.value = 'public';
+    publicOption.textContent = 'Public';
+    visibilitySelect.appendChild(publicOption);
+    const unlistedOption = document.createElement('option');
+    unlistedOption.value = 'unlisted';
+    unlistedOption.textContent = 'Unlisted';
+    visibilitySelect.appendChild(unlistedOption);
+    visibilitySelect.value = info?.visibility === 'unlisted' ? 'unlisted' : 'public';
+    visibilityField.appendChild(visibilityLabel);
+    visibilityField.appendChild(visibilitySelect);
+    const visibilityHint = document.createElement('p');
+    visibilityHint.className = 'muted playlist-field-hint';
+    visibilityHint.textContent = 'Unlisted playlists stay hidden on the public site and cannot be requested.';
+    visibilityField.appendChild(visibilityHint);
+
+    const detailsActions = document.createElement('div');
+    detailsActions.className = 'playlist-details-actions';
+    const detailsSave = document.createElement('button');
+    detailsSave.type = 'submit';
+    detailsSave.textContent = 'Save details';
+    detailsActions.appendChild(detailsSave);
+
+    const detailsGrid = document.createElement('div');
+    detailsGrid.className = 'playlist-details-grid';
+    detailsGrid.appendChild(slugField);
+    detailsGrid.appendChild(visibilityField);
+
+    detailsForm.appendChild(detailsGrid);
+    detailsForm.appendChild(detailsActions);
+    detailsForm.addEventListener('submit', evt => {
+      evt.preventDefault();
+      const changes = {};
+      const latestInfo = playlistState.get(pl.id)?.info || info;
+      if (latestInfo?.source === 'manual') {
+        const nextSlug = slugInput.value.trim();
+        const normalized = nextSlug ? nextSlug : null;
+        const currentSlug = latestInfo?.playlist_id ? String(latestInfo.playlist_id) : null;
+        if (normalized !== currentSlug) {
+          changes.slug = normalized;
+        }
+      }
+      const selectedVisibility = visibilitySelect.value === 'unlisted' ? 'unlisted' : 'public';
+      const currentVisibility = latestInfo?.visibility === 'unlisted' ? 'unlisted' : 'public';
+      if (selectedVisibility !== currentVisibility) {
+        changes.visibility = selectedVisibility;
+      }
+      if (!Object.keys(changes).length) {
+        showToast('No playlist changes to save.', 'info');
+        return;
+      }
+      const updatePromise = updatePlaylistDetails(pl.id, changes, { form: detailsForm, submitBtn: detailsSave });
+      updatePromise
+        .then(() => {
+          const refreshed = playlistState.get(pl.id)?.info;
+          if (refreshed) {
+            slugInput.value = refreshed.playlist_id || '';
+            visibilitySelect.value = refreshed.visibility === 'unlisted' ? 'unlisted' : 'public';
+          }
+        })
+        .catch(() => {});
+    });
+    manage.appendChild(detailsForm);
+
     const keywordsForm = document.createElement('form');
     keywordsForm.className = 'playlist-keywords-form';
     const keywordsLabel = document.createElement('label');
