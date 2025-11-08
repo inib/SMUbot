@@ -3864,13 +3864,37 @@ def search_songs(channel: str, search: Optional[str] = Query(None), db: Session 
     q = db.query(Song).filter(Song.channel_id == channel_pk)
     if search:
         like = f"%{search}%"
-        q = q.filter((Song.artist.ilike(like)) | (Song.title.ilike(like)))
+        q = q.filter(
+            (
+                (Song.artist.ilike(like))
+                | (Song.title.ilike(like))
+                | (Song.youtube_link.ilike(like))
+            )
+        )
     return q.order_by(Song.artist.asc(), Song.title.asc()).all()
 
 @app.post("/channels/{channel}/songs", response_model=dict, dependencies=[Depends(require_token)])
 def add_song(channel: str, payload: SongIn, db: Session = Depends(get_db)):
     channel_pk = get_channel_pk(channel, db)
-    song = Song(channel_id=channel_pk, **payload.model_dump())
+    payload_data = payload.model_dump()
+    youtube_link = payload_data.get("youtube_link")
+    normalized_link: Optional[str] = None
+    if youtube_link:
+        normalized_link, _ = _canonicalize_video_url(youtube_link, None)
+        target_link = normalized_link or youtube_link.strip()
+        if target_link:
+            existing = (
+                db.query(Song)
+                .filter(Song.channel_id == channel_pk, Song.youtube_link == target_link)
+                .one_or_none()
+            )
+            if existing:
+                return {"id": existing.id}
+        if normalized_link:
+            payload_data["youtube_link"] = normalized_link
+        elif youtube_link:
+            payload_data["youtube_link"] = youtube_link.strip()
+    song = Song(channel_id=channel_pk, **payload_data)
     db.add(song)
     db.commit()
     publish_queue_changed(channel_pk)
