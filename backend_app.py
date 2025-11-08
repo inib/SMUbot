@@ -2009,11 +2009,17 @@ def auth_session_delete(
     current: TwitchUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    owned = db.query(ActiveChannel).filter_by(owner_id=current.id).all()
-    for channel in owned:
+    user = db.get(TwitchUser, current.id)
+    if user is None:
+        response.delete_cookie(ADMIN_SESSION_COOKIE, path="/")
+        return {"success": True}
+
+    owned_channels = list(user.owned_channels)
+    for channel in owned_channels:
         db.delete(channel)
-    db.query(ChannelModerator).filter_by(user_id=current.id).delete()
-    db.delete(current)
+
+    db.query(ChannelModerator).filter_by(user_id=user.id).delete(synchronize_session=False)
+    db.delete(user)
     db.commit()
     response.delete_cookie(ADMIN_SESSION_COOKIE, path="/")
     return {"success": True}
