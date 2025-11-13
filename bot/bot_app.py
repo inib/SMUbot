@@ -6,7 +6,7 @@ from pathlib import Path
 from datetime import datetime, timedelta
 
 import aiohttp
-from twitchio import eventsub
+from twitchio import eventsub, HTTPException
 from twitchio.ext import commands
 from twitchio.payloads import TokenRefreshedPayload
 
@@ -665,17 +665,55 @@ class SongBot(commands.Bot):
             raise RuntimeError('Channel missing broadcaster id')
         if broadcaster_id in self._subscription_ids:
             return
+        existing_id = await self._find_existing_subscription_id(broadcaster_id)
+        if existing_id:
+            self._subscription_ids[broadcaster_id] = existing_id
+            logger.info(
+                "Reusing existing websocket subscription %s for broadcaster %s",
+                existing_id,
+                broadcaster_id,
+            )
+            return
         payload = eventsub.ChatMessageSubscription(
             broadcaster_user_id=broadcaster_id,
             user_id=self.bot_user_id,
         )
-        response = await self.subscribe_websocket(payload=payload, as_bot=True)
+        try:
+            response = await self.subscribe_websocket(payload=payload, as_bot=True)
+        except HTTPException as exc:
+            if exc.status in {409, 429}:
+                logger.warning(
+                    "subscribe_websocket returned %s for broadcaster %s; attempting to reuse existing subscription",
+                    exc.status,
+                    broadcaster_id,
+                )
+                recovered_id = await self._find_existing_subscription_id(broadcaster_id)
+                if recovered_id:
+                    self._subscription_ids[broadcaster_id] = recovered_id
+                    logger.info(
+                        "Reused existing websocket subscription %s for broadcaster %s after %s response",
+                        recovered_id,
+                        broadcaster_id,
+                        exc.status,
+                    )
+                    return
+                logger.error(
+                    "Unable to recover websocket subscription for broadcaster %s after %s response",
+                    broadcaster_id,
+                    exc.status,
+                )
+            raise
         sub_id = self._extract_subscription_id(response)
         if not sub_id:
             sub_id = await self._find_existing_subscription_id(broadcaster_id)
         if not sub_id:
             raise RuntimeError('Subscription id unavailable')
         self._subscription_ids[broadcaster_id] = sub_id
+        logger.info(
+            "Created new websocket subscription %s for broadcaster %s",
+            sub_id,
+            broadcaster_id,
+        )
 
     async def _unsubscribe_channel(self, broadcaster_id: str) -> None:
         sub_id = self._subscription_ids.pop(broadcaster_id, None)
