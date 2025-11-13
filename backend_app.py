@@ -31,6 +31,7 @@ from fastapi import (
     Depends,
     Header,
     Query,
+    Path,
     APIRouter,
     Request as FastAPIRequest,
     Response,
@@ -4566,25 +4567,93 @@ def add_request(channel: str, payload: RequestCreate, db: Session = Depends(get_
     publish_queue_changed(channel_pk)
     return {"request_id": req.id}
 
+REQUEST_IDENTIFIER_PATTERN = r"(?i)^(?:\d+|top|previous|last|random)$"
+
+
+def resolve_queue_request(db: Session, channel_pk: int, identifier: str) -> Request:
+    normalized = (identifier or "").strip()
+    if not normalized:
+        raise HTTPException(status_code=404, detail="request not found")
+
+    if normalized.isdigit():
+        req = db.execute(
+            select(Request).where(
+                and_(Request.id == int(normalized), Request.channel_id == channel_pk)
+            )
+        ).scalar_one_or_none()
+        if req:
+            return req
+        raise HTTPException(status_code=404, detail="request not found")
+
+    keyword = normalized.lower()
+    stream_id = current_stream(db, channel_pk)
+    base_query = (
+        db.query(Request)
+        .filter(Request.channel_id == channel_pk, Request.stream_id == stream_id)
+    )
+
+    if keyword == "top":
+        req = (
+            base_query.filter(Request.played == 0)
+            .order_by(
+                Request.is_priority.desc(),
+                Request.position.asc(),
+                Request.request_time.asc(),
+                Request.id.asc(),
+            )
+            .first()
+        )
+    elif keyword == "previous":
+        req = (
+            base_query.filter(Request.played == 1)
+            .order_by(
+                Request.request_time.desc(),
+                Request.id.desc(),
+            )
+            .first()
+        )
+    elif keyword == "last":
+        req = (
+            base_query.filter(Request.played == 0)
+            .order_by(
+                Request.position.desc(),
+                Request.request_time.desc(),
+                Request.id.desc(),
+            )
+            .first()
+        )
+    elif keyword == "random":
+        req = base_query.filter(Request.played == 0).order_by(func.random()).first()
+    else:
+        raise HTTPException(status_code=404, detail="request not found")
+
+    if not req:
+        raise HTTPException(status_code=404, detail="request not found")
+    return req
+
+
 @app.put("/channels/{channel}/queue/{request_id}", dependencies=[Depends(require_token)])
-def update_request(channel: str, request_id: int, payload: RequestUpdate, db: Session = Depends(get_db)):
+def update_request(
+    channel: str,
+    payload: RequestUpdate,
+    request_id: str = Path(..., pattern=REQUEST_IDENTIFIER_PATTERN),
+    db: Session = Depends(get_db),
+):
     channel_pk = get_channel_pk(channel, db)
-    r = db.query(Request).filter(Request.id == request_id, Request.channel_id == channel_pk).one_or_none()
-    if not r:
-        raise HTTPException(404, "request not found")
-    prev_played = bool(r.played)
-    prev_bumped = bool(r.bumped)
-    prev_priority = bool(r.is_priority)
+    req = resolve_queue_request(db, channel_pk, request_id)
+    prev_played = bool(req.played)
+    prev_bumped = bool(req.bumped)
+    prev_priority = bool(req.is_priority)
     played_now = False
     became_bumped = False
     became_priority = False
     if payload.played is not None:
-        r.played = 1 if payload.played else 0
-        if r.played and not prev_played:
+        req.played = 1 if payload.played else 0
+        if req.played and not prev_played:
             played_now = True
-        if r.played:
+        if req.played:
             # Update song stats
-            s = db.get(Song, r.song_id)
+            s = db.get(Song, req.song_id)
             now = datetime.utcnow()
             if s:
                 if not s.date_first_played:
@@ -4592,20 +4661,20 @@ def update_request(channel: str, request_id: int, payload: RequestUpdate, db: Se
                 s.date_last_played = now
                 s.total_played = (s.total_played or 0) + 1
     if payload.bumped is not None:
-        r.bumped = 1 if payload.bumped else 0
-        if r.bumped and not prev_bumped:
+        req.bumped = 1 if payload.bumped else 0
+        if req.bumped and not prev_bumped:
             became_bumped = True
     if payload.is_priority is not None:
-        r.is_priority = 1 if payload.is_priority else 0
-        if r.is_priority and not r.priority_source:
-            r.priority_source = 'admin'
-        if r.is_priority and not prev_priority:
+        req.is_priority = 1 if payload.is_priority else 0
+        if req.is_priority and not req.priority_source:
+            req.priority_source = 'admin'
+        if req.is_priority and not prev_priority:
             became_priority = True
     db.commit()
-    db.refresh(r)
-    event_payload = _serialize_request_event(db, r)
+    db.refresh(req)
+    event_payload = _serialize_request_event(db, req)
     if played_now:
-        up_next = _next_pending_request(db, channel_pk, r.stream_id)
+        up_next = _next_pending_request(db, channel_pk, req.stream_id)
         publish_channel_event(
             channel_pk,
             "request.played",
@@ -4620,12 +4689,14 @@ def update_request(channel: str, request_id: int, payload: RequestUpdate, db: Se
     return {"success": True}
 
 @app.delete("/channels/{channel}/queue/{request_id}", dependencies=[Depends(require_token)])
-def remove_request(channel: str, request_id: int, db: Session = Depends(get_db)):
+def remove_request(
+    channel: str,
+    request_id: str = Path(..., pattern=REQUEST_IDENTIFIER_PATTERN),
+    db: Session = Depends(get_db),
+):
     channel_pk = get_channel_pk(channel, db)
-    r = db.query(Request).filter(Request.id == request_id, Request.channel_id == channel_pk).one_or_none()
-    if not r:
-        raise HTTPException(404, "request not found")
-    db.delete(r)
+    req = resolve_queue_request(db, channel_pk, request_id)
+    db.delete(req)
     db.commit()
     publish_queue_changed(channel_pk)
     return {"success": True}
@@ -4664,34 +4735,32 @@ def random_nonpriority(channel: str, db: Session = Depends(get_db)):
     }
 
 @app.post("/channels/{channel}/queue/{request_id}/bump_admin", dependencies=[Depends(require_token)])
-def bump_admin(channel: str, request_id: int, db: Session = Depends(get_db)):
+def bump_admin(
+    channel: str,
+    request_id: str = Path(..., pattern=REQUEST_IDENTIFIER_PATTERN),
+    db: Session = Depends(get_db),
+):
     channel_pk = get_channel_pk(channel, db)
-    r = db.query(Request).filter(Request.id == request_id, Request.channel_id == channel_pk).one_or_none()
-    if not r:
-        raise HTTPException(404, "request not found")
-    r.is_priority = 1
-    r.priority_source = 'admin'
+    req = resolve_queue_request(db, channel_pk, request_id)
+    req.is_priority = 1
+    req.priority_source = 'admin'
     db.commit()
-    db.refresh(r)
-    payload = _serialize_request_event(db, r)
+    db.refresh(req)
+    payload = _serialize_request_event(db, req)
     publish_channel_event(channel_pk, "request.bumped", payload)
     publish_queue_changed(channel_pk)
     return {"success": True}
 
-def _get_req(db, channel_pk: int, request_id: int):
-    req = db.execute(
-        select(Request).where(and_(Request.id == request_id,
-                                        Request.channel_id == channel_pk))
-    ).scalar_one_or_none()
-    if not req:
-        raise HTTPException(status_code=404, detail="request not found")
-    return req
-
 @app.post("/channels/{channel}/queue/{request_id}/move", dependencies=[Depends(require_token)])
-def move_request(channel: str, request_id: int, payload: MoveRequestIn, db: Session = Depends(get_db)):
+def move_request(
+    channel: str,
+    payload: MoveRequestIn,
+    request_id: str = Path(..., pattern=REQUEST_IDENTIFIER_PATTERN),
+    db: Session = Depends(get_db),
+):
     channel_pk = get_channel_pk(channel, db)
     direction = payload.direction
-    req = _get_req(db, channel_pk, request_id)
+    req = resolve_queue_request(db, channel_pk, request_id)
     # find neighbor within same stream
     if direction == "up":
         neighbor = db.execute(
@@ -4719,9 +4788,13 @@ def move_request(channel: str, request_id: int, payload: MoveRequestIn, db: Sess
     return {"success": True}
 
 @app.post("/channels/{channel}/queue/{request_id}/skip", dependencies=[Depends(require_token)])
-def skip_request(channel: str, request_id: int, db: Session = Depends(get_db)):
+def skip_request(
+    channel: str,
+    request_id: str = Path(..., pattern=REQUEST_IDENTIFIER_PATTERN),
+    db: Session = Depends(get_db),
+):
     channel_pk = get_channel_pk(channel, db)
-    req = _get_req(db, channel_pk, request_id)
+    req = resolve_queue_request(db, channel_pk, request_id)
     # move to bottom of pending
     max_pos = (
         db.query(func.coalesce(func.max(Request.position), 0))
@@ -4738,9 +4811,14 @@ def skip_request(channel: str, request_id: int, db: Session = Depends(get_db)):
     return {"success": True}
 
 @app.post("/channels/{channel}/queue/{request_id}/priority", dependencies=[Depends(require_token)])
-def set_priority(channel: str, request_id: int, enabled: bool, db: Session = Depends(get_db)):
+def set_priority(
+    channel: str,
+    enabled: bool,
+    request_id: str = Path(..., pattern=REQUEST_IDENTIFIER_PATTERN),
+    db: Session = Depends(get_db),
+):
     channel_pk = get_channel_pk(channel, db)
-    req = _get_req(db, channel_pk, request_id)
+    req = resolve_queue_request(db, channel_pk, request_id)
     was_priority = bool(req.is_priority)
     # optional: refund or spend points can be inserted here
     req.is_priority = 1 if enabled else 0
@@ -4755,9 +4833,13 @@ def set_priority(channel: str, request_id: int, enabled: bool, db: Session = Dep
     return {"success": True}
 
 @app.post("/channels/{channel}/queue/{request_id}/played", dependencies=[Depends(require_token)])
-def mark_played(channel: str, request_id: int, db: Session = Depends(get_db)):
+def mark_played(
+    channel: str,
+    request_id: str = Path(..., pattern=REQUEST_IDENTIFIER_PATTERN),
+    db: Session = Depends(get_db),
+):
     channel_pk = get_channel_pk(channel, db)
-    req = _get_req(db, channel_pk, request_id)
+    req = resolve_queue_request(db, channel_pk, request_id)
     req.played = 1
     # optionally push it out of visible order by setting a sentinel position
     db.commit()
