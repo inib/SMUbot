@@ -75,6 +75,29 @@ This document summarizes the REST endpoints exposed by `backend_app.py`.
 | PUT | `/channels/{channel}/songs/{song_id}` | Update song details (admin). |
 | DELETE | `/channels/{channel}/songs/{song_id}` | Remove a song from the catalog (admin). |
 
+## Playlists
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/channels/{channel}/playlists` | List saved playlists for a channel (admin/owner/moderator). |
+| POST | `/channels/{channel}/playlists` | Add a YouTube playlist reference and import its items (admin/owner/moderator). |
+| PUT | `/channels/{channel}/playlists/{playlist_id}` | Update playlist visibility or keywords (admin/owner/moderator). |
+| DELETE | `/channels/{channel}/playlists/{playlist_id}` | Remove a playlist and its items (admin/owner/moderator). |
+
+### `/channels/{channel}/playlists`
+- **Authentication**: Requires `X-Admin-Token` or a bearer token/admin session cookie for a channel owner or moderator.
+- **GET behavior**
+  - Returns playlists sorted by title with keywords sorted alphabetically.
+  - **Response**: Array of `{ "id", "title", "playlist_id", "url", "visibility", "keywords": [str], "item_count" }`.
+- **POST payload**: `{ "url": "<youtube playlist url>", "keywords": ["rock"?], "visibility": "public|private|unlisted" }`.
+  - Extracts the playlist ID from the URL, downloads metadata/tracks, and persists each item with position, title, artist, duration, and URL. Rejects invalid URLs (HTTP 400) or duplicates (HTTP 409).
+  - **Response**: `{ "id": <int> }` for the created playlist.
+- **Use cases**: Seed curated lists for random song draws, associate keywords (e.g., `default`, genres) for chat triggers, and control playlist availability to overlays.
+
+### `/channels/{channel}/playlists/{playlist_id}`
+- **Authentication**: Same as the list/create endpoint.
+- **PUT payload**: `{ "keywords"?: [str], "visibility"?: "public|private|unlisted" }`; updates fields when present and returns the refreshed playlist summary with the latest keyword set.
+- **DELETE behavior**: Removes the playlist and its imported items; responds with HTTP 204 on success.
+
 ## Users
 | Method | Path | Description |
 |--------|------|-------------|
@@ -101,6 +124,30 @@ This document summarizes the REST endpoints exposed by `backend_app.py`.
 | POST | `/channels/{channel}/queue/{request_id}/skip` | Send a request to the end of the queue (admin). |
 | POST | `/channels/{channel}/queue/{request_id}/priority` | Enable or disable priority for a request (admin). |
 | POST | `/channels/{channel}/queue/{request_id}/played` | Mark a request as played (admin). |
+| GET | `/channels/{channel}/queue/full` | Return the full queue with song and requester details (owner/moderator). |
+
+### `/channels/{channel}/queue/full`
+- **Authentication**: Requires a bearer token or admin session cookie that resolves to the channel owner or a linked moderator; otherwise returns HTTP 403.
+- **Behavior**
+  - Finds the current stream and orders requests by played status, priority flags, manual position, and request time.
+  - Joins request rows with `Song` and `User` models and enriches users with VIP/subscriber status when available.
+- **Response**: Array of `{ "request": { "id", "song_id", "user_id", "request_time", "is_priority", "bumped", "played", "priority_source" }, "song": { "id", "artist", "title", "youtube_link", ... }, "user": { "id", "twitch_id", "username", "is_vip", "is_subscriber", "subscriber_tier" } }`.
+- **Use cases**: Drive moderator dashboards or overlay widgets that need a complete view of the queue without issuing multiple lookups per request.
+
+## YouTube Music
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/ytmusic/search` | Search YouTube Music and normalize matching song results. |
+
+### `/ytmusic/search`
+- **Authentication**: None; intended for public song lookups.
+- **Query parameters**
+  - `query` (required): Search term trimmed to 1-200 characters. Empty strings return HTTP 400.
+- **Behavior**
+  - Initializes the `ytmusicapi` client (fails with HTTP 502 if the optional dependency or auth file is missing).
+  - Calls `client.search(query, limit=10)` and normalizes up to 5 items that contain a YouTube `videoId` and a supported result type (`song`, `video`, or `music_video`).
+- **Response**: Array of objects `{ "title", "video_id", "playlist_id", "browse_id", "result_type", "artists": [str], "album", "duration", "thumbnails": [{ "url", "width?", "height?" }], "link" }` where `link` falls back to a YouTube watch/playlist/browse URL when missing.
+- **Use cases**: Power autocomplete and song-picking UIs before creating requests or importing playlist tracks.
 
 ## Events
 | Method | Path | Description |
