@@ -15,6 +15,19 @@ This document summarizes the REST endpoints exposed by `backend_app.py`.
 | POST | `/auth/session` | Exchange a user OAuth token for a server-side session cookie. |
 | POST | `/auth/logout` | Clear the admin session cookie. |
 
+## Channel keys
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/channels/{channel}/key` | Return the active channel key for owners or moderators authenticated with OAuth. |
+| POST | `/channels/{channel}/key/regenerate` | Rotate and return a new channel key for the specified channel (owner/moderator OAuth). |
+
+**Channel-key usage**
+
+- Supply either `X-Channel-Key: <key>` or the query parameter `channel_key=<key>` when calling channel-safe endpoints.
+- Channel keys are generated automatically when channels are created and are backfilled for existing databases at startup.
+- Admin-only endpoints still expect `X-Admin-Token` or a bearer/admin session cookie; channel keys never bypass admin checks.
+- The following endpoints accept channel keys (in addition to existing admin/OAuth fallbacks): playlist CRUD and reads, playlist queue helpers, random playlist requests, queue reads/writes (including random pulls), event logging, queue/playlist streams, and stream start/archive hooks.
+
 ### `/auth/login`
 - **Query parameters**
   - `channel` (required): Channel login used to embed into the OAuth `state` parameter.
@@ -78,13 +91,13 @@ This document summarizes the REST endpoints exposed by `backend_app.py`.
 ## Playlists
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/channels/{channel}/playlists` | List saved playlists for a channel (admin/owner/moderator). |
-| POST | `/channels/{channel}/playlists` | Add a YouTube playlist reference and import its items (admin/owner/moderator). |
-| PUT | `/channels/{channel}/playlists/{playlist_id}` | Update playlist visibility or keywords (admin/owner/moderator). |
-| DELETE | `/channels/{channel}/playlists/{playlist_id}` | Remove a playlist and its items (admin/owner/moderator). |
+| GET | `/channels/{channel}/playlists` | List saved playlists for a channel (channel key or admin/owner/moderator). |
+| POST | `/channels/{channel}/playlists` | Add a YouTube playlist reference and import its items (channel key or admin/owner/moderator). |
+| PUT | `/channels/{channel}/playlists/{playlist_id}` | Update playlist visibility or keywords (channel key or admin/owner/moderator). |
+| DELETE | `/channels/{channel}/playlists/{playlist_id}` | Remove a playlist and its items (channel key or admin/owner/moderator). |
 
 ### `/channels/{channel}/playlists`
-- **Authentication**: Requires `X-Admin-Token` or a bearer token/admin session cookie for a channel owner or moderator.
+- **Authentication**: Provide `X-Channel-Key`, `channel_key=<key>`, `X-Admin-Token`, or a bearer token/admin session cookie for a channel owner or moderator.
 - **GET behavior**
   - Returns playlists sorted by title with keywords sorted alphabetically.
   - **Response**: Array of `{ "id", "title", "playlist_id", "url", "visibility", "keywords": [str], "item_count" }`.
@@ -111,23 +124,23 @@ This document summarizes the REST endpoints exposed by `backend_app.py`.
 ## Queue
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/channels/{channel}/queue/stream` | Server-sent events stream emitting queue updates. |
-| GET | `/channels/{channel}/queue` | Current request queue for the active stream. |
-| GET | `/channels/{channel}/streams/{stream_id}/queue` | Request queue for a specific past stream. |
-| POST | `/channels/{channel}/queue` | Add a song request to the queue (admin or bot). |
-| PUT | `/channels/{channel}/queue/{request_id}` | Update request status such as marking played (admin). |
-| DELETE | `/channels/{channel}/queue/{request_id}` | Remove a request (admin). |
-| POST | `/channels/{channel}/queue/clear` | Remove all pending requests for the current stream (admin). |
-| GET | `/channels/{channel}/queue/random_nonpriority` | Fetch a random non-priority request from the queue. |
-| POST | `/channels/{channel}/queue/{request_id}/bump_admin` | Force a request to priority status (admin). |
-| POST | `/channels/{channel}/queue/{request_id}/move` | Move a request up or down in the queue (admin). |
-| POST | `/channels/{channel}/queue/{request_id}/skip` | Send a request to the end of the queue (admin). |
-| POST | `/channels/{channel}/queue/{request_id}/priority` | Enable or disable priority for a request (admin). |
-| POST | `/channels/{channel}/queue/{request_id}/played` | Mark a request as played (admin). |
-| GET | `/channels/{channel}/queue/full` | Return the full queue with song and requester details (owner/moderator). |
+| GET | `/channels/{channel}/queue/stream` | Server-sent events stream emitting queue updates (channel key or admin). |
+| GET | `/channels/{channel}/queue` | Current request queue for the active stream (channel key or admin). |
+| GET | `/channels/{channel}/streams/{stream_id}/queue` | Request queue for a specific past stream (channel key or admin). |
+| POST | `/channels/{channel}/queue` | Add a song request to the queue (channel key or admin). |
+| PUT | `/channels/{channel}/queue/{request_id}` | Update request status such as marking played (channel key or admin). |
+| DELETE | `/channels/{channel}/queue/{request_id}` | Remove a request (channel key or admin). |
+| POST | `/channels/{channel}/queue/clear` | Remove all pending requests for the current stream (channel key or admin). |
+| GET | `/channels/{channel}/queue/random_nonpriority` | Fetch a random non-priority request from the queue (channel key or admin). |
+| POST | `/channels/{channel}/queue/{request_id}/bump_admin` | Force a request to priority status (channel key or admin). |
+| POST | `/channels/{channel}/queue/{request_id}/move` | Move a request up or down in the queue (channel key or admin). |
+| POST | `/channels/{channel}/queue/{request_id}/skip` | Send a request to the end of the queue (channel key or admin). |
+| POST | `/channels/{channel}/queue/{request_id}/priority` | Enable or disable priority for a request (channel key or admin). |
+| POST | `/channels/{channel}/queue/{request_id}/played` | Mark a request as played (channel key or admin). |
+| GET | `/channels/{channel}/queue/full` | Return the full queue with song and requester details (channel key or admin). |
 
 ### `/channels/{channel}/queue/full`
-- **Authentication**: Requires a bearer token or admin session cookie that resolves to the channel owner or a linked moderator; otherwise returns HTTP 403.
+- **Authentication**: Provide a channel key, `X-Admin-Token`, or bearer/admin session for an owner/moderator; invalid keys return HTTP 401.
 - **Behavior**
   - Finds the current stream and orders requests by played status, priority flags, manual position, and request time.
   - Joins request rows with `Song` and `User` models and enriches users with VIP/subscriber status when available.
@@ -152,7 +165,7 @@ This document summarizes the REST endpoints exposed by `backend_app.py`.
 ## Events
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/channels/{channel}/events` | Log a channel event such as follows, subscriptions, or bits (admin). |
+| POST | `/channels/{channel}/events` | Log a channel event such as follows, subscriptions, or bits (channel key or admin). |
 | GET | `/channels/{channel}/events` | Retrieve logged events with optional filtering by type and time. |
 | WS | `/channels/{channel}/events` | WebSocket stream that pushes queue and settings events for overlays. |
 
@@ -187,8 +200,8 @@ All payloads only expose queue-facing data:
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/channels/{channel}/streams` | List stream sessions for a channel. |
-| POST | `/channels/{channel}/streams/start` | Ensure a stream session exists and return its ID (admin). |
-| POST | `/channels/{channel}/streams/archive` | Close the current stream and start a new session (admin). |
+| POST | `/channels/{channel}/streams/start` | Ensure a stream session exists and return its ID (channel key or admin). |
+| POST | `/channels/{channel}/streams/archive` | Close the current stream and start a new session (channel key or admin). |
 
 ## Stats
 | Method | Path | Description |
