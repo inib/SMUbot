@@ -77,6 +77,12 @@ This document summarizes the REST endpoints exposed by `backend_app.py`.
 | POST | `/channels/{channel}/queue/{request_id}/priority` | Enable or disable priority for a request (admin). |
 | POST | `/channels/{channel}/queue/{request_id}/played` | Mark a request as played (admin). |
 
+Queue endpoints that accept `{request_id}` also recognize the keywords `top`,
+`previous`, `last`, and `random`, which resolve to the highest-priority pending
+request, most recently played entry, last pending entry, and a random pending
+entry respectively. These shortcuts allow admins to manage the queue without
+looking up numeric identifiers.
+
 ## Events
 | Method | Path | Description |
 |--------|------|-------------|
