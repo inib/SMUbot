@@ -7,6 +7,42 @@ This document summarizes the REST endpoints exposed by `backend_app.py`.
 |--------|------|-------------|
 | GET | `/system/health` | Health check that verifies database connectivity. |
 
+## Authentication
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/auth/login` | Build a Twitch OAuth authorization URL for a channel, optionally preserving a `return_url`. |
+| GET | `/auth/callback` | Twitch OAuth callback that stores the access token and marks the user as the channel owner. |
+| POST | `/auth/session` | Exchange a user OAuth token for a server-side session cookie. |
+| POST | `/auth/logout` | Clear the admin session cookie. |
+
+### `/auth/login`
+- **Query parameters**
+  - `channel` (required): Channel login used to embed into the OAuth `state` parameter.
+  - `return_url` (optional): URL-encoded location to redirect to after authorization.
+- **Response**: `{ "auth_url": "<twitch authorize url>" }` built with the configured Twitch client ID, redirect URI, and scopes from `TWITCH_SCOPES`.
+- **Notes**: Fails with HTTP 500 if Twitch OAuth configuration is missing.
+
+### `/auth/callback`
+- **Query parameters**
+  - `code`: Authorization code returned by Twitch.
+  - `state`: Either a channel login string or JSON containing `{ "channel": <login>, "return_url": <url?> }`.
+- **Behavior**
+  - Exchanges `code` for an access token and requires the `channel:bot` scope.
+  - Fetches the authenticated Twitch user and upserts `TwitchUser` plus the matching `ActiveChannel`, setting `authorized=True` and `owner_id` to the user.
+  - Redirects to `return_url` when supplied and using an `http`/`https` scheme; otherwise returns `{ "success": true }`.
+
+### `/auth/session`
+- **Authentication**: `Authorization: Bearer <user OAuth token>`.
+- **Behavior**
+  - Validates the token against `https://id.twitch.tv/oauth2/validate` and refreshes the stored `TwitchUser` record.
+  - Auto-registers the channel as owned when the token carries the `channel:bot` scope.
+  - Sets the `admin_oauth_token` cookie (HTTP-only, `SameSite=lax`) for subsequent admin access, honoring Twitch `expires_in` when present.
+- **Response**: `{ "login": "<twitch username>" }`.
+- **Errors**: 401 when the bearer token is missing or invalid.
+
+### `/auth/logout`
+- **Behavior**: Removes the `admin_oauth_token` cookie and returns `{ "success": true }`.
+
 ## Bot
 | Method | Path | Description |
 |--------|------|-------------|
@@ -113,4 +149,35 @@ All payloads only expose queue-facing data:
 | GET | `/channels/{channel}/stats/general` | General statistics for the current stream such as total requests. |
 | GET | `/channels/{channel}/stats/songs` | Top requested songs for the current stream. |
 | GET | `/channels/{channel}/stats/users` | Top requesting users for the current stream. |
+
+## Current user
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/me` | Return the authenticated Twitch user from the bearer token or admin session cookie. |
+| GET | `/me/channels` | List channels the user owns or moderates. |
+
+### `/me`
+- **Authentication**: `Authorization: Bearer <user OAuth token>` or `admin_oauth_token` cookie.
+- **Response**: `{ "login", "display_name", "profile_image_url" }`. The backend attempts a best-effort Twitch `/helix/users` lookup to populate display name and avatar; falls back to the stored username on failure.
+- **Errors**: 401 when no token or cookie is provided.
+
+### `/me/channels`
+- **Authentication**: Same as `/me`.
+- **Response**: Array of `{ "channel_name", "role" }` entries where `role` is `owner` for `ActiveChannel.owner_id` matches, and `moderator` for linked `ChannelModerator` rows.
+
+## Channel moderation
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/channels/{channel}/mods` | Add a moderator link for a channel. |
+| POST | `/channels/{channel}/bot_status` | Update the bot activity/error state for a channel. |
+
+### `/channels/{channel}/mods`
+- **Authentication**: Requires `X-Admin-Token` header matching `ADMIN_TOKEN` *or* a valid bearer token/session cookie (validated via Twitch). When using a bearer token, the caller must be the channel owner; otherwise a 403 error is returned.
+- **Payload**: `{ "twitch_id": "<user id>", "username": "<login>" }`.
+- **Behavior**: Upserts the Twitch user if missing, then creates the `ChannelModerator` link when absent. Returns `{ "success": true }` on success.
+
+### `/channels/{channel}/bot_status`
+- **Authentication**: Requires `X-Admin-Token` or a valid bearer token/session cookie. No additional role check is enforced beyond token validity.
+- **Payload**: `{ "active": <bool>, "error": "<optional last error>" }`.
+- **Behavior**: Ensures a `ChannelBotState` row exists, updates `active` and `last_error`, persists changes, and emits a queue change notification.
 
