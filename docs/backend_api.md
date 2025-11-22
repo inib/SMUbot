@@ -77,11 +77,24 @@ This document summarizes the REST endpoints exposed by `backend_app.py`.
 | POST | `/channels/{channel}/queue/{request_id}/priority` | Enable or disable priority for a request (admin). |
 | POST | `/channels/{channel}/queue/{request_id}/played` | Mark a request as played (admin). |
 
-Queue endpoints that accept `{request_id}` also recognize the keywords `top`,
-`previous`, `last`, and `random`, which resolve to the highest-priority pending
-request, most recently played entry, last pending entry, and a random pending
-entry respectively. These shortcuts allow admins to manage the queue without
-looking up numeric identifiers.
+Queue endpoints that accept `{request_id}` support numeric identifiers for full
+backwards compatibility **and** keyword shortcuts to target specific queue
+entries without first listing the queue. Supported keywords are:
+
+- `top` — next up: the highest-priority pending request ordered by priority,
+  then position, then request time.
+- `previous` — the most recently played entry in the current stream.
+- `last` — the trailing pending entry (largest position), i.e., the most recent
+  addition that has not been played.
+- `random` — a random pending entry from the current stream.
+
+Example calls (keywords and numeric IDs are interchangeable):
+
+- Mark a specific request played by ID: `POST /channels/{channel}/queue/42/played`
+- Mark the next song played: `POST /channels/{channel}/queue/top/played`
+- Toggle priority on the last played item: `POST /channels/{channel}/queue/previous/priority?enabled=false`
+- Remove the newest pending request: `DELETE /channels/{channel}/queue/last`
+- Skip a random pending item to the back: `POST /channels/{channel}/queue/random/skip`
 
 ## Events
 | Method | Path | Description |
