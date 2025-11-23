@@ -395,3 +395,113 @@ class QueueApiTests(unittest.TestCase):
         finally:
             db.close()
 
+    def test_move_request_get_requires_direction(self) -> None:
+        db = backend_app.SessionLocal()
+        try:
+            channel_name, token = _seed_queue_fixture(db)
+            base_request = db.query(backend_app.Request).first()
+        finally:
+            db.close()
+
+        response = self._client.get(
+            f"/channels/{channel_name}/queue/{base_request.id}/move",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("direction is required", response.text)
+
+    def test_move_request_get_swaps_positions(self) -> None:
+        db = backend_app.SessionLocal()
+        try:
+            channel_name, token = _seed_queue_fixture(db)
+            channel = (
+                db.query(backend_app.ActiveChannel)
+                .filter_by(channel_name=channel_name)
+                .one()
+            )
+            stream = db.query(backend_app.StreamSession).filter_by(channel_id=channel.id).one()
+            song = db.query(backend_app.Song).filter_by(channel_id=channel.id).first()
+            user = db.query(backend_app.User).filter_by(channel_id=channel.id).first()
+            base_request = db.query(backend_app.Request).first()
+            neighbor = _add_request(
+                db,
+                channel_id=channel.id,
+                stream_id=stream.id,
+                song_id=song.id,
+                user_id=user.id,
+                position=1,
+            )
+            base_request_id = base_request.id if base_request else None
+            neighbor_id = neighbor.id
+        finally:
+            db.close()
+
+        assert base_request_id is not None
+        response = self._client.get(
+            f"/channels/{channel_name}/queue/{base_request_id}/move",
+            params={"direction": "down"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+
+        db = backend_app.SessionLocal()
+        try:
+            refreshed_base = db.get(backend_app.Request, base_request_id)
+            refreshed_neighbor = db.get(backend_app.Request, neighbor_id)
+            assert refreshed_base and refreshed_neighbor
+            self.assertEqual(refreshed_base.position, 1)
+            self.assertEqual(refreshed_neighbor.position, 0)
+        finally:
+            db.close()
+
+    def test_priority_get_accepts_query_flag(self) -> None:
+        db = backend_app.SessionLocal()
+        try:
+            channel_name, token = _seed_queue_fixture(db)
+            base_request = db.query(backend_app.Request).first()
+        finally:
+            db.close()
+
+        response = self._client.get(
+            f"/channels/{channel_name}/queue/{base_request.id}/priority",
+            params={"enabled": True},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+
+        db = backend_app.SessionLocal()
+        try:
+            refreshed_request = db.get(backend_app.Request, base_request.id)
+            assert refreshed_request
+            self.assertEqual(refreshed_request.is_priority, 1)
+        finally:
+            db.close()
+
+    def test_state_change_gets_disable_caching(self) -> None:
+        db = backend_app.SessionLocal()
+        try:
+            channel_name, token = _seed_queue_fixture(db)
+            base_request = db.query(backend_app.Request).first()
+        finally:
+            db.close()
+
+        response = self._client.get(
+            f"/channels/{channel_name}/queue/{base_request.id}/played",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.headers.get("Cache-Control"), "no-store, max-age=0")
+        self.assertEqual(response.headers.get("Pragma"), "no-cache")
+
+        db = backend_app.SessionLocal()
+        try:
+            refreshed_request = db.get(backend_app.Request, base_request.id)
+            assert refreshed_request
+            self.assertEqual(refreshed_request.played, 1)
+        finally:
+            db.close()
+

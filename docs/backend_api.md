@@ -134,11 +134,11 @@ This document summarizes the REST endpoints exposed by `backend_app.py`.
 | DELETE | `/channels/{channel}/queue/{request_id}` | Remove a request (channel key or admin). |
 | POST | `/channels/{channel}/queue/clear` | Remove all pending requests for the current stream (channel key or admin). |
 | GET | `/channels/{channel}/queue/random_nonpriority` | Fetch a random non-priority request from the queue (public read; no auth required). |
-| POST | `/channels/{channel}/queue/{request_id}/bump_admin` | Force a request to priority status (channel key or admin). |
-| POST | `/channels/{channel}/queue/{request_id}/move` | Move a request up or down in the queue (channel key or admin). |
-| POST | `/channels/{channel}/queue/{request_id}/skip` | Send a request to the end of the queue (channel key or admin). |
-| POST | `/channels/{channel}/queue/{request_id}/priority` | Enable or disable priority for a request (channel key or admin). |
-| POST | `/channels/{channel}/queue/{request_id}/played` | Mark a request as played (channel key or admin). |
+| POST/GET | `/channels/{channel}/queue/{request_id}/bump_admin` | Force a request to priority status (channel key or admin). |
+| POST/GET | `/channels/{channel}/queue/{request_id}/move` | Move a request up or down in the queue (channel key or admin). |
+| POST/GET | `/channels/{channel}/queue/{request_id}/skip` | Send a request to the end of the queue (channel key or admin). |
+| POST/GET | `/channels/{channel}/queue/{request_id}/priority` | Enable or disable priority for a request (channel key or admin). |
+| POST/GET | `/channels/{channel}/queue/{request_id}/played` | Mark a request as played (channel key or admin). |
 | GET | `/channels/{channel}/queue/full` | Return the full queue with song and requester details (public read; no auth required). |
 
 ### `/channels/{channel}/queue/full`
@@ -182,6 +182,17 @@ Example calls (keywords and numeric IDs are interchangeable):
 - Toggle priority on the last played item: `POST /channels/{channel}/queue/previous/priority?enabled=false`
 - Remove the newest pending request: `DELETE /channels/{channel}/queue/last`
 - Skip a random pending item to the back: `POST /channels/{channel}/queue/random/skip`
+
+### Queue mutation GET variants
+
+- **Authentication**: Channel key header/query or admin/moderator session/Bearer token (same as POST routes).
+- **Non-cacheable responses**: All GET mutations send `Cache-Control: no-store, max-age=0` and `Pragma: no-cache`.
+- **`/channels/{channel}/queue/{request_id}/move`**
+  - `direction` (query, required for GET): `up` or `down`. POST still accepts the JSON body `{ "direction": "up|down" }`.
+- **`/channels/{channel}/queue/{request_id}/priority`**
+  - `enabled` (query, required for GET): boolean toggle. POST accepts `{ "enabled": true|false }` or the same query param.
+- **`/channels/{channel}/queue/{request_id}/bump_admin`**, **`skip`**, **`played`**
+  - No additional parameters beyond the `request_id` path value. GET behaves identically to POST for these state changes.
 
 ## Events
 | Method | Path | Description |
