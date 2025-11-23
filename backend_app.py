@@ -4471,12 +4471,19 @@ def _normalize_ytmusic_result(item: Mapping[str, Any]) -> Optional[YTMusicSearch
 @app.get(
     "/channels/{channel}/queue/full",
     response_model=List[QueueItemFull],
-    dependencies=[Depends(require_channel_key)],
 )
 def get_queue_full(
     channel: str,
     db: Session = Depends(get_db),
 ):
+    """Return the full queue with request, song, and user metadata for the current stream.
+
+    Dependencies: Relies on the `current_stream` helper and DB models (`Request`, `Song`, `User`) to assemble enriched rows.
+    Code customers: Used by overlays and moderator dashboards that need a single call for the complete queue view.
+    Used variables/origin: Pulls the path `channel` parameter, derives `channel_pk` via `get_channel_pk`, and reuses globally cached
+    role data through `_collect_channel_roles` when available.
+    """
+
     channel_pk = get_channel_pk(channel, db)
     sid = current_stream(db, channel_pk)
     rows: list[Request] = (
@@ -4549,8 +4556,14 @@ def get_queue_full(
     return result
 
 
-@app.get("/channels/{channel}/queue/stream", dependencies=[Depends(require_channel_key)])
+@app.get("/channels/{channel}/queue/stream")
 async def stream_queue(channel: str, db: Session = Depends(get_db)):
+    """Stream queue updates for a channel via SSE without requiring authentication.
+
+    Dependencies: database session provided by `get_db` for channel lookup.
+    Code consumers: overlays and bot listeners use this endpoint for live updates.
+    Variables: `channel` path parameter identifies the channel; `db` supplies DB access.
+    """
     channel_pk = get_channel_pk(channel, db)
     q = _subscribe_queue(channel_pk)
 
@@ -4615,8 +4628,14 @@ async def channel_event_stream(channel: str, websocket: WebSocket) -> None:
         db.close()
 
 
-@app.get("/channels/{channel}/queue", response_model=List[RequestOut], dependencies=[Depends(require_channel_key)])
+@app.get("/channels/{channel}/queue", response_model=List[RequestOut])
 def get_queue(channel: str, db: Session = Depends(get_db)):
+    """Return the current queue for the active stream without requiring authentication.
+
+    Dependencies: database session via `get_db` for channel resolution and queries.
+    Code consumers: overlays, public embeds, and bots fetch the queue for display.
+    Variables: `channel` path parameter selects the channel; `db` executes queries.
+    """
     channel_pk = get_channel_pk(channel, db)
     sid = current_stream(db, channel_pk)
     return (
@@ -4635,8 +4654,15 @@ def get_queue(channel: str, db: Session = Depends(get_db)):
         .all()
     )
 
-@app.get("/channels/{channel}/streams/{stream_id}/queue", response_model=List[RequestOut], dependencies=[Depends(require_channel_key)])
+@app.get("/channels/{channel}/streams/{stream_id}/queue", response_model=List[RequestOut])
 def get_stream_queue(channel: str, stream_id: int, db: Session = Depends(get_db)):
+    """Return the queue for a specific stream without requiring authentication.
+
+    Dependencies: database session via `get_db` for channel verification and queries.
+    Code consumers: overlays and diagnostic tools that inspect past or specific streams.
+    Variables: `channel` path parameter selects the channel; `stream_id` identifies the
+    stream; `db` executes the database query.
+    """
     channel_pk = get_channel_pk(channel, db)
     return (
         db.query(Request)
@@ -4884,9 +4910,16 @@ def clear_queue(channel: str, db: Session = Depends(get_db)):
 
 @app.get(
     "/channels/{channel}/queue/random_nonpriority",
-    dependencies=[Depends(require_channel_key)],
 )
 def random_nonpriority(channel: str, db: Session = Depends(get_db)):
+    """Fetch a random non-priority pending request for the current stream.
+
+    Dependencies: Uses SQLAlchemy joins across `Request`, `Song`, and `User` plus `current_stream` for stream scoping.
+    Code customers: Supports overlays and automation that highlight random viewer picks without privileged credentials.
+    Used variables/origin: Accepts `channel` from the path, resolves `channel_pk` via `get_channel_pk`, and filters by `sid`,
+    `played`, and `is_priority` fields to isolate eligible rows.
+    """
+
     channel_pk = get_channel_pk(channel, db)
     sid = current_stream(db, channel_pk)
     row = (

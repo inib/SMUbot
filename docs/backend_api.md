@@ -126,23 +126,23 @@ This document summarizes the REST endpoints exposed by `backend_app.py`.
 ## Queue
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/channels/{channel}/queue/stream` | Server-sent events stream emitting queue updates (channel key or admin). |
-| GET | `/channels/{channel}/queue` | Current request queue for the active stream (channel key or admin). |
-| GET | `/channels/{channel}/streams/{stream_id}/queue` | Request queue for a specific past stream (channel key or admin). |
+| GET | `/channels/{channel}/queue/stream` | Server-sent events stream emitting queue updates (public read; no auth required). |
+| GET | `/channels/{channel}/queue` | Current request queue for the active stream (public read; no auth required). |
+| GET | `/channels/{channel}/streams/{stream_id}/queue` | Request queue for a specific past stream (public read; no auth required). |
 | POST | `/channels/{channel}/queue` | Add a song request to the queue (channel key or admin). |
 | PUT | `/channels/{channel}/queue/{request_id}` | Update request status such as marking played (channel key or admin). |
 | DELETE | `/channels/{channel}/queue/{request_id}` | Remove a request (channel key or admin). |
 | POST | `/channels/{channel}/queue/clear` | Remove all pending requests for the current stream (channel key or admin). |
-| GET | `/channels/{channel}/queue/random_nonpriority` | Fetch a random non-priority request from the queue (channel key or admin). |
+| GET | `/channels/{channel}/queue/random_nonpriority` | Fetch a random non-priority request from the queue (public read; no auth required). |
 | POST | `/channels/{channel}/queue/{request_id}/bump_admin` | Force a request to priority status (channel key or admin). |
 | POST | `/channels/{channel}/queue/{request_id}/move` | Move a request up or down in the queue (channel key or admin). |
 | POST | `/channels/{channel}/queue/{request_id}/skip` | Send a request to the end of the queue (channel key or admin). |
 | POST | `/channels/{channel}/queue/{request_id}/priority` | Enable or disable priority for a request (channel key or admin). |
 | POST | `/channels/{channel}/queue/{request_id}/played` | Mark a request as played (channel key or admin). |
-| GET | `/channels/{channel}/queue/full` | Return the full queue with song and requester details (channel key or admin). |
+| GET | `/channels/{channel}/queue/full` | Return the full queue with song and requester details (public read; no auth required). |
 
 ### `/channels/{channel}/queue/full`
-- **Authentication**: Provide a channel key, `X-Admin-Token`, or bearer/admin session for an owner/moderator; invalid keys return HTTP 401.
+- **Authentication**: None; public read access for overlays and dashboards.
 - **Behavior**
   - Finds the current stream and orders requests by played status, priority flags, manual position, and request time.
   - Joins request rows with `Song` and `User` models and enriches users with VIP/subscriber status when available.
