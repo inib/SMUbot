@@ -2,6 +2,7 @@ import asyncio
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -16,6 +17,8 @@ class BotServiceTests(unittest.IsolatedAsyncioTestCase):
         self.backend.push_bot_log = AsyncMock()
         self.backend.get_bot_config = AsyncMock()
         self.backend.set_bot_status = AsyncMock()
+        self.backend.list_playlists = AsyncMock()
+        self.backend.playlist_request = AsyncMock()
         bot_app.backend = self.backend
         self.created_bots: list[tuple[MagicMock, dict]] = []
 
@@ -118,34 +121,26 @@ class BotServiceTests(unittest.IsolatedAsyncioTestCase):
             "Missing bot credentials: access_token, refresh_token, login, client_id, client_secret, bot_user_id",
         )
 
-    async def test_settings_fall_back_to_env_credentials(self) -> None:
-        original_client_id = bot_app.TWITCH_CLIENT_ID_ENV
-        original_client_secret = bot_app.TWITCH_CLIENT_SECRET_ENV
-        original_bot_user_id = bot_app.BOT_USER_ID_ENV
-        bot_app.TWITCH_CLIENT_ID_ENV = "env-client"
-        bot_app.TWITCH_CLIENT_SECRET_ENV = "env-secret"
-        bot_app.BOT_USER_ID_ENV = "42"
-        try:
-            service = bot_app.BotService(
-                self.backend,
-                bot_factory=self.bot_factory,
-                task_factory=asyncio.create_task,
-            )
-            config = {
-                "access_token": "token",
-                "refresh_token": "refresh",
-                "login": "botnick",
-                "enabled": True,
-            }
-            settings = service._settings_from_config(config)
-            self.assertEqual(settings.client_id, "env-client")
-            self.assertEqual(settings.client_secret, "env-secret")
-            self.assertEqual(settings.bot_user_id, "42")
-            self.assertTrue(settings.enabled)
-        finally:
-            bot_app.TWITCH_CLIENT_ID_ENV = original_client_id
-            bot_app.TWITCH_CLIENT_SECRET_ENV = original_client_secret
-            bot_app.BOT_USER_ID_ENV = original_bot_user_id
+    async def test_settings_require_app_credentials(self) -> None:
+        service = bot_app.BotService(
+            self.backend,
+            bot_factory=self.bot_factory,
+            task_factory=asyncio.create_task,
+        )
+        config = {
+            "access_token": "token",
+            "refresh_token": "refresh",
+            "login": "botnick",
+            "enabled": True,
+        }
+        settings = service._settings_from_config(config)
+        self.assertIsNone(settings.client_id)
+        self.assertIsNone(settings.client_secret)
+        self.assertIsNone(settings.bot_user_id)
+        self.assertFalse(settings.enabled)
+        self.assertIn("client_id", settings.error or "")
+        self.assertIn("client_secret", settings.error or "")
+        self.assertIn("bot_user_id", settings.error or "")
 
     async def test_missing_credentials_idle_bot(self) -> None:
         service = bot_app.BotService(
@@ -333,6 +328,109 @@ class BotServiceTests(unittest.IsolatedAsyncioTestCase):
         base_close.assert_awaited()
         bot_app.backend.close.assert_awaited()
 
+    async def test_handle_playlist_request_success(self) -> None:
+        song_bot = bot_app.SongBot.__new__(bot_app.SongBot)
+        song_bot.channel_map = {'channelname': {'channel_name': 'ChannelName'}}
+        song_bot.messages = bot_app.DEFAULT_MESSAGES.copy()
+        song_bot._send_message = AsyncMock()
+        song_bot._channel_login = bot_app.SongBot._channel_login.__get__(song_bot, bot_app.SongBot)
+        msg = SimpleNamespace(
+            broadcaster=SimpleNamespace(name='ChannelName', display_name='ChannelName'),
+            chatter=SimpleNamespace(name='viewer', display_name='Viewer', id='42', subscriber=False),
+            text='!playlist Chill Mix 1',
+            id='msg123',
+        )
+        self.backend.list_playlists.return_value = [{'id': 10, 'title': 'Chill Mix'}]
+        self.backend.playlist_request.return_value = {
+            'request_id': 5,
+            'playlist_item_id': 77,
+            'song': {'artist': 'Artist B', 'title': 'Track Two'},
+        }
+
+        await song_bot.handle_playlist_request(msg, 'CHILL mix 1')
+
+        self.backend.list_playlists.assert_awaited_once_with('ChannelName')
+        self.backend.playlist_request.assert_awaited_once()
+        args, kwargs = self.backend.playlist_request.call_args
+        self.assertEqual(args[0], 'ChannelName')
+        self.assertEqual(kwargs['identifier'], '10')
+        self.assertEqual(kwargs['index'], 1)
+        song_bot._send_message.assert_awaited_once()
+        sent_args, sent_kwargs = song_bot._send_message.call_args
+        self.assertEqual(sent_args[0], 'channelname')
+        self.assertIn('Track Two', sent_args[1])
+        self.assertEqual(sent_kwargs.get('metadata', {}).get('playlist'), 'Chill Mix')
+
+    async def test_handle_playlist_request_missing_playlist(self) -> None:
+        song_bot = bot_app.SongBot.__new__(bot_app.SongBot)
+        song_bot.channel_map = {'channelname': {'channel_name': 'ChannelName'}}
+        song_bot.messages = bot_app.DEFAULT_MESSAGES.copy()
+        song_bot._send_message = AsyncMock()
+        song_bot._channel_login = bot_app.SongBot._channel_login.__get__(song_bot, bot_app.SongBot)
+        msg = SimpleNamespace(
+            broadcaster=SimpleNamespace(name='ChannelName', display_name='ChannelName'),
+            chatter=SimpleNamespace(name='viewer', display_name='Viewer', id='42', subscriber=False),
+            text='!playlist Missing 1',
+            id='msg124',
+        )
+        self.backend.list_playlists.return_value = [{'id': 2, 'title': 'Other'}]
+
+        await song_bot.handle_playlist_request(msg, 'Missing 1')
+
+        self.backend.playlist_request.assert_not_called()
+        song_bot._send_message.assert_awaited_once()
+        sent_args, _ = song_bot._send_message.call_args
+        self.assertIn('not found', sent_args[1].lower())
+
+    async def test_handle_playlist_request_index_error(self) -> None:
+        song_bot = bot_app.SongBot.__new__(bot_app.SongBot)
+        song_bot.channel_map = {'channelname': {'channel_name': 'ChannelName'}}
+        song_bot.messages = bot_app.DEFAULT_MESSAGES.copy()
+        song_bot._send_message = AsyncMock()
+        song_bot._channel_login = bot_app.SongBot._channel_login.__get__(song_bot, bot_app.SongBot)
+        msg = SimpleNamespace(
+            broadcaster=SimpleNamespace(name='ChannelName', display_name='ChannelName'),
+            chatter=SimpleNamespace(name='viewer', display_name='Viewer', id='42', subscriber=False),
+            text='!playlist Chill Mix 2',
+            id='msg125',
+        )
+        self.backend.list_playlists.return_value = [{'id': 3, 'title': 'Chill Mix'}]
+        self.backend.playlist_request.side_effect = bot_app.BackendError(400, 'index out of range')
+
+        with patch.object(bot_app, 'push_console_event', AsyncMock()) as push_event:
+            await song_bot.handle_playlist_request(msg, 'Chill Mix 2')
+
+        self.backend.playlist_request.assert_awaited_once()
+        song_bot._send_message.assert_awaited_once()
+        sent_args, sent_kwargs = song_bot._send_message.call_args
+        self.assertIn('no song', sent_args[1].lower())
+        push_event.assert_not_awaited()
+
+    async def test_event_message_routes_playlist_command(self) -> None:
+        song_bot = bot_app.SongBot.__new__(bot_app.SongBot)
+        commands_map = {k: ([v] if not isinstance(v, list) else v) for k, v in bot_app.DEFAULT_COMMANDS.items()}
+        song_bot.commands_map = commands_map
+        song_bot.handle_request = AsyncMock()
+        song_bot.handle_random_request = AsyncMock()
+        song_bot.handle_prioritize = AsyncMock()
+        song_bot.handle_points = AsyncMock()
+        song_bot.handle_remove = AsyncMock()
+        song_bot.handle_archive = AsyncMock()
+        song_bot.handle_playlist_request = AsyncMock()
+        song_bot.enabled = True
+        song_bot.bot_user_id = 'bot'
+        msg = SimpleNamespace(
+            text='!playlist mix 2',
+            broadcaster=SimpleNamespace(name='ChannelName'),
+            chatter=SimpleNamespace(id='user', name='viewer', display_name='Viewer', subscriber=False),
+            id='msg126',
+        )
+
+        await song_bot.event_message(msg)
+
+        song_bot.handle_playlist_request.assert_awaited_once_with(msg, 'mix 2')
+        song_bot.handle_request.assert_not_awaited()
+        song_bot.handle_random_request.assert_not_awaited()
 
 if __name__ == "__main__":
     unittest.main()

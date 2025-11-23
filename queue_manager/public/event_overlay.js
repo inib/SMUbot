@@ -1,6 +1,30 @@
 (function(){
-  const API = window.BACKEND_URL || '';
+  function resolveBackendOrigin() {
+    const configured = window.__SONGBOT_CONFIG__?.backendOrigin;
+    if (typeof configured === 'string') {
+      const trimmed = configured.trim();
+      if (trimmed) {
+        return trimmed.replace(/\/+$/, '');
+      }
+    }
+    if (typeof window !== 'undefined' && window.location && typeof window.location.origin === 'string') {
+      const origin = window.location.origin;
+      if (origin) {
+        return origin.replace(/\/+$/, '');
+      }
+    }
+    throw new Error('Backend origin is not configured.');
+  }
+
+  let API = '';
+  try {
+    API = resolveBackendOrigin();
+  } catch (err) {
+    console.error('Failed to determine backend origin', err);
+  }
+
   const params = new URLSearchParams(window.location.search);
+
   const channel = (params.get('channel') || '').trim();
   const layout = (params.get('layout') || 'popup').toLowerCase();
   const theme = (params.get('theme') || 'violet').toLowerCase();
@@ -52,7 +76,7 @@
   const wsBase = buildWebsocketBase(baseUrl);
   const wsUrl = `${wsBase}/channels/${encodedChannel}/events${useKvFormat ? '?format=kv' : ''}`;
 
-  openSocket();
+  bootstrap();
 
   window.addEventListener('beforeunload', () => {
     cleanupSocket();
@@ -166,6 +190,36 @@
       return url;
     }
     return url;
+  }
+
+  async function ensureSetupComplete() {
+    try {
+      const res = await fetch(`${API}/system/status`, { cache: 'no-store' });
+      if (!res.ok) {
+        throw new Error(`status ${res.status}`);
+      }
+      const data = await res.json();
+      if (!data || !data.setup_complete) {
+        showMessage('Deployment setup is incomplete. Finish configuration in the admin panel to unlock overlays.');
+        throw new Error('setup incomplete');
+      }
+    } catch (err) {
+      const isSetupError = err instanceof Error && err.message === 'setup incomplete';
+      if (!isSetupError) {
+        showMessage('Unable to reach the backend API. Check your deployment settings and try again.');
+      }
+      throw err;
+    }
+  }
+
+  async function bootstrap() {
+    try {
+      await ensureSetupComplete();
+    } catch (err) {
+      console.error('Event overlay unavailable until deployment setup completes.', err);
+      return;
+    }
+    openSocket();
   }
 
   function openSocket() {

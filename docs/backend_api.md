@@ -164,6 +164,25 @@ This document summarizes the REST endpoints exposed by `backend_app.py`.
 - **Response**: Array of objects `{ "title", "video_id", "playlist_id", "browse_id", "result_type", "artists": [str], "album", "duration", "thumbnails": [{ "url", "width?", "height?" }], "link" }` where `link` falls back to a YouTube watch/playlist/browse URL when missing.
 - **Use cases**: Power autocomplete and song-picking UIs before creating requests or importing playlist tracks.
 
+Queue endpoints that accept `{request_id}` support numeric identifiers for full
+backwards compatibility **and** keyword shortcuts to target specific queue
+entries without first listing the queue. Supported keywords are:
+
+- `top` — next up: the highest-priority pending request ordered by priority,
+  then position, then request time.
+- `previous` — the most recently played entry in the current stream.
+- `last` — the trailing pending entry (largest position), i.e., the most recent
+  addition that has not been played.
+- `random` — a random pending entry from the current stream.
+
+Example calls (keywords and numeric IDs are interchangeable):
+
+- Mark a specific request played by ID: `POST /channels/{channel}/queue/42/played`
+- Mark the next song played: `POST /channels/{channel}/queue/top/played`
+- Toggle priority on the last played item: `POST /channels/{channel}/queue/previous/priority?enabled=false`
+- Remove the newest pending request: `DELETE /channels/{channel}/queue/last`
+- Skip a random pending item to the back: `POST /channels/{channel}/queue/random/skip`
+
 ## Events
 | Method | Path | Description |
 |--------|------|-------------|

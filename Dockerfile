@@ -11,4 +11,4 @@ RUN chmod +x run.sh
 VOLUME ["/data"]
 # The API always listens on port 7070 inside the container.
 EXPOSE 7070
-CMD ["sh", "-c", "uvicorn backend_app:app --host 0.0.0.0 --port 7070"]
+CMD ["./run.sh"]

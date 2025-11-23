@@ -7,6 +7,7 @@
   <link rel="stylesheet" href="style.css"/>
 </head>
 <body>
+<div id="setup-guard" class="setup-guard" hidden></div>
 <div id="login-status" class="status-bar" style="display:none">
   <div class="status-user">
     <div id="login-avatar" class="status-avatar" aria-hidden="true"></div>
@@ -21,6 +22,7 @@
   </div>
 </div>
 <div id="landing" class="landing">
+  <div class="dev-stamp" id="qm-landing-dev-stamp" hidden aria-hidden="true">DEV</div>
   <h1>ALPEN.BOT SONGQ</h1>
   <button id="login-btn">log in with Twitch</button>
   <div id="channel-list" class="channel-list"></div>
@@ -33,6 +35,7 @@
       <span id="ch-badge" class="badge">channel: ?</span>
       <span id="bot-status" class="badge" hidden>bot: unknown</span>
       <button id="reg-btn" style="display:none"></button>
+      <div class="dev-stamp" id="qm-app-dev-stamp" hidden aria-hidden="true">DEV</div>
     </div>
 
     <div class="grid">
@@ -44,6 +47,7 @@
           <button id="tab-settings" class="tab">Settings</button>
           <button id="tab-events" class="tab">Events</button>
           <button id="tab-overlays" class="tab">Overlays</button>
+          <button id="tab-dev" class="tab" hidden>Dev</button>
         </div>
 
         <div id="queue-view">
@@ -95,14 +99,37 @@
         <div id="playlists-view" style="display:none">
           <h2>Playlists</h2>
           <form id="playlist-form" class="playlist-form">
-            <div class="playlist-form-row">
-              <label for="playlist-url">Playlist link</label>
-              <input id="playlist-url" type="url" required placeholder="https://www.youtube.com/playlist?list=..." />
+            <fieldset class="playlist-mode">
+              <legend class="playlist-mode-legend">Playlist source</legend>
+              <div class="playlist-mode-options">
+                <label class="playlist-mode-option">
+                  <input type="radio" name="playlist-mode" value="import" checked />
+                  <span class="playlist-mode-label">Import from YouTube</span>
+                  <span class="playlist-mode-hint">Sync songs from an existing playlist link.</span>
+                </label>
+                <label class="playlist-mode-option">
+                  <input type="radio" name="playlist-mode" value="manual" />
+                  <span class="playlist-mode-label">Create empty playlist</span>
+                  <span class="playlist-mode-hint">Start fresh and add songs manually.</span>
+                </label>
+              </div>
+            </fieldset>
+            <div class="playlist-form-section" data-playlist-mode="import">
+              <div class="playlist-form-row">
+                <label for="playlist-url">YouTube playlist link</label>
+                <input id="playlist-url" type="url" placeholder="https://www.youtube.com/playlist?list=..." />
+              </div>
+            </div>
+            <div class="playlist-form-section" data-playlist-mode="manual" hidden>
+              <div class="playlist-form-row">
+                <label for="playlist-title">Playlist title</label>
+                <input id="playlist-title" type="text" maxlength="255" placeholder="Late Night Vibes" autocomplete="off" />
+              </div>
             </div>
             <div class="playlist-form-row">
               <label for="playlist-visibility">Visibility</label>
               <select id="playlist-visibility">
-                <option value="public">Public</option>
+                <option value="public" selected>Public</option>
                 <option value="unlisted">Unlisted</option>
               </select>
             </div>
@@ -112,8 +139,8 @@
               <p class="muted playlist-form-hint">Use commas or spaces to enter multiple keywords. Chat can request them with <code>!random keyword</code>.</p>
             </div>
             <div class="playlist-form-actions">
-              <button type="submit">Add playlist</button>
-              <span id="playlist-status" class="playlist-status muted" role="status" hidden></span>
+              <button type="submit">Save playlist</button>
+              <span id="playlist-status" class="playlist-status muted" role="status">Import from YouTube or create a manual playlist to curate your queue.</span>
             </div>
           </form>
           <div id="playlists" class="playlists-list"></div>
@@ -224,11 +251,48 @@
           </div>
           <p class="overlay-hint muted">Add a new Browser Source in OBS, paste the link, and use the recommended size. The overlay updates itself whenever your channel data changes.</p>
         </div>
+
+        <div id="dev-view" class="dev-view" style="display:none">
+          <h2>Developer Notes</h2>
+          <p class="dev-placeholder">
+            <h3>v0.1.0 first public deployment</h3>
+            <hr>
+            <h4>known shit</h4>
+            <p>- t1/t2/t3 subscriber behaviour is weird</p>
+            <p>- archive behaiour</p>
+            <p>- bot doesn't greet, but says goodbye</p>
+            <p>- bot console window</p>
+            <hr>
+            <h4>shit to do</h4>
+            <p>- bot not customizeable: messages and aliases of commands</p>
+            <p>- lots settings and lots of "bump" options not adjustable yet</p>
+            <p>- bits and channelpoints not implemented</p>            
+            <p>- instructions for streamer.bot</p>
+          </p>
+        </div>
       </div>
     </div>
   </div>
 </div>
+
+<footer class="app-footer" id="manager-footer" hidden></footer>
+
   <script src="config.js"></script>
   <script src="queue_manager.js"></script>
+<div id="toast-container" class="toast-container" aria-live="polite" aria-atomic="false"></div>
+<div id="playlist-picker" class="playlist-picker" hidden>
+  <div class="playlist-picker-dialog" role="dialog" aria-modal="true" aria-labelledby="playlist-picker-title">
+    <h3 id="playlist-picker-title">Add to playlist</h3>
+    <p id="playlist-picker-subtitle" class="muted">Choose a manual playlist for the selected song.</p>
+    <label class="playlist-picker-label" for="playlist-picker-select">
+      Playlist
+      <select id="playlist-picker-select" aria-describedby="playlist-picker-subtitle"></select>
+    </label>
+    <div class="playlist-picker-actions">
+      <button type="button" id="playlist-picker-cancel">Cancel</button>
+      <button type="button" id="playlist-picker-confirm" class="accent">Add song</button>
+    </div>
+  </div>
+</div>
 </body>
 </html>

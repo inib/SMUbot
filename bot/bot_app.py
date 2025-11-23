@@ -1,34 +1,41 @@
 from __future__ import annotations
-import os, re, asyncio, json, yaml
+import os, re, asyncio, json, yaml, logging
 from typing import Optional, Dict, List, Tuple, Callable, Awaitable, Set
 from dataclasses import dataclass
 from pathlib import Path
 from datetime import datetime, timedelta
 
 import aiohttp
-from twitchio import eventsub
+from twitchio import eventsub, HTTPException
 from twitchio.ext import commands
 from twitchio.payloads import TokenRefreshedPayload
 
 # ---- Env ----
+# Configure logging before other components so that early startup messages are visible.
+LOG_LEVEL = os.getenv("BOT_LOG_LEVEL", "INFO").upper()
+logger = logging.getLogger("songbot.bot")
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+    logger.addHandler(handler)
+logger.setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
+logger.propagate = False
+
 # Full URL of the backend API, defaulting to the docker-compose service name.
 BACKEND_URL = os.getenv('BACKEND_URL', 'http://api:7070')
 # Token used for privileged requests to the backend.
 ADMIN_TOKEN = os.getenv('ADMIN_TOKEN', 'change-me')
-TWITCH_CLIENT_ID_ENV = os.getenv('TWITCH_CLIENT_ID')
-TWITCH_CLIENT_SECRET_ENV = os.getenv('TWITCH_CLIENT_SECRET')
-BOT_USER_ID_ENV = os.getenv('BOT_USER_ID') or os.getenv('TWITCH_BOT_USER_ID')
 MESSAGES_PATH = Path(os.getenv("BOT_MESSAGES_PATH", "/bot/messages.yml"))
-
 COMMANDS_FILE = os.getenv('COMMANDS_FILE', '/bot/commands.yml')
 DEFAULT_COMMANDS = {
     'prefix': '!',
-    'request': ['request', 'req', 'r'],
+    'request': ['request', 'req', 'r', 'sr'],
     'prioritize': ['prioritize', 'prio', 'bump'],
     'points': ['points', 'pp'],
     'remove': ['remove', 'undo', 'del'],
     'archive': ['archive'],
     'random_request': ['random', 'rr', 'randomrequest'],
+    'playlist_request': ['playlist', 'pl'],
 }
 
 DEFAULT_MESSAGES = {
@@ -56,6 +63,10 @@ DEFAULT_MESSAGES = {
     'award_bits': 'Thx for cheering {amount} bits {username}, take {word} - you have now {points} {currency_plural}',
     'bot_joined': 'Song queue bot connected to chat.',
     'bot_left': 'Song queue bot disconnected from chat.',
+    'playlist_request_added': 'Added from {playlist}: {artist} - {title}',
+    'playlist_not_found': 'Playlist "{playlist}" not found',
+    'playlist_song_missing': 'Playlist "{playlist}" has no song #{index}',
+    'playlist_usage': 'Usage: !playlist <name> <index>',
 }
 
 # Channels that should never trigger Twitch joins/subscriptions even if they
@@ -182,6 +193,9 @@ class Backend:
             path += "?include_played=1"
         return await self._req('GET', path)
 
+    async def list_playlists(self, channel: str) -> List[dict]:
+        return await self._req('GET', f"/channels/{channel}/playlists")
+
     async def delete_request(self, channel: str, request_id: int):
         return await self._req('DELETE', f"/channels/{channel}/queue/{request_id}")
 
@@ -252,6 +266,16 @@ class Backend:
             payload['keyword'] = keyword
         return await self._req('POST', f"/channels/{channel}/playlists/random_request", payload)
 
+    async def playlist_request(
+        self,
+        channel: str,
+        *,
+        identifier: str,
+        index: int,
+    ) -> Dict[str, object]:
+        payload = {'identifier': identifier, 'index': index}
+        return await self._req('POST', f"/channels/{channel}/playlists/request", payload)
+
 
 backend = Backend(BACKEND_URL, ADMIN_TOKEN)
 
@@ -280,6 +304,22 @@ async def push_console_event(
     event: Optional[str] = None,
     metadata: Optional[Dict[str, object]] = None,
 ):
+    level_key = (level or "").lower()
+    log_level = {
+        "debug": logging.DEBUG,
+        "info": logging.INFO,
+        "warning": logging.WARNING,
+        "warn": logging.WARNING,
+        "error": logging.ERROR,
+        "critical": logging.CRITICAL,
+    }.get(level_key, logging.INFO)
+    extra = ""
+    if metadata:
+        try:
+            extra = f" | {json.dumps(metadata, sort_keys=True)}"
+        except Exception:
+            extra = f" | {metadata}"
+    logger.log(log_level, f"{message}{extra}")
     meta = dict(metadata or {})
     if event:
         meta.setdefault('event', event)
@@ -625,17 +665,55 @@ class SongBot(commands.Bot):
             raise RuntimeError('Channel missing broadcaster id')
         if broadcaster_id in self._subscription_ids:
             return
+        existing_id = await self._find_existing_subscription_id(broadcaster_id)
+        if existing_id:
+            self._subscription_ids[broadcaster_id] = existing_id
+            logger.info(
+                "Reusing existing websocket subscription %s for broadcaster %s",
+                existing_id,
+                broadcaster_id,
+            )
+            return
         payload = eventsub.ChatMessageSubscription(
             broadcaster_user_id=broadcaster_id,
             user_id=self.bot_user_id,
         )
-        response = await self.subscribe_websocket(payload=payload, as_bot=True)
+        try:
+            response = await self.subscribe_websocket(payload=payload, as_bot=True)
+        except HTTPException as exc:
+            if exc.status in {409, 429}:
+                logger.warning(
+                    "subscribe_websocket returned %s for broadcaster %s; attempting to reuse existing subscription",
+                    exc.status,
+                    broadcaster_id,
+                )
+                recovered_id = await self._find_existing_subscription_id(broadcaster_id)
+                if recovered_id:
+                    self._subscription_ids[broadcaster_id] = recovered_id
+                    logger.info(
+                        "Reused existing websocket subscription %s for broadcaster %s after %s response",
+                        recovered_id,
+                        broadcaster_id,
+                        exc.status,
+                    )
+                    return
+                logger.error(
+                    "Unable to recover websocket subscription for broadcaster %s after %s response",
+                    broadcaster_id,
+                    exc.status,
+                )
+            raise
         sub_id = self._extract_subscription_id(response)
         if not sub_id:
             sub_id = await self._find_existing_subscription_id(broadcaster_id)
         if not sub_id:
             raise RuntimeError('Subscription id unavailable')
         self._subscription_ids[broadcaster_id] = sub_id
+        logger.info(
+            "Created new websocket subscription %s for broadcaster %s",
+            sub_id,
+            broadcaster_id,
+        )
 
     async def _unsubscribe_channel(self, broadcaster_id: str) -> None:
         sub_id = self._subscription_ids.pop(broadcaster_id, None)
@@ -766,6 +844,8 @@ class SongBot(commands.Bot):
             await self.handle_request(message, args)
         elif cmd_lower in self.commands_map['random_request']:
             await self.handle_random_request(message, args)
+        elif cmd_lower in self.commands_map['playlist_request']:
+            await self.handle_playlist_request(message, args)
         elif cmd_lower in self.commands_map['prioritize']:
             await self.handle_prioritize(message, args)
         elif cmd_lower in self.commands_map['points']:
@@ -926,6 +1006,200 @@ class SongBot(commands.Bot):
                 login,
                 message_text,
                 metadata={'channel': channel, 'command': 'random_request', 'keyword': resolved_keyword or keyword},
+                reply_to=msg.id,
+                fallback_partial=msg.broadcaster,
+            )
+
+    async def handle_playlist_request(self, msg, arg: str) -> None:
+        login = self._channel_login(msg.broadcaster.name)
+        row = self.channel_map.get(login)
+        if not row:
+            await self._send_message(
+                login,
+                self.messages['channel_not_registered'],
+                metadata={'channel': msg.broadcaster.name, 'command': 'playlist_request'},
+                reply_to=msg.id,
+                fallback_partial=msg.broadcaster,
+            )
+            return
+        channel = row['channel_name']
+        arg = (arg or '').strip()
+        if not arg:
+            await self._send_message(
+                login,
+                self.messages.get('playlist_usage', 'Usage: !playlist <name> <index>'),
+                metadata={'channel': channel, 'command': 'playlist_request'},
+                reply_to=msg.id,
+                fallback_partial=msg.broadcaster,
+            )
+            return
+        name_part, sep, index_part = arg.rpartition(' ')
+        if not sep or not name_part.strip() or not index_part.strip():
+            await self._send_message(
+                login,
+                self.messages.get('playlist_usage', 'Usage: !playlist <name> <index>'),
+                metadata={'channel': channel, 'command': 'playlist_request'},
+                reply_to=msg.id,
+                fallback_partial=msg.broadcaster,
+            )
+            return
+        playlist_name = name_part.strip()
+        try:
+            index = int(index_part)
+        except ValueError:
+            await self._send_message(
+                login,
+                self.messages.get('playlist_usage', 'Usage: !playlist <name> <index>'),
+                metadata={'channel': channel, 'command': 'playlist_request'},
+                reply_to=msg.id,
+                fallback_partial=msg.broadcaster,
+            )
+            return
+        if index < 1:
+            await self._send_message(
+                login,
+                self.messages.get('playlist_usage', 'Usage: !playlist <name> <index>'),
+                metadata={'channel': channel, 'command': 'playlist_request'},
+                reply_to=msg.id,
+                fallback_partial=msg.broadcaster,
+            )
+            return
+        try:
+            playlists = await backend.list_playlists(channel)
+        except Exception as exc:
+            await push_console_event(
+                'error',
+                f'Failed to list playlists for {channel}: {exc}',
+                metadata={'channel': channel, 'command': 'playlist_request'},
+            )
+            await self._send_message(
+                login,
+                self.messages['failed'].format(error=exc),
+                metadata={'channel': channel, 'command': 'playlist_request'},
+                reply_to=msg.id,
+                fallback_partial=msg.broadcaster,
+            )
+            return
+        match = None
+        playlist_lookup = playlist_name.lower()
+        for entry in playlists or []:
+            title = str(entry.get('title', '')).strip()
+            if title and title.lower() == playlist_lookup:
+                match = entry
+                break
+            slug_candidates: Set[str] = set()
+            identifier = entry.get('playlist_id')
+            if isinstance(identifier, str):
+                slug = identifier.strip()
+                if slug:
+                    slug_candidates.add(slug.lower())
+            entry_id = entry.get('id')
+            if entry_id is not None:
+                entry_slug = str(entry_id).strip()
+                if entry_slug:
+                    slug_candidates.add(entry_slug.lower())
+            if playlist_lookup in slug_candidates:
+                match = entry
+                break
+        if not match:
+            template = self.messages.get('playlist_not_found', 'Playlist "{playlist}" not found')
+            await self._send_message(
+                login,
+                template.format(playlist=playlist_name),
+                metadata={'channel': channel, 'command': 'playlist_request'},
+                reply_to=msg.id,
+                fallback_partial=msg.broadcaster,
+            )
+            return
+        identifier_value = match.get('id')
+        if identifier_value is None:
+            identifier_value = match.get('playlist_id') or playlist_name
+        playlist_title = str(match.get('title') or playlist_name)
+        try:
+            response = await backend.playlist_request(
+                channel,
+                identifier=str(identifier_value),
+                index=index,
+            )
+        except BackendError as exc:
+            detail = (exc.detail or '').lower()
+            if exc.status == 404 and 'playlist' in detail:
+                template = self.messages.get('playlist_not_found', 'Playlist "{playlist}" not found')
+                await self._send_message(
+                    login,
+                    template.format(playlist=playlist_title),
+                    metadata={'channel': channel, 'command': 'playlist_request'},
+                    reply_to=msg.id,
+                    fallback_partial=msg.broadcaster,
+                )
+                return
+            if exc.status in (400, 404) and any(keyword in detail for keyword in ('index', 'item')):
+                template = self.messages.get('playlist_song_missing', 'Playlist "{playlist}" has no song #{index}')
+                await self._send_message(
+                    login,
+                    template.format(playlist=playlist_title, index=index),
+                    metadata={'channel': channel, 'command': 'playlist_request'},
+                    reply_to=msg.id,
+                    fallback_partial=msg.broadcaster,
+                )
+                return
+            await push_console_event(
+                'error',
+                f'Failed playlist request for {msg.chatter.name}: {exc.detail}',
+                metadata={
+                    'channel': channel,
+                    'command': 'playlist_request',
+                    'status': exc.status,
+                    'playlist': playlist_title,
+                    'index': index,
+                },
+            )
+            await self._send_message(
+                login,
+                self.messages['failed'].format(error=exc.detail),
+                metadata={'channel': channel, 'command': 'playlist_request'},
+                reply_to=msg.id,
+                fallback_partial=msg.broadcaster,
+            )
+            return
+        except Exception as exc:
+            await push_console_event(
+                'error',
+                f'Failed playlist request for {msg.chatter.name}: {exc}',
+                metadata={'channel': channel, 'command': 'playlist_request'},
+            )
+            await self._send_message(
+                login,
+                self.messages['failed'].format(error=exc),
+                metadata={'channel': channel, 'command': 'playlist_request'},
+                reply_to=msg.id,
+                fallback_partial=msg.broadcaster,
+            )
+            return
+
+        song_payload = response.get('song') if isinstance(response, dict) else None
+        artist = song_payload.get('artist', '') if isinstance(song_payload, dict) else ''
+        title = song_payload.get('title', '') if isinstance(song_payload, dict) else ''
+        template = self.messages.get('playlist_request_added') or self.messages.get('request_added')
+        if template:
+            try:
+                message_text = template.format(
+                    playlist=playlist_title,
+                    artist=artist,
+                    title=title,
+                    index=index,
+                )
+            except KeyError:
+                message_text = template
+            await self._send_message(
+                login,
+                message_text,
+                metadata={
+                    'channel': channel,
+                    'command': 'playlist_request',
+                    'playlist': playlist_title,
+                    'index': index,
+                },
                 reply_to=msg.id,
                 fallback_partial=msg.broadcaster,
             )
@@ -1493,13 +1767,9 @@ class BotService:
         token = config.get('access_token') or config.get('token')
         refresh = config.get('refresh_token')
         login = config.get('login') or config.get('bot_login')
-        client_id = config.get('client_id') or TWITCH_CLIENT_ID_ENV
-        client_secret = config.get('client_secret') or TWITCH_CLIENT_SECRET_ENV
-        bot_user_id = (
-            config.get('bot_user_id')
-            or config.get('bot_id')
-            or BOT_USER_ID_ENV
-        )
+        client_id = config.get('client_id')
+        client_secret = config.get('client_secret')
+        bot_user_id = config.get('bot_user_id') or config.get('bot_id')
         raw_scopes = config.get('scopes') or []
         if isinstance(raw_scopes, str):
             scopes = [scope for scope in raw_scopes.split() if scope]

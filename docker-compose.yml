@@ -1,34 +1,30 @@
 services:
   api:
     build: .
-    container_name: twitch-q-backend
+    container_name: songq-backend-dev
     environment:
       ADMIN_TOKEN: ${ADMIN_TOKEN}
-      TWITCH_CLIENT_ID: ${TWITCH_CLIENT_ID}
-      TWITCH_CLIENT_SECRET: ${TWITCH_CLIENT_SECRET}
-      RESET_DB: "0"
     env_file:
       - stack.env
     ports:
-      - "7070:7070"
+      - "${API_PORT:-7070}:7070"
     volumes:
-      - /mnt/alpenbot/data:/data
+      - /mnt/alpenbot-dev/data:/data
   bot:
     build:
       context: .
       dockerfile: bot/Dockerfile
+    container_name: songq-bot-dev
     environment:
       BACKEND_URL: ${BACKEND_URL:-http://api:7070}
       ADMIN_TOKEN: ${ADMIN_TOKEN}
-      BOT_NICK: ${BOT_NICK}
-      COMMANDS_FILE: /bot/commands.yml
-      BOT_MESSAGES_PATH: /bot/messages.yml
+      COMMANDS_FILE: ./bot/commands.yml
+      BOT_MESSAGES_PATH: ./bot/messages.yml
     env_file:
       - stack.env
     depends_on:
       - api
     restart: unless-stopped
-
     volumes:
       - ./bot/commands.yml:/bot/commands.yml:ro
       - ./bot/messages.yml:/bot/messages.yml:ro
@@ -36,11 +32,11 @@ services:
     build:
       context: .
       dockerfile: web/Dockerfile
-    container_name: songqueue-web
-    environment:
-      BACKEND_URL: ${BACKEND_URL:-http://api:7070}
+    container_name: songq-web-dev
     env_file:
       - stack.env
+    environment:
+      PUBLIC_BACKEND_ORIGIN: ${PUBLIC_BACKEND_ORIGIN}
     ports:
       - "${WEB_PORT:-7000}:80"
     restart: unless-stopped
@@ -50,12 +46,11 @@ services:
     build:
       context: .
       dockerfile: queue_manager/Dockerfile
-    container_name: songqueue-queue-manager
-    environment:
-      BACKEND_URL: ${BACKEND_URL:-http://api:7070}
-      TWITCH_CLIENT_ID: ${TWITCH_CLIENT_ID}
+    container_name: songq-manager-dev
     env_file:
       - stack.env
+    environment:
+      PUBLIC_BACKEND_ORIGIN: ${PUBLIC_BACKEND_ORIGIN}
     ports:
       - "${QUEUE_MANAGER_PORT:-7100}:80"
     restart: unless-stopped
@@ -65,10 +60,9 @@ services:
     build:
       context: .
       dockerfile: admin/Dockerfile
-    container_name: songqueue-admin
+    container_name: songq-admin-dev
     environment:
-      BACKEND_URL: ${BACKEND_URL:-http://api:7070}
-      TWITCH_CLIENT_ID: ${TWITCH_CLIENT_ID}
+      PUBLIC_BACKEND_ORIGIN: ${PUBLIC_BACKEND_ORIGIN}
       ADMIN_BASIC_AUTH_USERNAME: ${ADMIN_BASIC_AUTH_USERNAME}
       ADMIN_BASIC_AUTH_PASSWORD: ${ADMIN_BASIC_AUTH_PASSWORD}
     env_file:

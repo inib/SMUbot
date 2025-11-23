@@ -3,56 +3,132 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>Twitch Song Queue</title>
+  <title>Alpenbot — Alpine Request Queues</title>
   <link rel="stylesheet" href="style.css"/>
 </head>
 <body>
-<div class="wrap">
-  <div class="header">
-    <div class="brand">Song Queue</div>
-    <span id="ch-badge" class="badge">channel: ?</span>
-    <span id="stat-badge" class="badge">status: idle</span>
-  </div>
+<div class="background" aria-hidden="true">
+  <div class="bg-layer bg-layer--sky"></div>
+  <div class="bg-layer bg-layer--aurora"></div>
+  <div class="bg-layer bg-layer--mountains"></div>
+  <div class="bg-layer bg-layer--snow"></div>
+</div>
 
-  <div class="grid">
-    <div class="card">
-      <div class="tabs">
-        <button id="tab-current" class="tab active">Current</button>
-        <button id="tab-archive" class="tab">Archive</button>
-      </div>
+<div id="setup-guard" class="setup-guard" hidden></div>
 
-      <div id="current-view">
-        <h2>Queue</h2>
-        <div id="queue" class="queue"></div>
-        <div class="sep"></div>
-        <h2>Played</h2>
-        <div id="played" class="queue"></div>
-        <div class="footer" id="footer-note"></div>
-      </div>
+<main id="landing" class="landing">
+  <header class="hero">
+    <div class="dev-stamp" id="landing-dev-stamp" hidden aria-hidden="true">DEV</div>
+    <div class="hero__logo">ALPEN<span>BOT</span></div>
+    <h1>A lonely alpine signal for song queues.</h1>
+    <p>ALPENbot keeps every request echoing through the snowbound night until it finds a home. Inspired by many other services, that just not did what I wanted.</p>
+    <div class="hero__meta">
+      <span id="channel-count" class="hero__metric">0 channels on the ridge</span>
+      <span class="hero__bullet" aria-hidden="true">•</span>
+      <span id="live-count" class="hero__metric">0 live with open queues</span>
+    </div>
+  </header>
 
-      <div id="archive-view" style="display:none">
-        <h2>Archive</h2>
-        <div class="streams" id="streams"></div>
-        <div class="sep"></div>
-        <h2>Stream Queue</h2>
-        <div id="arch-queue" class="queue"></div>
-        <div class="sep"></div>
-        <h2>Played</h2>
-        <div id="arch-played" class="queue"></div>
-      </div>
+  <section class="channels" aria-labelledby="channels-heading">
+    <div class="section-heading">
+      <h2 id="channels-heading">Registered channels</h2>
+      <button id="refresh-channels" type="button" class="ghost-btn">Refresh</button>
+    </div>
+    <div id="channels-grid" class="channels__grid" aria-live="polite"></div>
+    <p class="channels__hint">Browse happy ALPENbot queue users.</p>
+  </section>
+
+  <section class="about" aria-labelledby="about-heading">
+    <h2 id="about-heading">About Alpenbot</h2>
+    <p><strong>ALPEN.bot</strong>, king of the hill of request queues. Keeping songs queued, while trading neon deserts for windswept alpine solitude.</p>
+    <p>No heavyness, just layered gradients, auroras, and snowfall.</p>
+  </section>
+</main>
+
+<div id="queue-app" hidden>
+  <div class="wrap">
+    <div class="header">
+      <div class="brand">Song Queue</div>
+      <span id="ch-badge" class="badge">channel: ?</span>
+      <span id="stat-badge" class="badge">status: idle</span>
+      <div class="dev-stamp" id="queue-dev-stamp" hidden aria-hidden="true">DEV</div>
     </div>
 
-    <div class="card info">
-      <h2>How to request and bump</h2>
-      <p>Request a song in chat: <code>!request Artist - Title</code> or paste a YouTube link.</p>
-      <p>To bump a song use: <code>!prio</code> after requesting.</p>
-      <p>The first subscriber request each stream is bumped for free. Followers, raids, cheers of ≥200 bits, and 1 point per 5 gifted subs grant priority points.</p>
-      <div class="sep"></div>
-      <p>This page updates live. Prioritized songs are highlighted.</p>
-      <p>Tip: Click a title to open its YouTube link.</p>
+    <div class="grid">
+      <div class="card">
+        <div class="tabs">
+          <button id="tab-current" class="tab active">Current</button>
+          <button id="tab-archive" class="tab">Archive</button>
+          <button id="tab-dev" class="tab" hidden>Dev</button>
+        </div>
+
+        <div id="current-view">
+          <h2>Queue</h2>
+          <div id="queue" class="queue"></div>
+          <div class="sep"></div>
+          <h2>Played</h2>
+          <div id="played" class="queue"></div>
+          <div class="footer" id="footer-note"></div>
+        </div>
+
+        <div id="archive-view" style="display:none">
+          <h2>Archive</h2>
+          <div class="streams" id="streams"></div>
+          <div class="sep"></div>
+          <h2>Stream Queue</h2>
+          <div id="arch-queue" class="queue"></div>
+          <div class="sep"></div>
+          <h2>Played</h2>
+          <div id="arch-played" class="queue"></div>
+        </div>
+
+        <div id="dev-view" class="dev-view" style="display:none">
+          <h2>Developer Notes</h2>
+          <p class="dev-placeholder">
+            <h3>v0.1.0 first public deployment</h3>
+            <hr>
+            <h4>known shit</h4>
+            <p>- t1/t2/t3 subscriber behaviour is weird</p>
+            <p>- archive behaiour</p>
+            <p>- bot doesn't greet, but says goodbye</p>
+            <p>- bot console window</p>
+            <hr>
+            <h4>shit to do</h4>
+            <p>- bot not customizeable: messages and aliases of commands</p>
+            <p>- lots settings and lots of "bump" options not adjustable yet</p>
+            <p>- playlist/streamers favorites not yet fully implemented</p>
+            <p>- bits and channelpoints not implemented</p>            
+            <p>- instructions for streamer.bot</p>
+          </p>
+        </div>
+      </div>
+
+      <div class="card info">
+        <h2>How to request and bump</h2>
+        <p>Request a song in chat: <code>!request Artist - Title</code> or paste a YouTube link.</p>
+        <p>To bump a song use: <code>!prio</code> after requesting.</p>
+        <p>The first subscriber request each stream is bumped for free. Followers, raids, cheers of ≥200 bits, and 1 point per 5 gifted subs grant priority points.</p>
+        <div class="sep"></div>
+        <p>This page updates live. Prioritized songs are highlighted.</p>
+        <p>Tip: Click a title to open its YouTube link.</p>
+        <div class="sep"></div>
+        <p class="muted">Browse channel playlists below and request by copying the command next to a track.</p>
+      </div>
+
+      <div class="card playlists-card">
+        <div class="playlists-card__header">
+          <div>
+            <h2>Channel playlists</h2>
+            <p id="public-playlists-cta" class="muted">Request from curated sets with <code>!playlist &lt;slug&gt; &lt;index&gt;</code>.</p>
+          </div>
+        </div>
+        <div id="public-playlists" class="public-playlists" aria-live="polite"></div>
+      </div>
     </div>
   </div>
 </div>
+
+<footer class="site-footer" id="site-footer" hidden></footer>
 
 <script src="config.js"></script>
 <script src="app.js"></script>

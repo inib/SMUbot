@@ -3,6 +3,7 @@ import json
 import sys
 import unittest
 from pathlib import Path
+from typing import Optional
 from unittest.mock import patch
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -17,33 +18,59 @@ import backend_app
 
 class BotConfigApiTests(unittest.TestCase):
     def setUp(self) -> None:
-        self._client_id = backend_app.TWITCH_CLIENT_ID
-        self._client_secret = backend_app.TWITCH_CLIENT_SECRET
-        self._redirect_uri = backend_app.TWITCH_REDIRECT_URI
-        self._bot_redirect_uri = backend_app.BOT_TWITCH_REDIRECT_URI
-        self._bot_nick = backend_app.BOT_NICK
-        self._bot_user_id = backend_app.BOT_USER_ID
+        self._settings_snapshot = backend_app.settings_store.snapshot()
         db = backend_app.SessionLocal()
         try:
             db.query(backend_app.BotConfig).delete()
             db.query(backend_app.TwitchUser).delete()
-            db.commit()
+            db.query(backend_app.AppSetting).delete()
+            backend_app.set_settings(
+                db,
+                {
+                    "twitch_client_id": "client",
+                    "twitch_client_secret": "secret",
+                    "setup_complete": "1",
+                    "twitch_scopes": "channel:bot channel:read:subscriptions channel:read:vips",
+                    "bot_app_scopes": "user:read:chat user:write:chat user:bot",
+                },
+            )
         finally:
             db.close()
-        backend_app.BOT_NICK = None
         backend_app.BOT_USER_ID = None
         backend_app._bot_oauth_states.clear()
+        backend_app.APP_ACCESS_TOKEN = None
+        backend_app.APP_TOKEN_EXPIRES = 0
         self.client = TestClient(backend_app.app)
 
     def tearDown(self) -> None:
         self.client.close()
-        backend_app.TWITCH_CLIENT_ID = self._client_id
-        backend_app.TWITCH_CLIENT_SECRET = self._client_secret
-        backend_app.TWITCH_REDIRECT_URI = self._redirect_uri
-        backend_app.BOT_TWITCH_REDIRECT_URI = self._bot_redirect_uri
-        backend_app.BOT_NICK = self._bot_nick
-        backend_app.BOT_USER_ID = self._bot_user_id
+        db = backend_app.SessionLocal()
+        try:
+            db.query(backend_app.AppSetting).delete()
+            if self._settings_snapshot:
+                backend_app.set_settings(db, self._settings_snapshot)
+        finally:
+            db.close()
+        backend_app.BOT_USER_ID = None
+        backend_app.APP_ACCESS_TOKEN = None
+        backend_app.APP_TOKEN_EXPIRES = 0
         backend_app._bot_oauth_states.clear()
+
+    def _update_settings(self, **values: object) -> None:
+        payload: dict[str, Optional[str]] = {}
+        for key, value in values.items():
+            if isinstance(value, bool):
+                payload[key] = "1" if value else "0"
+            elif value is None:
+                payload[key] = None
+            else:
+                payload[key] = str(value)
+        if payload:
+            db = backend_app.SessionLocal()
+            try:
+                backend_app.set_settings(db, payload)
+            finally:
+                db.close()
 
     def test_fetch_default_config(self) -> None:
         response = self.client.get("/bot/config", headers={"X-Admin-Token": backend_app.ADMIN_TOKEN})
@@ -51,7 +78,8 @@ class BotConfigApiTests(unittest.TestCase):
         data = response.json()
         self.assertIsNone(data.get("login"))
         self.assertFalse(data["enabled"])
-        self.assertEqual(data["scopes"], backend_app.BOT_APP_SCOPES)
+        self.assertEqual(data["scopes"], backend_app.get_bot_app_scopes())
+        self.assertFalse(data["token_present"])
 
     def test_existing_config_missing_required_scopes_is_healed(self) -> None:
         db = backend_app.SessionLocal()
@@ -65,14 +93,14 @@ class BotConfigApiTests(unittest.TestCase):
         response = self.client.get("/bot/config", headers={"X-Admin-Token": backend_app.ADMIN_TOKEN})
         self.assertEqual(response.status_code, 200)
         data = response.json()
-        for scope in backend_app.BOT_APP_SCOPES:
+        for scope in backend_app.get_bot_app_scopes():
             self.assertIn(scope, data["scopes"])
 
         db = backend_app.SessionLocal()
         try:
             cfg = backend_app._get_bot_config(db)
             stored_scopes = (cfg.scopes or "").split()
-            for scope in backend_app.BOT_APP_SCOPES:
+            for scope in backend_app.get_bot_app_scopes():
                 self.assertIn(scope, stored_scopes)
         finally:
             db.close()
@@ -91,6 +119,7 @@ class BotConfigApiTests(unittest.TestCase):
         data = response.json()
         self.assertTrue(data["enabled"])
         self.assertEqual(data["scopes"], payload["scopes"])
+        self.assertFalse(data["token_present"])
 
     def test_fetch_config_includes_tokens_for_admin_header(self) -> None:
         db = backend_app.SessionLocal()
@@ -104,8 +133,6 @@ class BotConfigApiTests(unittest.TestCase):
         finally:
             db.close()
 
-        backend_app.TWITCH_CLIENT_ID = "client"
-        backend_app.TWITCH_CLIENT_SECRET = "secret"
         with patch.object(backend_app, "get_bot_user_id", return_value="1234"):
             response = self.client.get(
                 "/bot/config",
@@ -118,6 +145,7 @@ class BotConfigApiTests(unittest.TestCase):
         self.assertEqual(data["client_id"], "client")
         self.assertEqual(data["client_secret"], "secret")
         self.assertEqual(data["bot_user_id"], "1234")
+        self.assertTrue(data["token_present"])
 
     def test_fetch_config_hides_tokens_for_admin_session(self) -> None:
         db = backend_app.SessionLocal()
@@ -150,12 +178,16 @@ class BotConfigApiTests(unittest.TestCase):
         self.assertNotIn("client_id", data)
         self.assertNotIn("client_secret", data)
         self.assertNotIn("bot_user_id", data)
+        self.assertTrue(data["token_present"])
 
     def test_bot_oauth_start_returns_authorize_url(self) -> None:
-        backend_app.TWITCH_CLIENT_ID = "client"
-        backend_app.TWITCH_CLIENT_SECRET = "secret"
-        backend_app.TWITCH_REDIRECT_URI = "https://irrelevant.example/old"
-        backend_app.BOT_TWITCH_REDIRECT_URI = None
+        self._update_settings(
+            twitch_client_id="client",
+            twitch_client_secret="secret",
+            twitch_redirect_uri="https://irrelevant.example/old",
+            bot_redirect_uri=None,
+            setup_complete=True,
+        )
 
         response = self.client.post(
             "/bot/config/oauth",
@@ -174,7 +206,7 @@ class BotConfigApiTests(unittest.TestCase):
         redirect_param = params.get("redirect_uri", [None])[0]
         self.assertEqual(redirect_param, "http://testserver/bot/config/oauth/callback")
         scope_param = params.get("scope", [""])[0]
-        for scope in backend_app.BOT_APP_SCOPES:
+        for scope in backend_app.get_bot_app_scopes():
             self.assertIn(scope, scope_param)
         state_value = params.get("state", [None])[0]
         self.assertIsNotNone(state_value)
@@ -187,10 +219,13 @@ class BotConfigApiTests(unittest.TestCase):
         )
 
     def test_bot_oauth_callback_persists_tokens(self) -> None:
-        backend_app.TWITCH_CLIENT_ID = "client"
-        backend_app.TWITCH_CLIENT_SECRET = "secret"
-        backend_app.TWITCH_REDIRECT_URI = None
-        backend_app.BOT_TWITCH_REDIRECT_URI = None
+        self._update_settings(
+            twitch_client_id="client",
+            twitch_client_secret="secret",
+            twitch_redirect_uri=None,
+            bot_redirect_uri=None,
+            setup_complete=True,
+        )
 
         start_response = self.client.post(
             "/bot/config/oauth",
@@ -215,7 +250,7 @@ class BotConfigApiTests(unittest.TestCase):
                     "access_token": "bot-access",
                     "refresh_token": "bot-refresh",
                     "expires_in": 3600,
-                    "scope": backend_app.BOT_APP_SCOPES,
+                    "scope": backend_app.get_bot_app_scopes(),
                 }
 
         class FakeUserResponse:
@@ -262,9 +297,12 @@ class BotConfigApiTests(unittest.TestCase):
         mock_get.assert_called_once()
 
     def test_bot_oauth_start_respects_override_redirect(self) -> None:
-        backend_app.TWITCH_CLIENT_ID = "client"
-        backend_app.TWITCH_CLIENT_SECRET = "secret"
-        backend_app.BOT_TWITCH_REDIRECT_URI = "https://admin.example.com/bot/callback"
+        self._update_settings(
+            twitch_client_id="client",
+            twitch_client_secret="secret",
+            bot_redirect_uri="https://admin.example.com/bot/callback",
+            setup_complete=True,
+        )
 
         response = self.client.post(
             "/bot/config/oauth",
@@ -277,9 +315,12 @@ class BotConfigApiTests(unittest.TestCase):
         self.assertEqual(redirect_param, "https://admin.example.com/bot/callback")
 
     def test_bot_oauth_start_uses_forwarded_proto_and_host(self) -> None:
-        backend_app.TWITCH_CLIENT_ID = "client"
-        backend_app.TWITCH_CLIENT_SECRET = "secret"
-        backend_app.BOT_TWITCH_REDIRECT_URI = None
+        self._update_settings(
+            twitch_client_id="client",
+            twitch_client_secret="secret",
+            bot_redirect_uri=None,
+            setup_complete=True,
+        )
 
         response = self.client.post(
             "/bot/config/oauth",
@@ -299,9 +340,12 @@ class BotConfigApiTests(unittest.TestCase):
         )
 
     def test_bot_oauth_start_honors_forwarded_header(self) -> None:
-        backend_app.TWITCH_CLIENT_ID = "client"
-        backend_app.TWITCH_CLIENT_SECRET = "secret"
-        backend_app.BOT_TWITCH_REDIRECT_URI = None
+        self._update_settings(
+            twitch_client_id="client",
+            twitch_client_secret="secret",
+            bot_redirect_uri=None,
+            setup_complete=True,
+        )
 
         response = self.client.post(
             "/bot/config/oauth",

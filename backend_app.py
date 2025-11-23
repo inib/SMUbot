@@ -1,7 +1,7 @@
 from __future__ import annotations
 import math
 import contextlib
-from typing import Optional, List, Any, Dict, Mapping, Iterable, Literal
+from typing import Optional, List, Any, Dict, Mapping, Iterable, Literal, Sequence
 from threading import Lock
 import os
 import json
@@ -31,6 +31,7 @@ from fastapi import (
     Depends,
     Header,
     Query,
+    Path,
     APIRouter,
     Request as FastAPIRequest,
     Response,
@@ -39,12 +40,12 @@ from fastapi import (
     WebSocket,
 )
 from fastapi import WebSocketDisconnect
-from fastapi.responses import RedirectResponse, HTMLResponse
+from fastapi.responses import RedirectResponse, HTMLResponse, JSONResponse
 from starlette.datastructures import URL
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, model_validator
 from sqlalchemy import (
     create_engine, Column, Integer, String, Text, DateTime, Boolean,
-    ForeignKey, UniqueConstraint, func, select, and_, inspect, text,
+    ForeignKey, UniqueConstraint, func, select, and_, or_, inspect, text,
 )
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker, Session, joinedload, selectinload
 from sqlalchemy.exc import IntegrityError
@@ -60,22 +61,40 @@ DB_URL = "sqlite:////data/db.sqlite"
 # environment variable when the backend starts.
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "change-me")
 
-TWITCH_CLIENT_ID = os.getenv("TWITCH_CLIENT_ID")
-TWITCH_CLIENT_SECRET = os.getenv("TWITCH_CLIENT_SECRET")
-TWITCH_REDIRECT_URI = os.getenv("TWITCH_REDIRECT_URI")
-BOT_TWITCH_REDIRECT_URI = os.getenv("BOT_TWITCH_REDIRECT_URI")
-TWITCH_SCOPES = os.getenv(
-    "TWITCH_SCOPES", "channel:bot channel:read:subscriptions channel:read:vips"
-).split()
-BOT_NICK = os.getenv("BOT_NICK")
-
-BOT_APP_SCOPES = os.getenv(
-    "BOT_APP_SCOPES", "user:read:chat user:write:chat user:bot"
-).split()
-
 ADMIN_SESSION_COOKIE = "admin_oauth_token"
 
 YTMUSIC_AUTH_FILE = os.getenv("YTMUSIC_AUTH_FILE")
+
+SETTINGS_ENV_MAP: Dict[str, str] = {
+    "twitch_client_id": "TWITCH_CLIENT_ID",
+    "twitch_client_secret": "TWITCH_CLIENT_SECRET",
+    "twitch_redirect_uri": "TWITCH_REDIRECT_URI",
+    "bot_redirect_uri": "BOT_TWITCH_REDIRECT_URI",
+    "twitch_scopes": "TWITCH_SCOPES",
+    "bot_app_scopes": "BOT_APP_SCOPES",
+}
+
+SETTINGS_DEFAULTS: Dict[str, Optional[str]] = {
+    "twitch_scopes": "channel:bot channel:read:subscriptions channel:read:vips",
+    "bot_app_scopes": "user:read:chat user:write:chat user:bot",
+}
+
+SETUP_REQUIRED_KEYS = ("twitch_client_id", "twitch_client_secret")
+
+DEFAULT_TWITCH_SCOPES = SETTINGS_DEFAULTS["twitch_scopes"].split()
+DEFAULT_BOT_APP_SCOPES = SETTINGS_DEFAULTS["bot_app_scopes"].split()
+
+API_VERSION = "0.1.0"
+
+
+def _env_flag(value: Optional[str]) -> bool:
+    if value is None:
+        return False
+    normalized = value.strip().lower()
+    return normalized in {"1", "true", "yes", "on"}
+
+
+DEV_MODE = True
 
 APP_ACCESS_TOKEN: Optional[str] = None
 APP_TOKEN_EXPIRES = 0
@@ -89,6 +108,13 @@ logger = logging.getLogger(__name__)
 engine = create_engine(DB_URL, connect_args={"check_same_thread": False} if DB_URL.startswith("sqlite") else {})
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 Base = declarative_base()
+
+class AppSetting(Base):
+    __tablename__ = "app_settings"
+
+    key = Column(String, primary_key=True)
+    value = Column(Text, nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 _ytmusic_client: Optional[YTMusic] = None
 _ytmusic_lock = Lock()
@@ -139,16 +165,196 @@ def backfill_missing_channel_keys() -> None:
             db.commit()
     finally:
         db.close()
+def _load_settings_from_db() -> Dict[str, Optional[str]]:
+    db = SessionLocal()
+    try:
+        rows = db.query(AppSetting).all()
+        values = {row.key: row.value for row in rows}
+    finally:
+        db.close()
+    for key, default in SETTINGS_DEFAULTS.items():
+        values.setdefault(key, default)
+    return values
+
+
+class SettingsStore:
+    __slots__ = ("_cache", "_lock")
+
+    def __init__(self) -> None:
+        self._cache: Optional[Dict[str, Optional[str]]] = None
+        self._lock = Lock()
+
+    def snapshot(self) -> Dict[str, Optional[str]]:
+        with self._lock:
+            if self._cache is None:
+                self._cache = _load_settings_from_db()
+            return dict(self._cache)
+
+    def get(self, key: str, default: Optional[str] = None) -> Optional[str]:
+        value = self.snapshot().get(key, default)
+        if value is None:
+            return default
+        value_str = str(value).strip()
+        return value_str or default
+
+    def get_list(self, key: str) -> list[str]:
+        raw = self.get(key)
+        if not raw:
+            return []
+        parts = re.split(r"[\s,]+", raw)
+        return [part for part in parts if part]
+
+    def invalidate(self) -> None:
+        with self._lock:
+            self._cache = None
+
+
+settings_store = SettingsStore()
+
+
+def _settings_requirements_met(values: Mapping[str, Optional[str]]) -> bool:
+    for key in SETUP_REQUIRED_KEYS:
+        if not str(values.get(key) or "").strip():
+            return False
+    return True
+
+
+def bootstrap_settings_from_env() -> None:
+    db = SessionLocal()
+    try:
+        existing_rows = {row.key: row for row in db.query(AppSetting).all()}
+        values: Dict[str, Optional[str]] = {key: row.value for key, row in existing_rows.items()}
+        changed = False
+
+        for key, env_name in SETTINGS_ENV_MAP.items():
+            env_value = os.getenv(env_name)
+            if env_value is None:
+                continue
+            trimmed = env_value.strip()
+            if not trimmed:
+                continue
+            if key in existing_rows:
+                if not existing_rows[key].value:
+                    existing_rows[key].value = trimmed
+                    values[key] = trimmed
+                    changed = True
+            else:
+                db.add(AppSetting(key=key, value=trimmed))
+                values[key] = trimmed
+                changed = True
+
+        for key, default in SETTINGS_DEFAULTS.items():
+            if key not in values:
+                db.add(AppSetting(key=key, value=default))
+                values[key] = default
+                changed = True
+
+        setup_value = values.get("setup_complete")
+        if setup_value is None:
+            complete = "1" if _settings_requirements_met(values) else "0"
+            db.add(AppSetting(key="setup_complete", value=complete))
+            values["setup_complete"] = complete
+            changed = True
+
+        if changed:
+            db.commit()
+        else:
+            db.rollback()
+    finally:
+        db.close()
+    settings_store.invalidate()
+
+
+def _persist_settings(db: Session, updates: Mapping[str, Optional[str]]) -> None:
+    for key, value in updates.items():
+        row = db.get(AppSetting, key)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            normalized = None
+        else:
+            normalized = value.strip() if isinstance(value, str) else str(value)
+        if row:
+            row.value = normalized
+        else:
+            db.add(AppSetting(key=key, value=normalized))
+
+
+def set_settings(db: Session, updates: Mapping[str, Optional[str]]) -> Dict[str, Optional[str]]:
+    _persist_settings(db, updates)
+    db.commit()
+    settings_store.invalidate()
+    return settings_store.snapshot()
+
+
+def get_setting(key: str, default: Optional[str] = None) -> Optional[str]:
+    return settings_store.get(key, default)
+
+
+def get_scopes_setting(key: str, default: Optional[list[str]] = None) -> list[str]:
+    scopes = settings_store.get_list(key)
+    if scopes:
+        return scopes
+    return list(default or [])
+
+
+def is_setup_complete() -> bool:
+    value = get_setting("setup_complete", "0")
+    return str(value).strip() in {"1", "true", "yes", "on"}
+
+
+def get_twitch_client_id() -> Optional[str]:
+    value = get_setting("twitch_client_id")
+    return value.strip() if value else None
+
+
+def get_twitch_client_secret() -> Optional[str]:
+    value = get_setting("twitch_client_secret")
+    return value.strip() if value else None
+
+
+def get_twitch_redirect_uri() -> Optional[str]:
+    value = get_setting("twitch_redirect_uri")
+    return value.strip() if value else None
+
+
+def get_bot_redirect_uri() -> Optional[str]:
+    value = get_setting("bot_redirect_uri")
+    return value.strip() if value else None
+
+
+def get_twitch_scopes() -> list[str]:
+    scopes = get_scopes_setting("twitch_scopes", DEFAULT_TWITCH_SCOPES)
+    return scopes or list(DEFAULT_TWITCH_SCOPES)
+
+
+def get_bot_app_scopes() -> list[str]:
+    scopes = get_scopes_setting("bot_app_scopes", DEFAULT_BOT_APP_SCOPES)
+    return scopes or list(DEFAULT_BOT_APP_SCOPES)
+
+
+def _system_config_payload() -> Dict[str, Any]:
+    return {
+        "setup_complete": is_setup_complete(),
+        "twitch_client_id": get_twitch_client_id(),
+        "twitch_client_secret_set": bool(get_twitch_client_secret()),
+        "twitch_redirect_uri": get_twitch_redirect_uri(),
+        "bot_redirect_uri": get_bot_redirect_uri(),
+        "twitch_scopes": get_twitch_scopes(),
+        "bot_app_scopes": get_bot_app_scopes(),
+    }
 
 
 def get_app_access_token() -> str:
     global APP_ACCESS_TOKEN, APP_TOKEN_EXPIRES
     if not APP_ACCESS_TOKEN or time.time() > APP_TOKEN_EXPIRES:
+        client_id = get_twitch_client_id()
+        client_secret = get_twitch_client_secret()
+        if not client_id or not client_secret:
+            raise RuntimeError("twitch oauth credentials are not configured")
         response = requests.post(
             "https://id.twitch.tv/oauth2/token",
             data={
-                "client_id": TWITCH_CLIENT_ID,
-                "client_secret": TWITCH_CLIENT_SECRET,
+                "client_id": client_id,
+                "client_secret": client_secret,
                 "grant_type": "client_credentials",
             },
             timeout=5,
@@ -178,19 +384,21 @@ def get_bot_user_id() -> Optional[str]:
     global BOT_USER_ID
     if BOT_USER_ID:
         return BOT_USER_ID
-    login = BOT_NICK
-    if not login:
-        db = SessionLocal()
-        try:
-            cfg = db.query(BotConfig).order_by(BotConfig.id.asc()).first()
-            if cfg and cfg.login:
-                login = cfg.login
-        finally:
-            db.close()
+    login: Optional[str] = None
+    db = SessionLocal()
+    try:
+        cfg = db.query(BotConfig).order_by(BotConfig.id.asc()).first()
+        if cfg and cfg.login:
+            login = cfg.login
+    finally:
+        db.close()
     if not login:
         return None
+    client_id = get_twitch_client_id()
+    if not client_id:
+        return None
     token = get_app_access_token()
-    headers = {"Authorization": f"Bearer {token}", "Client-Id": TWITCH_CLIENT_ID}
+    headers = {"Authorization": f"Bearer {token}", "Client-Id": client_id}
     resp = requests.get(
         "https://api.twitch.tv/helix/users",
         params={"login": login},
@@ -392,8 +600,10 @@ class Playlist(Base):
     id = Column(Integer, primary_key=True)
     channel_id = Column(Integer, ForeignKey("active_channels.id", ondelete="CASCADE"), nullable=False)
     title = Column(String, nullable=False)
-    playlist_id = Column(String, nullable=False)
-    url = Column(Text, nullable=False)
+    description = Column(Text, nullable=True)
+    playlist_id = Column(String, nullable=True)
+    url = Column(Text, nullable=True)
+    source = Column(String, nullable=False, default="youtube")
     visibility = Column(String, nullable=False, default="public")
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
@@ -425,11 +635,11 @@ class PlaylistItem(Base):
     id = Column(Integer, primary_key=True)
     playlist_id = Column(Integer, ForeignKey("playlists.id", ondelete="CASCADE"), nullable=False)
     position = Column(Integer, default=0, nullable=False)
-    video_id = Column(String, nullable=False)
+    video_id = Column(String, nullable=True)
     title = Column(String, nullable=False)
     artist = Column(String, nullable=True)
     duration_seconds = Column(Integer)
-    url = Column(Text, nullable=False)
+    url = Column(Text, nullable=True)
 
     playlist = relationship("Playlist", back_populates="items")
 
@@ -441,6 +651,97 @@ class PlaylistItem(Base):
 # DB bootstrap
 # =====================================
 Base.metadata.create_all(bind=engine)
+
+
+def _ensure_playlist_schema() -> None:
+    """Ensure legacy databases have the latest playlist columns."""
+
+    with engine.begin() as connection:
+        inspector = inspect(connection)
+        if "playlists" not in inspector.get_table_names():
+            return
+
+        columns = {column["name"] for column in inspector.get_columns("playlists")}
+
+        if "description" not in columns:
+            connection.execute(text("ALTER TABLE playlists ADD COLUMN description TEXT"))
+
+        added_source = False
+        if "source" not in columns:
+            connection.execute(
+                text(
+                    "ALTER TABLE playlists ADD COLUMN source VARCHAR NOT NULL DEFAULT 'youtube'"
+                )
+            )
+            added_source = True
+
+        added_visibility = False
+        if "visibility" not in columns:
+            connection.execute(
+                text(
+                    "ALTER TABLE playlists ADD COLUMN visibility VARCHAR NOT NULL DEFAULT 'public'"
+                )
+            )
+            added_visibility = True
+
+        if added_source:
+            connection.execute(
+                text("UPDATE playlists SET source = 'youtube' WHERE source IS NULL OR source = ''")
+            )
+
+        if added_visibility:
+            connection.execute(
+                text(
+                    "UPDATE playlists SET visibility = 'public' WHERE visibility IS NULL OR visibility = ''"
+                )
+            )
+
+        inspector = inspect(connection)
+        playlist_columns = {
+            column["name"]: column for column in inspector.get_columns("playlists")
+        }
+        playlist_id_column = playlist_columns.get("playlist_id")
+        if playlist_id_column and not playlist_id_column["nullable"]:
+            connection.execute(text("DROP TABLE IF EXISTS playlists_tmp"))
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE playlists_tmp (
+                        id INTEGER PRIMARY KEY,
+                        channel_id INTEGER NOT NULL REFERENCES active_channels(id) ON DELETE CASCADE,
+                        title VARCHAR NOT NULL,
+                        description TEXT,
+                        playlist_id VARCHAR,
+                        url TEXT,
+                        source VARCHAR NOT NULL DEFAULT 'youtube',
+                        visibility VARCHAR NOT NULL DEFAULT 'public',
+                        created_at DATETIME NOT NULL,
+                        updated_at DATETIME NOT NULL,
+                        CONSTRAINT uq_playlists_channel_playlist UNIQUE (channel_id, playlist_id)
+                    )
+                    """
+                )
+            )
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO playlists_tmp (
+                        id, channel_id, title, description, playlist_id, url, source,
+                        visibility, created_at, updated_at
+                    )
+                    SELECT
+                        id, channel_id, title, description, playlist_id, url, source,
+                        visibility, created_at, updated_at
+                    FROM playlists
+                    """
+                )
+            )
+            connection.execute(text("DROP TABLE playlists"))
+            connection.execute(text("ALTER TABLE playlists_tmp RENAME TO playlists"))
+
+
+_ensure_playlist_schema()
+bootstrap_settings_from_env()
 
 # =====================================
 # Schemas
@@ -461,6 +762,12 @@ class ChannelOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class ChannelLiveStatusOut(BaseModel):
+    channel_name: str
+    channel_id: str
+    is_live: bool
 
 
 class ChannelOAuthOut(BaseModel):
@@ -524,6 +831,7 @@ class BotConfigOut(BaseModel):
     scopes: List[str] = Field(default_factory=list)
     enabled: bool
     expires_at: Optional[datetime]
+    token_present: bool = False
     access_token: Optional[str] = None
     refresh_token: Optional[str] = None
     client_id: Optional[str] = None
@@ -561,35 +869,116 @@ class BotOAuthStartIn(BaseModel):
     return_url: Optional[str] = None
 
 
+class SystemConfigOut(BaseModel):
+    setup_complete: bool
+    twitch_client_id: Optional[str]
+    twitch_client_secret_set: bool
+    twitch_redirect_uri: Optional[str]
+    bot_redirect_uri: Optional[str]
+    twitch_scopes: List[str]
+    bot_app_scopes: List[str]
+
+
+class SystemConfigUpdate(BaseModel):
+    twitch_client_id: Optional[str] = None
+    twitch_client_secret: Optional[str] = None
+    twitch_redirect_uri: Optional[str] = None
+    bot_redirect_uri: Optional[str] = None
+    twitch_scopes: Optional[List[str]] = None
+    bot_app_scopes: Optional[List[str]] = None
+    setup_complete: Optional[bool] = None
+
+
+class SystemStatusOut(BaseModel):
+    setup_complete: bool
+
+
+class SystemMetaOut(BaseModel):
+    version: str
+    dev_mode: bool
+
+
+class ManualPlaylistCreate(BaseModel):
+    title: str = Field(..., min_length=1, max_length=255)
+    description: Optional[str] = Field(default=None, max_length=2048)
+
+
 class PlaylistCreate(BaseModel):
-    url: str = Field(..., min_length=1, max_length=1024)
+    url: Optional[str] = Field(default=None, min_length=1, max_length=1024)
+    manual: Optional[ManualPlaylistCreate] = None
     keywords: List[str] = Field(default_factory=list)
     visibility: Optional[str] = Field(default="public")
+
+    @model_validator(mode="after")
+    def _validate_choice(self) -> "PlaylistCreate":
+        if bool(self.url) == bool(self.manual):
+            raise ValueError("provide either url or manual playlist data")
+        return self
 
 
 class PlaylistUpdate(BaseModel):
     keywords: Optional[List[str]] = None
     visibility: Optional[str] = None
+    slug: Optional[str] = Field(default=None, max_length=255)
 
 
 class PlaylistOut(BaseModel):
     id: int
     title: str
-    playlist_id: str
-    url: str
+    description: Optional[str]
+    playlist_id: Optional[str]
+    url: Optional[str]
+    source: str
     visibility: str
     keywords: List[str] = Field(default_factory=list)
     item_count: int
+
+
+class PlaylistItemCreate(BaseModel):
+    title: Optional[str] = Field(default=None, min_length=1, max_length=255)
+    artist: Optional[str] = Field(default=None, max_length=255)
+    video_id: Optional[str] = Field(default=None, min_length=1, max_length=128)
+    url: Optional[str] = Field(default=None, min_length=1, max_length=1024)
+    duration_seconds: Optional[int] = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def _validate_payload(self) -> "PlaylistItemCreate":
+        if not (self.title or self.video_id or self.url):
+            raise ValueError("playlist items require a title, video_id, or url")
+        return self
 
 
 class PlaylistItemOut(BaseModel):
     id: int
     title: str
     artist: Optional[str]
-    video_id: str
-    url: str
+    video_id: Optional[str]
+    url: Optional[str]
     position: int
     duration_seconds: Optional[int] = None
+
+
+class PublicPlaylistItemOut(BaseModel):
+    id: int
+    title: str
+    artist: Optional[str]
+    video_id: Optional[str]
+    url: Optional[str]
+    position: int
+    duration_seconds: Optional[int] = None
+
+
+class PublicPlaylistOut(BaseModel):
+    id: int
+    title: str
+    description: Optional[str]
+    slug: str
+    source: str
+    visibility: str
+    url: Optional[str]
+    keywords: List[str] = Field(default_factory=list)
+    item_count: int
+    items: List[PublicPlaylistItemOut] = Field(default_factory=list)
 
 
 class PlaylistQueueIn(BaseModel):
@@ -602,6 +991,17 @@ class PlaylistSongPick(BaseModel):
     artist: str
     title: str
     youtube_link: Optional[str] = None
+
+
+class PlaylistRequestIn(BaseModel):
+    identifier: str = Field(..., min_length=1, max_length=255)
+    index: int = Field(..., ge=1)
+
+
+class PlaylistRequestOut(BaseModel):
+    request_id: int
+    playlist_item_id: int
+    song: PlaylistSongPick
 
 
 class RandomPlaylistRequestIn(BaseModel):
@@ -741,7 +1141,7 @@ class StreamOut(BaseModel):
 # =====================================
 # FastAPI app and deps
 # =====================================
-app = FastAPI(title="Twitch Song Request Backend", version="1.0.0")
+app = FastAPI(title="Twitch Song Request Backend", version=API_VERSION)
 
 DEFAULT_CORS_ALLOW_ORIGIN_REGEX = r"https?://.*"
 
@@ -832,6 +1232,25 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+SETUP_BYPASS_PREFIXES = ("/system", "/docs", "/openapi", "/redoc")
+
+
+@app.middleware("http")
+async def enforce_initial_setup(request: FastAPIRequest, call_next):
+    if is_setup_complete():
+        return await call_next(request)
+
+    path = request.url.path
+    for prefix in SETUP_BYPASS_PREFIXES:
+        if path.startswith(prefix):
+            return await call_next(request)
+
+    token = request.headers.get("X-Admin-Token")
+    if token and secrets.compare_digest(token, ADMIN_TOKEN):
+        return await call_next(request)
+
+    return JSONResponse({"detail": "setup incomplete"}, status_code=503)
 
 class _ChannelBroker:
     __slots__ = ("channel_pk", "listeners")
@@ -1179,8 +1598,9 @@ def _apply_forwarded_headers(request: FastAPIRequest, url: URL) -> URL:
 
 
 def _bot_redirect_uri(request: FastAPIRequest) -> str:
-    if BOT_TWITCH_REDIRECT_URI:
-        return BOT_TWITCH_REDIRECT_URI
+    configured = get_bot_redirect_uri()
+    if configured:
+        return configured
     url = URL(str(request.url_for("bot_oauth_callback")))
     adjusted = _apply_forwarded_headers(request, url)
     return str(adjusted)
@@ -1256,7 +1676,7 @@ def _normalize_scope_list(scopes: Iterable[str]) -> list[str]:
 
 def _ensure_bot_config_scopes(cfg: "BotConfig") -> bool:
     current = _normalize_scope_list((cfg.scopes or "").split())
-    required = _normalize_scope_list(BOT_APP_SCOPES)
+    required = _normalize_scope_list(get_bot_app_scopes())
     missing = [scope for scope in required if scope not in current]
     if missing:
         current.extend(missing)
@@ -1268,7 +1688,7 @@ def _ensure_bot_config_scopes(cfg: "BotConfig") -> bool:
 def _get_bot_config(db: Session) -> BotConfig:
     cfg = db.query(BotConfig).order_by(BotConfig.id.asc()).first()
     if not cfg:
-        default_scopes = _normalize_scope_list(BOT_APP_SCOPES)
+        default_scopes = _normalize_scope_list(get_bot_app_scopes())
         scopes = " ".join(default_scopes) if default_scopes else ""
         cfg = BotConfig(scopes=scopes or None, enabled=False)
         db.add(cfg)
@@ -1289,15 +1709,20 @@ def _serialize_bot_config(cfg: BotConfig, *, include_tokens: bool = False) -> Di
         "scopes": scopes,
         "enabled": bool(cfg.enabled),
         "expires_at": cfg.expires_at,
+        "token_present": bool(cfg.access_token and cfg.refresh_token),
     }
     if include_tokens:
         data["access_token"] = cfg.access_token
         data["refresh_token"] = cfg.refresh_token
-        data["client_id"] = TWITCH_CLIENT_ID
-        data["client_secret"] = TWITCH_CLIENT_SECRET
+        client_id = get_twitch_client_id()
+        client_secret = get_twitch_client_secret()
+        if client_id:
+            data["client_id"] = client_id
+        if client_secret:
+            data["client_secret"] = client_secret
         try:
             data["bot_user_id"] = get_bot_user_id()
-        except requests.RequestException:
+        except (requests.RequestException, RuntimeError):
             data["bot_user_id"] = None
     return data
 
@@ -1541,17 +1966,19 @@ def auth_login(
     request: FastAPIRequest,
     return_url: Optional[str] = Query(None),
 ):
-    if not TWITCH_CLIENT_ID or not TWITCH_CLIENT_SECRET:
+    client_id = get_twitch_client_id()
+    client_secret = get_twitch_client_secret()
+    if not client_id or not client_secret:
         raise HTTPException(status_code=500, detail="Twitch OAuth not configured")
-    scope = "+".join(TWITCH_SCOPES)
-    redirect_uri = TWITCH_REDIRECT_URI or str(request.url_for("auth_callback"))
+    scope = "+".join(get_twitch_scopes())
+    redirect_uri = get_twitch_redirect_uri() or str(request.url_for("auth_callback"))
     state_payload = {"channel": channel}
     if return_url:
         state_payload["return_url"] = return_url
     state_param = quote(json.dumps(state_payload, separators=(",", ":")), safe="")
     url = (
         "https://id.twitch.tv/oauth2/authorize"
-        f"?response_type=code&client_id={TWITCH_CLIENT_ID}"
+        f"?response_type=code&client_id={client_id}"
         f"&redirect_uri={redirect_uri}&scope={scope}&state={state_param}"
     )
     return {"auth_url": url}
@@ -1563,14 +1990,16 @@ def auth_callback(
     request: FastAPIRequest,
     db: Session = Depends(get_db),
 ):
-    if not TWITCH_CLIENT_ID or not TWITCH_CLIENT_SECRET:
+    client_id = get_twitch_client_id()
+    client_secret = get_twitch_client_secret()
+    if not client_id or not client_secret:
         raise HTTPException(status_code=500, detail="Twitch OAuth not configured")
-    redirect_uri = TWITCH_REDIRECT_URI or str(request.url_for("auth_callback"))
+    redirect_uri = get_twitch_redirect_uri() or str(request.url_for("auth_callback"))
     token_resp = requests.post(
         "https://id.twitch.tv/oauth2/token",
         data={
-            "client_id": TWITCH_CLIENT_ID,
-            "client_secret": TWITCH_CLIENT_SECRET,
+            "client_id": client_id,
+            "client_secret": client_secret,
             "code": code,
             "grant_type": "authorization_code",
             "redirect_uri": redirect_uri,
@@ -1594,7 +2023,7 @@ def auth_callback(
             return_to = state_data.get("return_url")
         elif isinstance(state_data, str):
             channel_name = state_data
-    headers = {"Authorization": f"Bearer {access_token}", "Client-Id": TWITCH_CLIENT_ID}
+    headers = {"Authorization": f"Bearer {access_token}", "Client-Id": client_id}
     user_info = requests.get("https://api.twitch.tv/helix/users", headers=headers).json()["data"][0]
     user = db.query(TwitchUser).filter_by(twitch_id=user_info["id"]).one_or_none()
     if not user:
@@ -1680,11 +2109,17 @@ def auth_session_delete(
     current: TwitchUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    owned = db.query(ActiveChannel).filter_by(owner_id=current.id).all()
-    for channel in owned:
+    user = db.get(TwitchUser, current.id)
+    if user is None:
+        response.delete_cookie(ADMIN_SESSION_COOKIE, path="/")
+        return {"success": True}
+
+    owned_channels = list(user.owned_channels)
+    for channel in owned_channels:
         db.delete(channel)
-    db.query(ChannelModerator).filter_by(user_id=current.id).delete()
-    db.delete(current)
+
+    db.query(ChannelModerator).filter_by(user_id=user.id).delete(synchronize_session=False)
+    db.delete(user)
     db.commit()
     response.delete_cookie(ADMIN_SESSION_COOKIE, path="/")
     return {"success": True}
@@ -1789,20 +2224,23 @@ def bot_oauth_start(
     request: FastAPIRequest,
     payload: Optional[BotOAuthStartIn] = Body(default=None),
     db: Session = Depends(get_db),
-):
-    if not TWITCH_CLIENT_ID or not TWITCH_CLIENT_SECRET:
+): 
+    client_id = get_twitch_client_id()
+    client_secret = get_twitch_client_secret()
+    if not client_id or not client_secret:
         raise HTTPException(status_code=500, detail="Twitch OAuth not configured")
     cfg = _get_bot_config(db)
     configured_scopes = (cfg.scopes or "").split()
     seen: set[str] = set()
     scopes: list[str] = []
-    for scope in configured_scopes or BOT_APP_SCOPES:
+    default_scopes = get_bot_app_scopes()
+    for scope in configured_scopes or default_scopes:
         scope_value = scope.strip()
         if scope_value and scope_value not in seen:
             seen.add(scope_value)
             scopes.append(scope_value)
     if not scopes:
-        scopes = BOT_APP_SCOPES[:]
+        scopes = list(default_scopes)
     redirect_uri = _bot_redirect_uri(request)
     nonce = secrets.token_urlsafe(24)
     _cleanup_bot_oauth_states()
@@ -1812,7 +2250,7 @@ def bot_oauth_start(
         state_payload["return_url"] = return_url
     state_param = quote(json.dumps(state_payload, separators=(",", ":")), safe="")
     scope_param = quote(" ".join(scopes), safe="")
-    client_id_param = quote(TWITCH_CLIENT_ID, safe="")
+    client_id_param = quote(client_id, safe="")
     redirect_param = quote(redirect_uri, safe="")
     auth_url = (
         "https://id.twitch.tv/oauth2/authorize"
@@ -1836,7 +2274,9 @@ def bot_oauth_callback(
 ):
     pending: Optional[Dict[str, Any]] = None
     try:
-        if not TWITCH_CLIENT_ID or not TWITCH_CLIENT_SECRET:
+        client_id = get_twitch_client_id()
+        client_secret = get_twitch_client_secret()
+        if not client_id or not client_secret:
             raise HTTPException(status_code=500, detail="Twitch OAuth not configured")
         if not state:
             raise HTTPException(status_code=400, detail="missing state")
@@ -1851,14 +2291,14 @@ def bot_oauth_callback(
         if not pending:
             raise HTTPException(status_code=400, detail="state expired or invalid")
         redirect_url = pending.get("return_url") if pending else None
-        expected_scopes = pending.get("scopes") or BOT_APP_SCOPES
+        expected_scopes = pending.get("scopes") or get_bot_app_scopes()
         redirect_uri = _bot_redirect_uri(request)
         try:
             token_response = requests.post(
                 "https://id.twitch.tv/oauth2/token",
                 data={
-                    "client_id": TWITCH_CLIENT_ID,
-                    "client_secret": TWITCH_CLIENT_SECRET,
+                    "client_id": client_id,
+                    "client_secret": client_secret,
                     "code": code,
                     "grant_type": "authorization_code",
                     "redirect_uri": redirect_uri,
@@ -1913,7 +2353,7 @@ def bot_oauth_callback(
             expires_at = datetime.utcnow() + timedelta(seconds=int(expires_in))
         headers = {
             "Authorization": f"Bearer {access_token}",
-            "Client-Id": TWITCH_CLIENT_ID,
+            "Client-Id": client_id,
         }
         try:
             user_response = requests.get(
@@ -2044,11 +2484,12 @@ def me(current: TwitchUser = Depends(get_current_user)):
         "display_name": current.username,
         "profile_image_url": None,
     }
-    if TWITCH_CLIENT_ID and current.access_token:
+    client_id = get_twitch_client_id()
+    if client_id and current.access_token:
         try:
             headers = {
                 "Authorization": f"Bearer {current.access_token}",
-                "Client-Id": TWITCH_CLIENT_ID,
+                "Client-Id": client_id,
             }
             resp = requests.get(
                 "https://api.twitch.tv/helix/users",
@@ -2160,9 +2601,14 @@ def _normalize_keywords(keywords: Iterable[str]) -> List[str]:
 
 def _replace_playlist_keywords(playlist: Playlist, keywords: Iterable[str]) -> List[str]:
     normalized = _normalize_keywords(keywords)
-    playlist.keywords.clear()
-    for keyword in normalized:
-        playlist.keywords.append(PlaylistKeyword(keyword=keyword))
+    existing_by_keyword = {kw.keyword: kw for kw in playlist.keywords}
+
+    # Reuse existing keyword objects when possible to avoid violating the
+    # (playlist_id, keyword) unique constraint during flush.
+    playlist.keywords[:] = [
+        existing_by_keyword.get(keyword, PlaylistKeyword(keyword=keyword))
+        for keyword in normalized
+    ]
     return normalized
 
 
@@ -2198,6 +2644,47 @@ def _extract_playlist_id(url: str) -> Optional[str]:
 
 def _build_playlist_url(playlist_id: str) -> str:
     return f"https://www.youtube.com/playlist?list={playlist_id}"
+
+
+def _extract_video_id(url: str) -> Optional[str]:
+    if not url:
+        return None
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return None
+    if parsed.netloc in {"youtu.be"}:
+        candidate = parsed.path.strip("/")
+        return candidate or None
+    if parsed.netloc.endswith("youtube.com"):
+        if parsed.path == "/watch":
+            query = parse_qs(parsed.query)
+            values = query.get("v")
+            if values:
+                token = (values[0] or "").strip()
+                if token:
+                    return token
+        parts = [part for part in parsed.path.split("/") if part]
+        if parts and parts[0] == "shorts" and len(parts) > 1:
+            return parts[1]
+    return None
+
+
+def _build_video_url(video_id: str) -> str:
+    return f"https://www.youtube.com/watch?v={video_id}"
+
+
+def _canonicalize_video_url(url: Optional[str], video_id: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+    if video_id:
+        normalized_id = video_id.strip()
+    else:
+        normalized_id = _extract_video_id(url or "")
+    normalized_url: Optional[str] = None
+    if url:
+        normalized_url = url.strip()
+    if normalized_id:
+        normalized_url = _build_video_url(normalized_id)
+    return normalized_url, normalized_id
 
 
 def _parse_duration_seconds(value: Any) -> Optional[int]:
@@ -2287,9 +2774,18 @@ def _get_playlist_user(db: Session, channel_pk: int) -> User:
 
 
 def _ensure_playlist_song(db: Session, channel_pk: int, item: PlaylistItem) -> Song:
+    url, video_id = _canonicalize_video_url(item.url, item.video_id)
+    if not url and not video_id:
+        raise HTTPException(status_code=400, detail="playlist item missing video reference")
+    if url and not video_id:
+        video_id = _extract_video_id(url)
+    if url and item.url != url:
+        item.url = url
+    if video_id and item.video_id != video_id:
+        item.video_id = video_id
     song = (
         db.query(Song)
-        .filter(Song.channel_id == channel_pk, Song.youtube_link == item.url)
+        .filter(Song.channel_id == channel_pk, Song.youtube_link == url)
         .one_or_none()
     )
     if song:
@@ -2298,7 +2794,7 @@ def _ensure_playlist_song(db: Session, channel_pk: int, item: PlaylistItem) -> S
         channel_id=channel_pk,
         artist=item.artist or "Unknown",
         title=item.title or "Unknown",
-        youtube_link=item.url,
+        youtube_link=url,
     )
     db.add(song)
     db.flush()
@@ -2348,7 +2844,11 @@ def _playlists_with_keyword(db: Session, channel_pk: int, keyword: str) -> List[
         db.query(Playlist)
         .join(PlaylistKeyword)
         .options(selectinload(Playlist.items))
-        .filter(Playlist.channel_id == channel_pk, PlaylistKeyword.keyword == keyword)
+        .filter(
+            Playlist.channel_id == channel_pk,
+            PlaylistKeyword.keyword == keyword,
+            Playlist.visibility == "public",
+        )
         .all()
     )
 
@@ -2358,11 +2858,59 @@ def _aggregate_playlist_items(playlists: Iterable[Playlist]) -> List[PlaylistIte
     seen: set[str] = set()
     for playlist in playlists:
         for item in playlist.items:
-            if item.video_id in seen:
+            url, video_id = _canonicalize_video_url(item.url, item.video_id)
+            if not url and not video_id:
                 continue
-            seen.add(item.video_id)
+            key = video_id or url
+            if key in seen:
+                continue
+            seen.add(key)
+            if url and item.url != url:
+                item.url = url
+            if video_id and item.video_id != video_id:
+                item.video_id = video_id
             collected.append(item)
     return collected
+
+
+def _create_default_favorites_playlist(db: Session, channel_pk: int) -> Playlist:
+    existing = (
+        db.query(Playlist)
+        .filter(
+            Playlist.channel_id == channel_pk,
+            Playlist.source == "manual",
+            Playlist.title == "Favorites",
+        )
+        .one_or_none()
+    )
+    if existing:
+        return existing
+    playlist = Playlist(
+        channel_id=channel_pk,
+        title="Favorites",
+        description="Default favorites playlist",
+        source="manual",
+        visibility="public",
+    )
+    db.add(playlist)
+    db.flush()
+    for keyword in ("default", "favorite"):
+        playlist.keywords.append(PlaylistKeyword(keyword=keyword))
+    url, video_id = _canonicalize_video_url(
+        "https://www.youtube.com/watch?v=9Pzj6U5c2cs",
+        "9Pzj6U5c2cs",
+    )
+    item = PlaylistItem(
+        playlist_id=playlist.id,
+        title="Default Favorite",
+        artist="Unknown",
+        position=1,
+        video_id=video_id,
+        url=url,
+    )
+    db.add(item)
+    db.flush()
+    return playlist
 
 
 def current_stream(db: Session, channel_pk: int) -> int:
@@ -2579,6 +3127,82 @@ seed_default_data()
 # =====================================
 # Routes: System
 # =====================================
+@app.get("/system/status", response_model=SystemStatusOut)
+def system_status():
+    return {"setup_complete": is_setup_complete()}
+
+
+@app.get("/system/meta", response_model=SystemMetaOut)
+def system_meta():
+    return {"version": API_VERSION, "dev_mode": DEV_MODE}
+
+
+@app.get("/system/config", response_model=SystemConfigOut)
+def system_config():
+    return _system_config_payload()
+
+
+@app.put("/system/config", response_model=SystemConfigOut)
+def update_system_config(
+    payload: SystemConfigUpdate,
+    x_admin_token: Optional[str] = Header(None),
+):
+    if x_admin_token != ADMIN_TOKEN:
+        raise HTTPException(status_code=401, detail="invalid admin token")
+
+    updates: Dict[str, Optional[str]] = {}
+    credentials_changed = False
+
+    if payload.twitch_client_id is not None:
+        updates["twitch_client_id"] = payload.twitch_client_id.strip() or None
+        credentials_changed = True
+    if payload.twitch_client_secret is not None:
+        updates["twitch_client_secret"] = payload.twitch_client_secret.strip() or None
+        credentials_changed = True
+    if payload.twitch_redirect_uri is not None:
+        updates["twitch_redirect_uri"] = payload.twitch_redirect_uri.strip() or None
+    if payload.bot_redirect_uri is not None:
+        updates["bot_redirect_uri"] = payload.bot_redirect_uri.strip() or None
+    if payload.twitch_scopes is not None:
+        normalized_scopes = _normalize_scope_list(payload.twitch_scopes)
+        updates["twitch_scopes"] = " ".join(normalized_scopes) if normalized_scopes else None
+    if payload.bot_app_scopes is not None:
+        normalized_bot_scopes = _normalize_scope_list(payload.bot_app_scopes)
+        updates["bot_app_scopes"] = " ".join(normalized_bot_scopes) if normalized_bot_scopes else None
+
+    current = settings_store.snapshot()
+    merged: Dict[str, Optional[str]] = dict(current)
+    for key, value in updates.items():
+        merged[key] = value
+    if payload.setup_complete is not None:
+        merged["setup_complete"] = "1" if payload.setup_complete else "0"
+
+    requirements_met = _settings_requirements_met(merged)
+    if payload.setup_complete and not requirements_met:
+        raise HTTPException(
+            status_code=400,
+            detail="Twitch client ID and secret must be configured before completing setup",
+        )
+
+    if payload.setup_complete is not None:
+        updates["setup_complete"] = "1" if payload.setup_complete else "0"
+    elif not requirements_met:
+        updates["setup_complete"] = "0"
+
+    if updates:
+        db = SessionLocal()
+        try:
+            set_settings(db, updates)
+        finally:
+            db.close()
+    if credentials_changed:
+        global APP_ACCESS_TOKEN, APP_TOKEN_EXPIRES, BOT_USER_ID
+        APP_ACCESS_TOKEN = None
+        APP_TOKEN_EXPIRES = 0
+        BOT_USER_ID = None
+    return _system_config_payload()
+
+
 @app.get("/system/health")
 def health():
     try:
@@ -2599,6 +3223,67 @@ def list_channels(db: Session = Depends(get_db)):
             channel.bot_state = get_or_create_bot_state(db, channel.id)
     return channels
 
+
+def _chunk(items: Sequence[str], size: int) -> Iterable[Sequence[str]]:
+    for index in range(0, len(items), size):
+        yield items[index : index + size]
+
+
+@app.get("/channels/live_status", response_model=List[ChannelLiveStatusOut])
+def get_channel_live_status(db: Session = Depends(get_db)):
+    client_id = get_twitch_client_id()
+    if not client_id:
+        raise HTTPException(status_code=503, detail="twitch client id not configured")
+
+    try:
+        token = get_app_access_token()
+    except RuntimeError as exc:  # pragma: no cover - defensive, validated via tests
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    channels = db.query(ActiveChannel.channel_id, ActiveChannel.channel_name).all()
+    if not channels:
+        return []
+
+    headers = {"Authorization": f"Bearer {token}", "Client-Id": client_id}
+    channel_ids = [channel.channel_id for channel in channels if channel.channel_id]
+    live_map: dict[str, bool] = {channel.channel_id: False for channel in channels if channel.channel_id}
+
+    for batch in _chunk(channel_ids, 100):
+        params = [("user_id", channel_id) for channel_id in batch]
+        try:
+            response = requests.get(
+                "https://api.twitch.tv/helix/streams",
+                headers=headers,
+                params=params,
+                timeout=5,
+            )
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            raise HTTPException(status_code=502, detail="twitch live status request failed") from exc
+
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise HTTPException(status_code=502, detail="invalid twitch response") from exc
+
+        data = payload.get("data")
+        if isinstance(data, list):
+            for row in data:
+                user_id = row.get("user_id")
+                if not isinstance(user_id, str):
+                    continue
+                live_map[user_id] = (row.get("type") or "").lower() == "live"
+
+    return [
+        ChannelLiveStatusOut(
+            channel_name=channel.channel_name,
+            channel_id=channel.channel_id,
+            is_live=live_map.get(channel.channel_id, False),
+        )
+        for channel in channels
+    ]
+
+
 @app.post("/channels", response_model=ChannelOut, dependencies=[Depends(require_token)])
 def add_channel(payload: ChannelIn, db: Session = Depends(get_db)):
     ch = ActiveChannel(
@@ -2612,6 +3297,8 @@ def add_channel(payload: ChannelIn, db: Session = Depends(get_db)):
     db.refresh(ch)
     get_or_create_settings(db, ch.id)
     get_or_create_bot_state(db, ch.id)
+    _create_default_favorites_playlist(db, ch.id)
+    db.commit()
     channel_pk = ch.id
     publish_queue_changed(channel_pk)
     return ch
@@ -2826,14 +3513,72 @@ def list_playlists(channel: str, db: Session = Depends(get_db)):
             PlaylistOut(
                 id=playlist.id,
                 title=playlist.title,
+                description=playlist.description,
                 playlist_id=playlist.playlist_id,
                 url=playlist.url,
+                source=playlist.source,
                 visibility=playlist.visibility,
                 keywords=keywords,
                 item_count=len(playlist.items),
             )
         )
     return results
+
+
+@app.get(
+    "/channels/{channel}/public/playlists",
+    response_model=List[PublicPlaylistOut],
+)
+def list_public_playlists(
+    channel: str,
+    response: Response,
+    db: Session = Depends(get_db),
+):
+    channel_pk = get_channel_pk(channel, db)
+    rows: List[Playlist] = (
+        db.query(Playlist)
+        .options(selectinload(Playlist.items), selectinload(Playlist.keywords))
+        .filter(Playlist.channel_id == channel_pk, Playlist.visibility == "public")
+        .order_by(Playlist.title.asc(), Playlist.id.asc())
+        .all()
+    )
+    payload: List[PublicPlaylistOut] = []
+    for playlist in rows:
+        keywords = sorted(
+            {kw.keyword for kw in playlist.keywords if kw.keyword},
+        )
+        ordered_items = sorted(
+            playlist.items,
+            key=lambda entry: ((entry.position or 0), entry.id),
+        )
+        slug = playlist.playlist_id or str(playlist.id)
+        payload.append(
+            PublicPlaylistOut(
+                id=playlist.id,
+                title=playlist.title,
+                description=playlist.description,
+                slug=slug,
+                source=playlist.source,
+                visibility=playlist.visibility,
+                url=playlist.url,
+                keywords=keywords,
+                item_count=len(ordered_items),
+                items=[
+                    PublicPlaylistItemOut(
+                        id=item.id,
+                        title=item.title,
+                        artist=item.artist,
+                        video_id=item.video_id,
+                        url=item.url,
+                        position=item.position,
+                        duration_seconds=item.duration_seconds,
+                    )
+                    for item in ordered_items
+                ],
+            )
+        )
+    response.headers.setdefault("Cache-Control", "public, max-age=30")
+    return payload
 
 
 @app.post(
@@ -2843,7 +3588,33 @@ def list_playlists(channel: str, db: Session = Depends(get_db)):
 )
 def create_playlist(channel: str, payload: PlaylistCreate, db: Session = Depends(get_db)):
     channel_pk = get_channel_pk(channel, db)
-    playlist_id = _extract_playlist_id(payload.url or "")
+    visibility = _normalize_visibility(payload.visibility)
+    normalized_keywords = _normalize_keywords(payload.keywords)
+    if payload.manual:
+        manual = payload.manual
+        title = manual.title.strip()
+        if not title:
+            raise HTTPException(status_code=400, detail="playlist title is required")
+        description = None
+        if manual.description:
+            desc = manual.description.strip()
+            description = desc or None
+        playlist = Playlist(
+            channel_id=channel_pk,
+            title=title,
+            description=description,
+            source="manual",
+            visibility=visibility,
+        )
+        db.add(playlist)
+        db.flush()
+        for keyword in normalized_keywords:
+            db.add(PlaylistKeyword(playlist_id=playlist.id, keyword=keyword))
+        db.commit()
+        return {"id": playlist.id}
+
+    playlist_url = payload.url or ""
+    playlist_id = _extract_playlist_id(playlist_url)
     if not playlist_id:
         raise HTTPException(status_code=400, detail="invalid playlist url")
     existing = (
@@ -2854,17 +3625,17 @@ def create_playlist(channel: str, payload: PlaylistCreate, db: Session = Depends
     if existing:
         raise HTTPException(status_code=409, detail="playlist already added")
     title, tracks = _fetch_playlist_tracks(playlist_id)
-    visibility = _normalize_visibility(payload.visibility)
     playlist = Playlist(
         channel_id=channel_pk,
         title=title,
         playlist_id=playlist_id,
         url=_build_playlist_url(playlist_id),
         visibility=visibility,
+        source="youtube",
     )
     db.add(playlist)
     db.flush()
-    for keyword in _normalize_keywords(payload.keywords):
+    for keyword in normalized_keywords:
         db.add(PlaylistKeyword(playlist_id=playlist.id, keyword=keyword))
     for item in tracks:
         db.add(
@@ -2902,6 +3673,28 @@ def update_playlist(
     )
     if not playlist:
         raise HTTPException(status_code=404, detail="playlist not found")
+    slug_included = "slug" in payload.model_fields_set
+    if slug_included:
+        if playlist.source != "manual" and playlist.playlist_id not in (None, ""):
+            raise HTTPException(status_code=400, detail="slug can only be changed for manual playlists")
+        if payload.slug is None:
+            slug_value: Optional[str] = None
+        else:
+            slug_value = payload.slug.strip()
+            if not slug_value:
+                slug_value = None
+        if slug_value:
+            existing = (
+                db.query(Playlist)
+                .filter(Playlist.channel_id == channel_pk)
+                .filter(Playlist.id != playlist.id)
+                .filter(Playlist.playlist_id == slug_value)
+                .one_or_none()
+            )
+            if existing:
+                raise HTTPException(status_code=409, detail="playlist slug already in use")
+        playlist.playlist_id = slug_value
+
     if payload.visibility is not None:
         playlist.visibility = _normalize_visibility(payload.visibility)
     if payload.keywords is not None:
@@ -2912,8 +3705,10 @@ def update_playlist(
     return PlaylistOut(
         id=playlist.id,
         title=playlist.title,
+        description=playlist.description,
         playlist_id=playlist.playlist_id,
         url=playlist.url,
+        source=playlist.source,
         visibility=playlist.visibility,
         keywords=keywords,
         item_count=len(playlist.items),
@@ -2955,18 +3750,132 @@ def list_playlist_items(channel: str, playlist_id: int, db: Session = Depends(ge
     if not playlist:
         raise HTTPException(status_code=404, detail="playlist not found")
     items = sorted(playlist.items, key=lambda entry: entry.position)
-    return [
-        PlaylistItemOut(
-            id=item.id,
-            title=item.title,
-            artist=item.artist,
-            video_id=item.video_id,
-            url=item.url,
-            position=item.position,
-            duration_seconds=item.duration_seconds,
+    results: List[PlaylistItemOut] = []
+    for item in items:
+        url, video_id = _canonicalize_video_url(item.url, item.video_id)
+        if url != item.url:
+            item.url = url
+        if video_id != item.video_id:
+            item.video_id = video_id
+        results.append(
+            PlaylistItemOut(
+                id=item.id,
+                title=item.title,
+                artist=item.artist,
+                video_id=video_id,
+                url=url,
+                position=item.position,
+                duration_seconds=item.duration_seconds,
+            )
         )
-        for item in items
-    ]
+    return results
+
+
+@app.post(
+    "/channels/{channel}/playlists/{playlist_id}/items",
+    response_model=PlaylistItemOut,
+    dependencies=[Depends(require_token)],
+)
+def create_playlist_item(
+    channel: str,
+    playlist_id: int,
+    payload: PlaylistItemCreate,
+    db: Session = Depends(get_db),
+):
+    channel_pk = get_channel_pk(channel, db)
+    playlist = (
+        db.query(Playlist)
+        .options(selectinload(Playlist.items))
+        .filter(Playlist.channel_id == channel_pk, Playlist.id == playlist_id)
+        .one_or_none()
+    )
+    if not playlist:
+        raise HTTPException(status_code=404, detail="playlist not found")
+    if playlist.source != "manual":
+        raise HTTPException(
+            status_code=400,
+            detail="playlist items can only be managed for manual playlists",
+        )
+    normalized_url, normalized_video_id = _canonicalize_video_url(payload.url, payload.video_id)
+    item_title = (payload.title or "Untitled").strip()
+    item_artist = payload.artist.strip() if payload.artist else None
+    normalized_title_key = item_title.lower()
+    normalized_artist_key = (item_artist or "").lower()
+    if not payload.title and not normalized_video_id:
+        raise HTTPException(status_code=400, detail="playlist item title or video is required")
+    for existing in playlist.items:
+        existing_url, existing_video_id = _canonicalize_video_url(existing.url, existing.video_id)
+        if normalized_video_id and normalized_video_id == existing_video_id:
+            raise HTTPException(status_code=409, detail="playlist item already exists")
+        if normalized_url and existing_url and normalized_url == existing_url:
+            raise HTTPException(status_code=409, detail="playlist item already exists")
+        if (
+            not normalized_video_id
+            and not normalized_url
+            and existing.title
+            and existing.title.strip().lower() == normalized_title_key
+            and (existing.artist or "").strip().lower() == normalized_artist_key
+        ):
+            raise HTTPException(status_code=409, detail="playlist item already exists")
+    max_position = max((item.position for item in playlist.items), default=0)
+    item = PlaylistItem(
+        playlist_id=playlist.id,
+        title=item_title,
+        artist=item_artist,
+        position=max_position + 1,
+        duration_seconds=payload.duration_seconds,
+        video_id=normalized_video_id,
+        url=normalized_url,
+    )
+    db.add(item)
+    db.flush()
+    db.commit()
+    db.refresh(item)
+    return PlaylistItemOut(
+        id=item.id,
+        title=item.title,
+        artist=item.artist,
+        video_id=item.video_id,
+        url=item.url,
+        position=item.position,
+        duration_seconds=item.duration_seconds,
+    )
+
+
+@app.delete(
+    "/channels/{channel}/playlists/{playlist_id}/items/{item_id}",
+    status_code=204,
+    dependencies=[Depends(require_token)],
+)
+def delete_playlist_item(
+    channel: str,
+    playlist_id: int,
+    item_id: int,
+    db: Session = Depends(get_db),
+):
+    channel_pk = get_channel_pk(channel, db)
+    playlist = (
+        db.query(Playlist)
+        .filter(Playlist.channel_id == channel_pk, Playlist.id == playlist_id)
+        .one_or_none()
+    )
+    if not playlist:
+        raise HTTPException(status_code=404, detail="playlist not found")
+    if playlist.source != "manual":
+        raise HTTPException(
+            status_code=400,
+            detail="playlist items can only be managed for manual playlists",
+        )
+    item = (
+        db.query(PlaylistItem)
+        .filter(PlaylistItem.id == item_id, PlaylistItem.playlist_id == playlist.id)
+        .one_or_none()
+    )
+    if not item:
+        raise HTTPException(status_code=404, detail="playlist item not found")
+    db.delete(item)
+    db.commit()
+    return Response(status_code=204)
 
 
 @app.post(
@@ -3006,6 +3915,69 @@ def queue_playlist_item(
         publish_channel_event(channel_pk, "request.bumped", payload_data)
     publish_queue_changed(channel_pk)
     return {"request_id": req.id}
+
+
+@app.post(
+    "/channels/{channel}/playlists/request",
+    response_model=PlaylistRequestOut,
+    dependencies=[Depends(require_token)],
+)
+def request_playlist_item(
+    channel: str,
+    payload: PlaylistRequestIn,
+    db: Session = Depends(get_db),
+):
+    channel_pk = get_channel_pk(channel, db)
+    identifier = payload.identifier.strip()
+    if not identifier:
+        raise HTTPException(status_code=400, detail="playlist identifier required")
+    identifier_lower = identifier.lower()
+    filters = [func.lower(Playlist.title) == identifier_lower, Playlist.playlist_id == identifier]
+    numeric_id: Optional[int]
+    try:
+        numeric_id = int(identifier)
+    except ValueError:
+        numeric_id = None
+    if numeric_id is not None:
+        filters.append(Playlist.id == numeric_id)
+    playlist = (
+        db.query(Playlist)
+        .options(selectinload(Playlist.items))
+        .filter(Playlist.channel_id == channel_pk)
+        .filter(or_(*filters))
+        .one_or_none()
+    )
+    if not playlist:
+        raise HTTPException(status_code=404, detail="playlist not found")
+    if playlist.visibility != "public":
+        raise HTTPException(status_code=404, detail="playlist not found")
+    items = sorted(playlist.items, key=lambda entry: (entry.position or 0, entry.id))
+    if not items:
+        raise HTTPException(status_code=404, detail="playlist contains no items")
+    if payload.index > len(items):
+        raise HTTPException(status_code=400, detail="index out of range")
+    item = items[payload.index - 1]
+    playlist_user = _get_playlist_user(db, channel_pk)
+    song = _ensure_playlist_song(db, channel_pk, item)
+    req = _create_request_entry(db, channel_pk, playlist_user.id, song.id, bumped=False)
+    db.commit()
+    db.refresh(req)
+    payload_data = _serialize_request_event(db, req)
+    publish_channel_event(channel_pk, "request.added", payload_data)
+    if req.is_priority or req.bumped:
+        publish_channel_event(channel_pk, "request.bumped", payload_data)
+    publish_queue_changed(channel_pk)
+    pick = PlaylistSongPick(
+        id=song.id,
+        artist=song.artist,
+        title=song.title,
+        youtube_link=song.youtube_link,
+    )
+    return PlaylistRequestOut(
+        request_id=req.id,
+        playlist_item_id=item.id,
+        song=pick,
+    )
 
 
 @app.post(
@@ -3079,13 +4051,37 @@ def search_songs(channel: str, search: Optional[str] = Query(None), db: Session 
     q = db.query(Song).filter(Song.channel_id == channel_pk)
     if search:
         like = f"%{search}%"
-        q = q.filter((Song.artist.ilike(like)) | (Song.title.ilike(like)))
+        q = q.filter(
+            (
+                (Song.artist.ilike(like))
+                | (Song.title.ilike(like))
+                | (Song.youtube_link.ilike(like))
+            )
+        )
     return q.order_by(Song.artist.asc(), Song.title.asc()).all()
 
 @app.post("/channels/{channel}/songs", response_model=dict, dependencies=[Depends(require_token)])
 def add_song(channel: str, payload: SongIn, db: Session = Depends(get_db)):
     channel_pk = get_channel_pk(channel, db)
-    song = Song(channel_id=channel_pk, **payload.model_dump())
+    payload_data = payload.model_dump()
+    youtube_link = payload_data.get("youtube_link")
+    normalized_link: Optional[str] = None
+    if youtube_link:
+        normalized_link, _ = _canonicalize_video_url(youtube_link, None)
+        target_link = normalized_link or youtube_link.strip()
+        if target_link:
+            existing = (
+                db.query(Song)
+                .filter(Song.channel_id == channel_pk, Song.youtube_link == target_link)
+                .one_or_none()
+            )
+            if existing:
+                return {"id": existing.id}
+        if normalized_link:
+            payload_data["youtube_link"] = normalized_link
+        elif youtube_link:
+            payload_data["youtube_link"] = youtube_link.strip()
+    song = Song(channel_id=channel_pk, **payload_data)
     db.add(song)
     db.commit()
     publish_queue_changed(channel_pk)
@@ -3257,11 +4253,12 @@ def _iter_twitch_collection(url: str, headers: Mapping[str, str], params: dict[s
         if not channel_obj or not channel_obj.owner or not channel_obj.channel_id:
             return set(), {}
         owner = channel_obj.owner
-        if not TWITCH_CLIENT_ID or not owner.access_token:
+        client_id = get_twitch_client_id()
+        if not client_id or not owner.access_token:
             return set(), {}
         headers = {
             "Authorization": f"Bearer {owner.access_token}",
-            "Client-Id": TWITCH_CLIENT_ID,
+            "Client-Id": client_id,
         }
         params = {"broadcaster_id": channel_obj.channel_id}
     vip_ids: set[str] = set()
@@ -3730,23 +4727,93 @@ def add_request(channel: str, payload: RequestCreate, db: Session = Depends(get_
 
 @app.put("/channels/{channel}/queue/{request_id}", dependencies=[Depends(require_channel_key)])
 def update_request(channel: str, request_id: int, payload: RequestUpdate, db: Session = Depends(get_db)):
+REQUEST_IDENTIFIER_PATTERN = r"(?i)^(?:\d+|top|previous|last|random)$"
+
+
+def resolve_queue_request(db: Session, channel_pk: int, identifier: str) -> Request:
+    normalized = (identifier or "").strip()
+    if not normalized:
+        raise HTTPException(status_code=404, detail="request not found")
+
+    if normalized.isdigit():
+        req = db.execute(
+            select(Request).where(
+                and_(Request.id == int(normalized), Request.channel_id == channel_pk)
+            )
+        ).scalar_one_or_none()
+        if req:
+            return req
+        raise HTTPException(status_code=404, detail="request not found")
+
+    keyword = normalized.lower()
+    stream_id = current_stream(db, channel_pk)
+    base_query = (
+        db.query(Request)
+        .filter(Request.channel_id == channel_pk, Request.stream_id == stream_id)
+    )
+
+    if keyword == "top":
+        req = (
+            base_query.filter(Request.played == 0)
+            .order_by(
+                Request.is_priority.desc(),
+                Request.position.asc(),
+                Request.request_time.asc(),
+                Request.id.asc(),
+            )
+            .first()
+        )
+    elif keyword == "previous":
+        req = (
+            base_query.filter(Request.played == 1)
+            .order_by(
+                Request.request_time.desc(),
+                Request.id.desc(),
+            )
+            .first()
+        )
+    elif keyword == "last":
+        req = (
+            base_query.filter(Request.played == 0)
+            .order_by(
+                Request.position.desc(),
+                Request.request_time.desc(),
+                Request.id.desc(),
+            )
+            .first()
+        )
+    elif keyword == "random":
+        req = base_query.filter(Request.played == 0).order_by(func.random()).first()
+    else:
+        raise HTTPException(status_code=404, detail="request not found")
+
+    if not req:
+        raise HTTPException(status_code=404, detail="request not found")
+    return req
+
+
+@app.put("/channels/{channel}/queue/{request_id}", dependencies=[Depends(require_token)])
+def update_request(
+    channel: str,
+    payload: RequestUpdate,
+    request_id: str = Path(..., pattern=REQUEST_IDENTIFIER_PATTERN),
+    db: Session = Depends(get_db),
+):
     channel_pk = get_channel_pk(channel, db)
-    r = db.query(Request).filter(Request.id == request_id, Request.channel_id == channel_pk).one_or_none()
-    if not r:
-        raise HTTPException(404, "request not found")
-    prev_played = bool(r.played)
-    prev_bumped = bool(r.bumped)
-    prev_priority = bool(r.is_priority)
+    req = resolve_queue_request(db, channel_pk, request_id)
+    prev_played = bool(req.played)
+    prev_bumped = bool(req.bumped)
+    prev_priority = bool(req.is_priority)
     played_now = False
     became_bumped = False
     became_priority = False
     if payload.played is not None:
-        r.played = 1 if payload.played else 0
-        if r.played and not prev_played:
+        req.played = 1 if payload.played else 0
+        if req.played and not prev_played:
             played_now = True
-        if r.played:
+        if req.played:
             # Update song stats
-            s = db.get(Song, r.song_id)
+            s = db.get(Song, req.song_id)
             now = datetime.utcnow()
             if s:
                 if not s.date_first_played:
@@ -3754,20 +4821,20 @@ def update_request(channel: str, request_id: int, payload: RequestUpdate, db: Se
                 s.date_last_played = now
                 s.total_played = (s.total_played or 0) + 1
     if payload.bumped is not None:
-        r.bumped = 1 if payload.bumped else 0
-        if r.bumped and not prev_bumped:
+        req.bumped = 1 if payload.bumped else 0
+        if req.bumped and not prev_bumped:
             became_bumped = True
     if payload.is_priority is not None:
-        r.is_priority = 1 if payload.is_priority else 0
-        if r.is_priority and not r.priority_source:
-            r.priority_source = 'admin'
-        if r.is_priority and not prev_priority:
+        req.is_priority = 1 if payload.is_priority else 0
+        if req.is_priority and not req.priority_source:
+            req.priority_source = 'admin'
+        if req.is_priority and not prev_priority:
             became_priority = True
     db.commit()
-    db.refresh(r)
-    event_payload = _serialize_request_event(db, r)
+    db.refresh(req)
+    event_payload = _serialize_request_event(db, req)
     if played_now:
-        up_next = _next_pending_request(db, channel_pk, r.stream_id)
+        up_next = _next_pending_request(db, channel_pk, req.stream_id)
         publish_channel_event(
             channel_pk,
             "request.played",
@@ -3781,13 +4848,15 @@ def update_request(channel: str, request_id: int, payload: RequestUpdate, db: Se
     publish_queue_changed(channel_pk)
     return {"success": True}
 
-@app.delete("/channels/{channel}/queue/{request_id}", dependencies=[Depends(require_channel_key)])
-def remove_request(channel: str, request_id: int, db: Session = Depends(get_db)):
+@app.delete("/channels/{channel}/queue/{request_id}", dependencies=[Depends(require_token)])
+def remove_request(
+    channel: str,
+    request_id: str = Path(..., pattern=REQUEST_IDENTIFIER_PATTERN),
+    db: Session = Depends(get_db),
+):
     channel_pk = get_channel_pk(channel, db)
-    r = db.query(Request).filter(Request.id == request_id, Request.channel_id == channel_pk).one_or_none()
-    if not r:
-        raise HTTPException(404, "request not found")
-    db.delete(r)
+    req = resolve_queue_request(db, channel_pk, request_id)
+    db.delete(req)
     db.commit()
     publish_queue_changed(channel_pk)
     return {"success": True}
@@ -3831,14 +4900,12 @@ def random_nonpriority(channel: str, db: Session = Depends(get_db)):
 @app.post("/channels/{channel}/queue/{request_id}/bump_admin", dependencies=[Depends(require_channel_key)])
 def bump_admin(channel: str, request_id: int, db: Session = Depends(get_db)):
     channel_pk = get_channel_pk(channel, db)
-    r = db.query(Request).filter(Request.id == request_id, Request.channel_id == channel_pk).one_or_none()
-    if not r:
-        raise HTTPException(404, "request not found")
-    r.is_priority = 1
-    r.priority_source = 'admin'
+    req = resolve_queue_request(db, channel_pk, request_id)
+    req.is_priority = 1
+    req.priority_source = 'admin'
     db.commit()
-    db.refresh(r)
-    payload = _serialize_request_event(db, r)
+    db.refresh(req)
+    payload = _serialize_request_event(db, req)
     publish_channel_event(channel_pk, "request.bumped", payload)
     publish_queue_changed(channel_pk)
     return {"success": True}
@@ -3856,7 +4923,7 @@ def _get_req(db, channel_pk: int, request_id: int):
 def move_request(channel: str, request_id: int, payload: MoveRequestIn, db: Session = Depends(get_db)):
     channel_pk = get_channel_pk(channel, db)
     direction = payload.direction
-    req = _get_req(db, channel_pk, request_id)
+    req = resolve_queue_request(db, channel_pk, request_id)
     # find neighbor within same stream
     if direction == "up":
         neighbor = db.execute(
@@ -3886,7 +4953,7 @@ def move_request(channel: str, request_id: int, payload: MoveRequestIn, db: Sess
 @app.post("/channels/{channel}/queue/{request_id}/skip", dependencies=[Depends(require_channel_key)])
 def skip_request(channel: str, request_id: int, db: Session = Depends(get_db)):
     channel_pk = get_channel_pk(channel, db)
-    req = _get_req(db, channel_pk, request_id)
+    req = resolve_queue_request(db, channel_pk, request_id)
     # move to bottom of pending
     max_pos = (
         db.query(func.coalesce(func.max(Request.position), 0))
@@ -3905,7 +4972,7 @@ def skip_request(channel: str, request_id: int, db: Session = Depends(get_db)):
 @app.post("/channels/{channel}/queue/{request_id}/priority", dependencies=[Depends(require_channel_key)])
 def set_priority(channel: str, request_id: int, enabled: bool, db: Session = Depends(get_db)):
     channel_pk = get_channel_pk(channel, db)
-    req = _get_req(db, channel_pk, request_id)
+    req = resolve_queue_request(db, channel_pk, request_id)
     was_priority = bool(req.is_priority)
     # optional: refund or spend points can be inserted here
     req.is_priority = 1 if enabled else 0
@@ -3922,7 +4989,7 @@ def set_priority(channel: str, request_id: int, enabled: bool, db: Session = Dep
 @app.post("/channels/{channel}/queue/{request_id}/played", dependencies=[Depends(require_channel_key)])
 def mark_played(channel: str, request_id: int, db: Session = Depends(get_db)):
     channel_pk = get_channel_pk(channel, db)
-    req = _get_req(db, channel_pk, request_id)
+    req = resolve_queue_request(db, channel_pk, request_id)
     req.played = 1
     # optionally push it out of visible order by setting a sentinel position
     db.commit()
