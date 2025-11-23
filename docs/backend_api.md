@@ -168,6 +168,11 @@ Queue endpoints that accept `{request_id}` support numeric identifiers for full
 backwards compatibility **and** keyword shortcuts to target specific queue
 entries without first listing the queue. Supported keywords are:
 
+- The path parameter is treated as a string with the pattern `^(?:\d+|top|previous|last|random)$`
+  so keywords like `top` and `last` bypass FastAPI integer coercion and are
+  resolved consistently by `resolve_queue_request` for both POST and GET
+  variants of each mutation route.
+
 - `top` — next up: the highest-priority pending request ordered by priority,
   then position, then request time.
 - `previous` — the most recently played entry in the current stream.
