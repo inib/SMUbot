@@ -4963,7 +4963,7 @@ def _mark_state_change_no_cache(response: Response) -> None:
 )
 def bump_admin(
     channel: str,
-    request_id: int,
+    request_id: str = Path(..., pattern=REQUEST_IDENTIFIER_PATTERN),
     request: FastAPIRequest,
     response: Response,
     db: Session = Depends(get_db),
@@ -4992,7 +4992,10 @@ def bump_admin(
     publish_queue_changed(channel_pk)
     return {"success": True}
 
-def _get_req(db, channel_pk: int, request_id: int):
+def _get_req(db, channel_pk: int, request_id: str | int):
+    """Legacy helper to fetch a request by id; currently unused and slated for cleanup."""
+
+    # TODO: remove or repurpose; superseded by resolve_queue_request.
     req = db.execute(
         select(Request).where(and_(Request.id == request_id,
                                         Request.channel_id == channel_pk))
@@ -5008,7 +5011,7 @@ def _get_req(db, channel_pk: int, request_id: int):
 )
 def move_request(
     channel: str,
-    request_id: int,
+    request_id: str = Path(..., pattern=REQUEST_IDENTIFIER_PATTERN),
     request: FastAPIRequest,
     response: Response,
     payload: Optional[MoveRequestIn] = Body(None),
@@ -5080,7 +5083,7 @@ def move_request(
 )
 def skip_request(
     channel: str,
-    request_id: int,
+    request_id: str = Path(..., pattern=REQUEST_IDENTIFIER_PATTERN),
     request: FastAPIRequest,
     response: Response,
     db: Session = Depends(get_db),
@@ -5122,7 +5125,7 @@ def skip_request(
 )
 def set_priority(
     channel: str,
-    request_id: int,
+    request_id: str = Path(..., pattern=REQUEST_IDENTIFIER_PATTERN),
     request: FastAPIRequest,
     response: Response,
     enabled_body: Optional[bool] = Body(None, embed=True),
@@ -5176,7 +5179,7 @@ def set_priority(
 )
 def mark_played(
     channel: str,
-    request_id: int,
+    request_id: str = Path(..., pattern=REQUEST_IDENTIFIER_PATTERN),
     request: FastAPIRequest,
     response: Response,
     db: Session = Depends(get_db),
