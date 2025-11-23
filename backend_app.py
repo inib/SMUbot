@@ -4725,12 +4725,17 @@ def add_request(channel: str, payload: RequestCreate, db: Session = Depends(get_
     publish_queue_changed(channel_pk)
     return {"request_id": req.id}
 
-@app.put("/channels/{channel}/queue/{request_id}", dependencies=[Depends(require_channel_key)])
-def update_request(channel: str, request_id: int, payload: RequestUpdate, db: Session = Depends(get_db)):
 REQUEST_IDENTIFIER_PATTERN = r"(?i)^(?:\d+|top|previous|last|random)$"
 
 
 def resolve_queue_request(db: Session, channel_pk: int, identifier: str) -> Request:
+    """
+    Locate a queue request by numeric id or keyword for a given channel.
+
+    Dependencies: database session access via ``db``.
+    Code customers: queue update endpoints relying on flexible identifiers.
+    Variables origin: ``identifier`` comes from path parameters supplied by clients.
+    """
     normalized = (identifier or "").strip()
     if not normalized:
         raise HTTPException(status_code=404, detail="request not found")
@@ -4799,6 +4804,13 @@ def update_request(
     request_id: str = Path(..., pattern=REQUEST_IDENTIFIER_PATTERN),
     db: Session = Depends(get_db),
 ):
+    """
+    Update queue request status or priority attributes for a channel request.
+
+    Dependencies: ``require_token`` authentication and database session ``db``.
+    Code customers: channel moderation tools invoking request status changes.
+    Variables origin: ``request_id`` from path, ``payload`` from request body, ``channel`` from path.
+    """
     channel_pk = get_channel_pk(channel, db)
     req = resolve_queue_request(db, channel_pk, request_id)
     prev_played = bool(req.played)
