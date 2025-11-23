@@ -182,6 +182,10 @@ const eventFeedEl = qs('event-feed');
 const eventStatusEl = qs('event-status');
 const eventClearBtn = qs('event-clear');
 const eventAutoscrollInput = qs('event-autoscroll');
+const streamerbotNotesField = qs('streamerbot-notes-field');
+const streamerbotShortcutsEl = qs('streamerbot-shortcuts');
+const streamerbotShortcutList = qs('streamerbot-shortcut-list');
+const streamerbotShortcutStatus = qs('streamerbot-shortcuts-status');
 
 const channelKeyCard = qs('channel-key-card');
 const channelKeySecretEl = qs('channel-key-secret');
@@ -214,6 +218,30 @@ let currentPreviewResults = [];
 let previewSearchToken = 0;
 let previewCopyResetTimer = null;
 const previewDefaultMessage = 'Select a request to load YouTube Music matches.';
+
+const STREAMERBOT_SHORTCUTS = [
+  {
+    id: 'mark-played',
+    title: 'Mark song played',
+    description: 'POST to flag a queued request as played when you finish it on stream.',
+    buildUrl: ({ apiBase, encodedChannel, encodedKey }) =>
+      `${apiBase}/channels/${encodedChannel}/queue/REQUEST_ID/played?channel_key=${encodedKey}`
+  },
+  {
+    id: 'bump-random',
+    title: 'Bump a random song',
+    description: 'GET a non-priority request to feature; combine with bump_admin to spotlight it.',
+    buildUrl: ({ apiBase, encodedChannel, encodedKey }) =>
+      `${apiBase}/channels/${encodedChannel}/queue/random_nonpriority?channel_key=${encodedKey}`
+  },
+  {
+    id: 'up-next',
+    title: "What's up next",
+    description: 'GET the active queue and read the first unplayed entry for overlays or callouts.',
+    buildUrl: ({ apiBase, encodedChannel, encodedKey }) =>
+      `${apiBase}/channels/${encodedChannel}/queue?channel_key=${encodedKey}`
+  }
+];
 
 const playlistState = new Map();
 let playlistStatusTimer = null;
@@ -2464,6 +2492,7 @@ function resetChannelKeyCard() {
   }
   renderChannelKeySecret();
   updateChannelKeyButtons();
+  renderStreamerbotShortcuts();
 }
 
 /**
@@ -2512,6 +2541,7 @@ async function requestChannelKey(options = {}) {
   } finally {
     channelKeyBusy = false;
     updateChannelKeyButtons();
+    renderStreamerbotShortcuts();
   }
 }
 
@@ -2827,6 +2857,7 @@ function initOverlayBuilder() {
 
 bindChannelKeyControls();
 initOverlayBuilder();
+renderStreamerbotShortcuts();
 
 // ===== Landing page & login =====
 function buildLoginScopes() {
@@ -2958,6 +2989,7 @@ function selectChannel(ch) {
   clearEventFeed();
   connectQueueStream();
   connectChannelEvents();
+  renderStreamerbotShortcuts();
 }
 
 let queueStream = null;
@@ -3031,6 +3063,99 @@ function updateEventStatus(text, status) {
   if (status) {
     eventStatusEl.classList.add(status);
   }
+}
+
+/**
+ * Render streamer.bot helper URLs based on the selected channel and channel key.
+ * Dependencies: Uses `API`, `channelName`, `channelKeyValue`, and DOM refs for the shortcut card and notes textarea.
+ * Code customers: streamer.bot section in the Events tab.
+ * Used variables/origin: Builds URLs from backend origin (`API`), active `channelName`, and `channelKeyValue` retrieved via the settings card.
+ */
+function renderStreamerbotShortcuts() {
+  if (!streamerbotShortcutList || !streamerbotShortcutStatus) { return; }
+  const hasChannel = !!channelName;
+  const apiBase = API ? API.replace(/\/$/, '') : '';
+  const keyToken = channelKeyValue || 'YOUR_CHANNEL_KEY';
+  const encodedKey = encodeURIComponent(keyToken);
+  const encodedChannel = channelName ? encodeURIComponent(channelName) : '';
+
+  streamerbotShortcutList.innerHTML = '';
+  if (streamerbotShortcutsEl) {
+    streamerbotShortcutsEl.classList.toggle('disabled', !hasChannel || !apiBase);
+  }
+  if (streamerbotNotesField) {
+    streamerbotNotesField.disabled = !hasChannel;
+  }
+
+  if (!hasChannel || !apiBase) {
+    streamerbotShortcutStatus.textContent = 'Select a channel to generate shortcuts.';
+    return;
+  }
+
+  streamerbotShortcutStatus.textContent = channelKeyValue
+    ? 'Using the loaded channel API key.'
+    : 'Load the channel key in Settings to swap out the placeholder token.';
+
+  STREAMERBOT_SHORTCUTS.forEach(shortcut => {
+    const url = shortcut.buildUrl({ apiBase, encodedChannel, encodedKey });
+    const row = document.createElement('div');
+    row.className = 'streamerbot-shortcut';
+
+    const info = document.createElement('div');
+    info.className = 'streamerbot-shortcut-info';
+
+    const title = document.createElement('h4');
+    title.className = 'streamerbot-shortcut-title';
+    title.textContent = shortcut.title;
+    info.appendChild(title);
+
+    const desc = document.createElement('p');
+    desc.className = 'streamerbot-shortcut-desc';
+    desc.textContent = shortcut.description;
+    info.appendChild(desc);
+
+    const urlLabel = document.createElement('code');
+    urlLabel.className = 'streamerbot-shortcut-url';
+    urlLabel.textContent = url;
+    info.appendChild(urlLabel);
+
+    const actions = document.createElement('div');
+    actions.className = 'streamerbot-shortcut-actions';
+
+    const copyBtn = document.createElement('button');
+    copyBtn.type = 'button';
+    copyBtn.className = 'streamerbot-copy';
+    copyBtn.textContent = 'Copy';
+    copyBtn.addEventListener('click', () => copyStreamerbotUrl(url, copyBtn));
+    actions.appendChild(copyBtn);
+
+    row.appendChild(info);
+    row.appendChild(actions);
+    streamerbotShortcutList.appendChild(row);
+  });
+}
+
+/**
+ * Copy a streamer.bot shortcut URL to the clipboard while keeping the UI responsive.
+ * Dependencies: Clipboard API plus the shortcut copy buttons in the Events tab.
+ * Code customers: streamer.bot API shortcut action buttons.
+ * Used variables/origin: Consumes URLs assembled from `API`, `channelName`, and `channelKeyValue`.
+ */
+async function copyStreamerbotUrl(url, button) {
+  if (!url || !button) { return; }
+  try {
+    await navigator.clipboard.writeText(url);
+    button.textContent = 'Copied!';
+  } catch (e) {
+    console.warn('Clipboard copy failed, falling back to prompt', e);
+    window.prompt('Copy this streamer.bot URL:', url);
+    button.textContent = 'Copied';
+  }
+  window.setTimeout(() => {
+    if (button) {
+      button.textContent = 'Copy';
+    }
+  }, 2000);
 }
 
 function formatEventTimestamp(value) {

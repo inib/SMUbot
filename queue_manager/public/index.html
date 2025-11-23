@@ -45,7 +45,7 @@
           <button id="tab-playlists" class="tab">Playlists</button>
           <button id="tab-users" class="tab">Users</button>
           <button id="tab-settings" class="tab">Settings</button>
-          <button id="tab-events" class="tab">Events</button>
+          <button id="tab-events" class="tab">streamer.bot</button>
           <button id="tab-overlays" class="tab">Overlays</button>
           <button id="tab-dev" class="tab" hidden>Dev</button>
         </div>
@@ -174,7 +174,7 @@
 
         <div id="events-view" style="display:none">
           <div class="events-header">
-            <h2 class="section-title">Channel Events</h2>
+            <h2 class="section-title">streamer.bot</h2>
             <div class="events-controls">
               <span id="event-status" class="event-status">Disconnected</span>
               <label class="event-autoscroll">
@@ -185,6 +185,18 @@
             </div>
           </div>
           <div id="event-feed" class="event-feed" role="log" aria-live="polite" aria-relevant="additions"></div>
+          <div class="streamerbot-notes">
+            <label for="streamerbot-notes-field">streamer.bot usage instructions</label>
+            <textarea id="streamerbot-notes-field" placeholder="Document how streamer.bot should interact with this channel." aria-label="streamer.bot usage instructions"></textarea>
+            <p class="muted">Leave guidance here for future automation recipes. Content can be filled in later.</p>
+          </div>
+          <div id="streamerbot-shortcuts" class="streamerbot-shortcuts">
+            <div class="section-header">
+              <h3 class="section-title">streamer.bot API shortcuts</h3>
+              <span id="streamerbot-shortcuts-status" class="muted">Select a channel to build API links.</span>
+            </div>
+            <div id="streamerbot-shortcut-list" class="streamerbot-shortcut-list"></div>
+          </div>
         </div>
 
         <div id="overlays-view" style="display:none">
