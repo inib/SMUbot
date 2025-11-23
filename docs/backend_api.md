@@ -27,6 +27,8 @@ This document summarizes the REST endpoints exposed by `backend_app.py`.
 - Channel keys are generated automatically when channels are created and are backfilled for existing databases at startup.
 - Admin-only endpoints still expect `X-Admin-Token` or a bearer/admin session cookie; channel keys never bypass admin checks.
 - The following endpoints accept channel keys (in addition to existing admin/OAuth fallbacks): playlist CRUD and reads, playlist queue helpers, random playlist requests, queue reads/writes (including random pulls), event logging, queue/playlist streams, and stream start/archive hooks.
+- The Queue Manager settings tab displays the active channel key for logged-in owners and moderators. Use the **Regenerate** control to rotate secrets if they were exposed; update any scripts sending `X-Channel-Key` or `channel_key` afterward.
+- Front-end configuration for the Queue Manager lives in `queue_manager/public/config.js`, which expects `BACKEND_URL` (pointing to this API), `TWITCH_CLIENT_ID`, and optional `TWITCH_SCOPES` used for OAuth.
 
 ### `/auth/login`
 - **Query parameters**

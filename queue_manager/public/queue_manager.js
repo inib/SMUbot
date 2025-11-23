@@ -24,6 +24,13 @@ const eventStatusEl = qs('event-status');
 const eventClearBtn = qs('event-clear');
 const eventAutoscrollInput = qs('event-autoscroll');
 
+const channelKeyCard = qs('channel-key-card');
+const channelKeySecretEl = qs('channel-key-secret');
+const channelKeyStatusEl = qs('channel-key-status');
+const channelKeyCopyBtn = qs('channel-key-copy');
+const channelKeyShowBtn = qs('channel-key-show');
+const channelKeyRegenerateBtn = qs('channel-key-regenerate');
+
 const playlistForm = qs('playlist-form');
 const playlistUrlInput = qs('playlist-url');
 const playlistKeywordsInput = qs('playlist-keywords');
@@ -42,6 +49,10 @@ const previewDefaultMessage = 'Select a request to load YouTube Music matches.';
 
 const playlistState = new Map();
 let playlistStatusTimer = null;
+
+let channelKeyValue = '';
+let channelKeyVisible = false;
+let channelKeyBusy = false;
 
 const EVENT_FEED_LIMIT = 200;
 let eventAutoscrollEnabled = eventAutoscrollInput ? eventAutoscrollInput.checked : true;
@@ -206,6 +217,7 @@ if (logoutBtn) {
       channelName = '';
       teardownQueueStream();
       teardownChannelEvents();
+      resetChannelKeyCard();
       updateLoginStatus();
       location.reload();
     }
@@ -228,6 +240,7 @@ if (logoutPermBtn) {
       channelName = '';
       teardownQueueStream();
       teardownChannelEvents();
+      resetChannelKeyCard();
       updateLoginStatus();
       location.reload();
     }
@@ -1592,6 +1605,173 @@ async function updateSetting(key, value) {
   }
 }
 
+/**
+ * Update the button labels and disabled states for the channel key card.
+ * Dependencies: Relies on global `channelName`, channel key state flags, and DOM refs for the key controls.
+ * Code customers: Settings tab card that surfaces the channel-scoped API key.
+ * Used variables/origin: Reads `channelKeyBusy`, `channelKeyValue`, and `channelKeyVisible` to inform button text and disabled handling.
+ */
+function updateChannelKeyButtons() {
+  if (!channelKeyCard) { return; }
+  const hasChannel = !!channelName;
+  channelKeyCard.classList.toggle('loading', channelKeyBusy);
+  if (channelKeyShowBtn) {
+    channelKeyShowBtn.disabled = channelKeyBusy || !hasChannel;
+    const label = channelKeyVisible ? 'Hide key' : (channelKeyValue ? 'Show key' : 'Load key');
+    channelKeyShowBtn.textContent = label;
+  }
+  if (channelKeyCopyBtn) {
+    channelKeyCopyBtn.disabled = channelKeyBusy || !hasChannel || !channelKeyValue;
+  }
+  if (channelKeyRegenerateBtn) {
+    channelKeyRegenerateBtn.disabled = channelKeyBusy || !hasChannel;
+  }
+}
+
+/**
+ * Render the key value (or a placeholder) into the card while keeping it hidden by default.
+ * Dependencies: Uses DOM nodes from `channelKeySecretEl` plus state from `channelKeyValue` and `channelKeyVisible`.
+ * Code customers: Channel key card display in the settings tab.
+ * Used variables/origin: Pulls `channelKeyValue` sourced from backend GET/POST endpoints and masks it unless `channelKeyVisible` is true.
+ */
+function renderChannelKeySecret() {
+  if (!channelKeySecretEl) { return; }
+  channelKeySecretEl.classList.toggle('revealed', !!channelKeyValue && channelKeyVisible);
+  if (!channelName) {
+    channelKeySecretEl.textContent = 'Select a channel to load its key.';
+    return;
+  }
+  if (!channelKeyValue) {
+    channelKeySecretEl.textContent = 'Hidden until requested.';
+    return;
+  }
+  channelKeySecretEl.textContent = channelKeyVisible ? channelKeyValue : '••••••••••';
+}
+
+/**
+ * Reset the channel key card when changing channels or logging out.
+ * Dependencies: Depends on global `channelName`, key state flags, and the DOM nodes defined for the card.
+ * Code customers: Channel selection workflow plus logout flows.
+ * Used variables/origin: Clears `channelKeyValue` populated by backend responses and restores neutral copy/visibility flags.
+ */
+function resetChannelKeyCard() {
+  if (!channelKeyCard) { return; }
+  channelKeyValue = '';
+  channelKeyVisible = false;
+  channelKeyBusy = false;
+  if (channelKeyStatusEl) {
+    channelKeyStatusEl.textContent = '';
+  }
+  renderChannelKeySecret();
+  updateChannelKeyButtons();
+}
+
+/**
+ * Request the active or regenerated channel key and surface it in the UI.
+ * Dependencies: Requires `channelName`, backend key endpoints, and DOM nodes for status, secret, and buttons.
+ * Code customers: Settings tab channel key actions (show/load and regeneration flows).
+ * Used variables/origin: Writes `channelKeyValue` using payloads from `/channels/{channel}/key` and `/channels/{channel}/key/regenerate`.
+ */
+async function requestChannelKey(options = {}) {
+  if (!channelName || channelKeyBusy || !channelKeyCard) { return; }
+  const { regenerate = false } = options;
+  const encoded = encodeURIComponent(channelName);
+  const endpoint = regenerate ? `${API}/channels/${encoded}/key/regenerate` : `${API}/channels/${encoded}/key`;
+  channelKeyBusy = true;
+  if (channelKeyStatusEl) {
+    channelKeyStatusEl.textContent = regenerate ? 'Regenerating key…' : 'Loading key…';
+  }
+  updateChannelKeyButtons();
+  try {
+    const resp = await fetch(endpoint, { method: regenerate ? 'POST' : 'GET', credentials: 'include' });
+    if (!resp.ok) {
+      if (resp.status === 403 && channelKeyStatusEl) {
+        channelKeyStatusEl.textContent = 'Only channel owners or moderators can view or rotate this key.';
+        if (channelKeyShowBtn) { channelKeyShowBtn.disabled = true; }
+        if (channelKeyRegenerateBtn) { channelKeyRegenerateBtn.disabled = true; }
+        if (channelKeyCopyBtn) { channelKeyCopyBtn.disabled = true; }
+      } else if (channelKeyStatusEl) {
+        channelKeyStatusEl.textContent = 'Failed to load the channel key. Please try again.';
+      }
+      return;
+    }
+    const payload = await resp.json();
+    channelKeyValue = payload && payload.channel_key ? payload.channel_key : '';
+    channelKeyVisible = true;
+    renderChannelKeySecret();
+    if (channelKeyStatusEl) {
+      channelKeyStatusEl.textContent = regenerate
+        ? 'Channel key rotated. Update any API clients using it.'
+        : 'Channel key loaded. Keep it private.';
+    }
+  } catch (e) {
+    console.error('Failed to load channel key', e);
+    if (channelKeyStatusEl) {
+      channelKeyStatusEl.textContent = 'Unable to load the channel key. Check your connection and permissions.';
+    }
+  } finally {
+    channelKeyBusy = false;
+    updateChannelKeyButtons();
+  }
+}
+
+/**
+ * Copy the channel key to the clipboard with a prompt fallback.
+ * Dependencies: Relies on `channelKeyValue`, Clipboard API, and channel key status/secret nodes.
+ * Code customers: Copy button within the settings tab key card.
+ * Used variables/origin: Reads `channelKeyValue` fetched from backend key endpoints.
+ */
+async function copyChannelKey() {
+  if (!channelKeyValue) {
+    await requestChannelKey();
+  }
+  if (!channelKeyValue || !channelKeyCopyBtn) { return; }
+  try {
+    await navigator.clipboard.writeText(channelKeyValue);
+    if (channelKeyStatusEl) {
+      channelKeyStatusEl.textContent = 'Channel key copied to clipboard.';
+    }
+  } catch (e) {
+    console.warn('Clipboard copy failed, falling back to prompt', e);
+    window.prompt('Copy this channel key:', channelKeyValue);
+    if (channelKeyStatusEl) {
+      channelKeyStatusEl.textContent = 'Channel key copied. Rotate it if it was exposed.';
+    }
+  }
+}
+
+/**
+ * Wire up click handlers for channel key reveal, copy, and regeneration actions.
+ * Dependencies: Uses the channel key DOM controls and the `requestChannelKey` helper.
+ * Code customers: Settings view initialization.
+ * Used variables/origin: Reads `channelName` to ensure actions target the active channel and resets UI for new selections.
+ */
+function bindChannelKeyControls() {
+  if (channelKeyShowBtn) {
+    channelKeyShowBtn.addEventListener('click', async () => {
+      if (!channelKeyValue) {
+        await requestChannelKey();
+        return;
+      }
+      channelKeyVisible = !channelKeyVisible;
+      renderChannelKeySecret();
+      updateChannelKeyButtons();
+    });
+  }
+  if (channelKeyCopyBtn) {
+    channelKeyCopyBtn.addEventListener('click', copyChannelKey);
+  }
+  if (channelKeyRegenerateBtn) {
+    channelKeyRegenerateBtn.addEventListener('click', async () => {
+      if (!channelName) { return; }
+      const confirmed = window.confirm('Regenerating will immediately invalidate the current key. Continue?');
+      if (!confirmed) { return; }
+      await requestChannelKey({ regenerate: true });
+    });
+  }
+  resetChannelKeyCard();
+}
+
 // ===== Overlay builder =====
 const overlayKindSelect = qs('overlay-kind');
 const overlayLayoutSelect = qs('overlay-layout');
@@ -1842,6 +2022,7 @@ function initOverlayBuilder() {
   updateOverlayBuilder();
 }
 
+bindChannelKeyControls();
 initOverlayBuilder();
 
 // ===== Landing page & login =====
@@ -1960,6 +2141,7 @@ function selectChannel(ch) {
   qs('ch-badge').textContent = `channel: ${channelName}`;
   updateBotStatusBadge(getChannelInfo(channelName));
   updateLoginStatus();
+  resetChannelKeyCard();
   qs('landing').style.display = 'none';
   qs('app').style.display = '';
   fetchQueue();
