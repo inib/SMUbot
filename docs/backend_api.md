@@ -7,6 +7,57 @@ This document summarizes the REST endpoints exposed by `backend_app.py`.
 |--------|------|-------------|
 | GET | `/system/health` | Health check that verifies database connectivity. |
 
+## Authentication
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/auth/login` | Build a Twitch OAuth authorization URL for a channel, optionally preserving a `return_url`. |
+| GET | `/auth/callback` | Twitch OAuth callback that stores the access token and marks the user as the channel owner. |
+| POST | `/auth/session` | Exchange a user OAuth token for a server-side session cookie. |
+| POST | `/auth/logout` | Clear the admin session cookie. |
+
+## Channel keys
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/channels/{channel}/key` | Return the active channel key for owners or moderators authenticated with OAuth. |
+| POST | `/channels/{channel}/key/regenerate` | Rotate and return a new channel key for the specified channel (owner/moderator OAuth). |
+
+**Channel-key usage**
+
+- Supply either `X-Channel-Key: <key>` or the query parameter `channel_key=<key>` when calling channel-safe endpoints.
+- Channel keys are generated automatically when channels are created and are backfilled for existing databases at startup.
+- Admin-only endpoints still expect `X-Admin-Token` or a bearer/admin session cookie; channel keys never bypass admin checks.
+- The following endpoints accept channel keys (in addition to existing admin/OAuth fallbacks): playlist CRUD and reads, playlist queue helpers, random playlist requests, queue reads/writes (including random pulls), event logging, queue/playlist streams, and stream start/archive hooks.
+- The Queue Manager settings tab displays the active channel key for logged-in owners and moderators. Use the **Regenerate** control to rotate secrets if they were exposed; update any scripts sending `X-Channel-Key` or `channel_key` afterward.
+- Front-end configuration for the Queue Manager lives in `queue_manager/public/config.js`, which expects `BACKEND_URL` (pointing to this API), `TWITCH_CLIENT_ID`, and optional `TWITCH_SCOPES` used for OAuth.
+
+### `/auth/login`
+- **Query parameters**
+  - `channel` (required): Channel login used to embed into the OAuth `state` parameter.
+  - `return_url` (optional): URL-encoded location to redirect to after authorization.
+- **Response**: `{ "auth_url": "<twitch authorize url>" }` built with the configured Twitch client ID, redirect URI, and scopes from `TWITCH_SCOPES`.
+- **Notes**: Fails with HTTP 500 if Twitch OAuth configuration is missing.
+
+### `/auth/callback`
+- **Query parameters**
+  - `code`: Authorization code returned by Twitch.
+  - `state`: Either a channel login string or JSON containing `{ "channel": <login>, "return_url": <url?> }`.
+- **Behavior**
+  - Exchanges `code` for an access token and requires the `channel:bot` scope.
+  - Fetches the authenticated Twitch user and upserts `TwitchUser` plus the matching `ActiveChannel`, setting `authorized=True` and `owner_id` to the user.
+  - Redirects to `return_url` when supplied and using an `http`/`https` scheme; otherwise returns `{ "success": true }`.
+
+### `/auth/session`
+- **Authentication**: `Authorization: Bearer <user OAuth token>`.
+- **Behavior**
+  - Validates the token against `https://id.twitch.tv/oauth2/validate` and refreshes the stored `TwitchUser` record.
+  - Auto-registers the channel as owned when the token carries the `channel:bot` scope.
+  - Sets the `admin_oauth_token` cookie (HTTP-only, `SameSite=lax`) for subsequent admin access, honoring Twitch `expires_in` when present.
+- **Response**: `{ "login": "<twitch username>" }`.
+- **Errors**: 401 when the bearer token is missing or invalid.
+
+### `/auth/logout`
+- **Behavior**: Removes the `admin_oauth_token` cookie and returns `{ "success": true }`.
+
 ## Bot
 | Method | Path | Description |
 |--------|------|-------------|
@@ -42,13 +93,25 @@ This document summarizes the REST endpoints exposed by `backend_app.py`.
 ## Playlists
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/channels/{channel}/public/playlists` | Read-only view of public playlists (including manual sets) with their songs. |
-| GET | `/channels/{channel}/playlists` | List playlists configured for a channel. |
-| POST | `/channels/{channel}/playlists` | Add a new playlist from YouTube or manual entries (admin). |
-| GET | `/channels/{channel}/playlists/{playlist_id}/items` | List items contained in a playlist. |
-| POST | `/channels/{channel}/playlists/{playlist_id}/queue` | Queue a specific playlist item by ID (admin). |
-| POST | `/channels/{channel}/playlists/random_request` | Enqueue a random playlist item matching an optional keyword. |
-| POST | `/channels/{channel}/playlists/request` | Enqueue a playlist entry by providing its identifier and 1-based index. |
+| GET | `/channels/{channel}/playlists` | List saved playlists for a channel (channel key or admin/owner/moderator). |
+| POST | `/channels/{channel}/playlists` | Add a YouTube playlist reference and import its items (channel key or admin/owner/moderator). |
+| PUT | `/channels/{channel}/playlists/{playlist_id}` | Update playlist visibility or keywords (channel key or admin/owner/moderator). |
+| DELETE | `/channels/{channel}/playlists/{playlist_id}` | Remove a playlist and its items (channel key or admin/owner/moderator). |
+
+### `/channels/{channel}/playlists`
+- **Authentication**: Provide `X-Channel-Key`, `channel_key=<key>`, `X-Admin-Token`, or a bearer token/admin session cookie for a channel owner or moderator.
+- **GET behavior**
+  - Returns playlists sorted by title with keywords sorted alphabetically.
+  - **Response**: Array of `{ "id", "title", "playlist_id", "url", "visibility", "keywords": [str], "item_count" }`.
+- **POST payload**: `{ "url": "<youtube playlist url>", "keywords": ["rock"?], "visibility": "public|private|unlisted" }`.
+  - Extracts the playlist ID from the URL, downloads metadata/tracks, and persists each item with position, title, artist, duration, and URL. Rejects invalid URLs (HTTP 400) or duplicates (HTTP 409).
+  - **Response**: `{ "id": <int> }` for the created playlist.
+- **Use cases**: Seed curated lists for random song draws, associate keywords (e.g., `default`, genres) for chat triggers, and control playlist availability to overlays.
+
+### `/channels/{channel}/playlists/{playlist_id}`
+- **Authentication**: Same as the list/create endpoint.
+- **PUT payload**: `{ "keywords"?: [str], "visibility"?: "public|private|unlisted" }`; updates fields when present and returns the refreshed playlist summary with the latest keyword set.
+- **DELETE behavior**: Removes the playlist and its imported items; responds with HTTP 204 on success.
 
 ## Users
 | Method | Path | Description |
@@ -63,19 +126,43 @@ This document summarizes the REST endpoints exposed by `backend_app.py`.
 ## Queue
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/channels/{channel}/queue/stream` | Server-sent events stream emitting queue updates. |
-| GET | `/channels/{channel}/queue` | Current request queue for the active stream. |
-| GET | `/channels/{channel}/streams/{stream_id}/queue` | Request queue for a specific past stream. |
-| POST | `/channels/{channel}/queue` | Add a song request to the queue (admin or bot). |
-| PUT | `/channels/{channel}/queue/{request_id}` | Update request status such as marking played (admin). |
-| DELETE | `/channels/{channel}/queue/{request_id}` | Remove a request (admin). |
-| POST | `/channels/{channel}/queue/clear` | Remove all pending requests for the current stream (admin). |
-| GET | `/channels/{channel}/queue/random_nonpriority` | Fetch a random non-priority request from the queue. |
-| POST | `/channels/{channel}/queue/{request_id}/bump_admin` | Force a request to priority status (admin). |
-| POST | `/channels/{channel}/queue/{request_id}/move` | Move a request up or down in the queue (admin). |
-| POST | `/channels/{channel}/queue/{request_id}/skip` | Send a request to the end of the queue (admin). |
-| POST | `/channels/{channel}/queue/{request_id}/priority` | Enable or disable priority for a request (admin). |
-| POST | `/channels/{channel}/queue/{request_id}/played` | Mark a request as played (admin). |
+| GET | `/channels/{channel}/queue/stream` | Server-sent events stream emitting queue updates (channel key or admin). |
+| GET | `/channels/{channel}/queue` | Current request queue for the active stream (channel key or admin). |
+| GET | `/channels/{channel}/streams/{stream_id}/queue` | Request queue for a specific past stream (channel key or admin). |
+| POST | `/channels/{channel}/queue` | Add a song request to the queue (channel key or admin). |
+| PUT | `/channels/{channel}/queue/{request_id}` | Update request status such as marking played (channel key or admin). |
+| DELETE | `/channels/{channel}/queue/{request_id}` | Remove a request (channel key or admin). |
+| POST | `/channels/{channel}/queue/clear` | Remove all pending requests for the current stream (channel key or admin). |
+| GET | `/channels/{channel}/queue/random_nonpriority` | Fetch a random non-priority request from the queue (channel key or admin). |
+| POST | `/channels/{channel}/queue/{request_id}/bump_admin` | Force a request to priority status (channel key or admin). |
+| POST | `/channels/{channel}/queue/{request_id}/move` | Move a request up or down in the queue (channel key or admin). |
+| POST | `/channels/{channel}/queue/{request_id}/skip` | Send a request to the end of the queue (channel key or admin). |
+| POST | `/channels/{channel}/queue/{request_id}/priority` | Enable or disable priority for a request (channel key or admin). |
+| POST | `/channels/{channel}/queue/{request_id}/played` | Mark a request as played (channel key or admin). |
+| GET | `/channels/{channel}/queue/full` | Return the full queue with song and requester details (channel key or admin). |
+
+### `/channels/{channel}/queue/full`
+- **Authentication**: Provide a channel key, `X-Admin-Token`, or bearer/admin session for an owner/moderator; invalid keys return HTTP 401.
+- **Behavior**
+  - Finds the current stream and orders requests by played status, priority flags, manual position, and request time.
+  - Joins request rows with `Song` and `User` models and enriches users with VIP/subscriber status when available.
+- **Response**: Array of `{ "request": { "id", "song_id", "user_id", "request_time", "is_priority", "bumped", "played", "priority_source" }, "song": { "id", "artist", "title", "youtube_link", ... }, "user": { "id", "twitch_id", "username", "is_vip", "is_subscriber", "subscriber_tier" } }`.
+- **Use cases**: Drive moderator dashboards or overlay widgets that need a complete view of the queue without issuing multiple lookups per request.
+
+## YouTube Music
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/ytmusic/search` | Search YouTube Music and normalize matching song results. |
+
+### `/ytmusic/search`
+- **Authentication**: None; intended for public song lookups.
+- **Query parameters**
+  - `query` (required): Search term trimmed to 1-200 characters. Empty strings return HTTP 400.
+- **Behavior**
+  - Initializes the `ytmusicapi` client (fails with HTTP 502 if the optional dependency or auth file is missing).
+  - Calls `client.search(query, limit=10)` and normalizes up to 5 items that contain a YouTube `videoId` and a supported result type (`song`, `video`, or `music_video`).
+- **Response**: Array of objects `{ "title", "video_id", "playlist_id", "browse_id", "result_type", "artists": [str], "album", "duration", "thumbnails": [{ "url", "width?", "height?" }], "link" }` where `link` falls back to a YouTube watch/playlist/browse URL when missing.
+- **Use cases**: Power autocomplete and song-picking UIs before creating requests or importing playlist tracks.
 
 Queue endpoints that accept `{request_id}` support numeric identifiers for full
 backwards compatibility **and** keyword shortcuts to target specific queue
@@ -99,7 +186,7 @@ Example calls (keywords and numeric IDs are interchangeable):
 ## Events
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/channels/{channel}/events` | Log a channel event such as follows, subscriptions, or bits (admin). |
+| POST | `/channels/{channel}/events` | Log a channel event such as follows, subscriptions, or bits (channel key or admin). |
 | GET | `/channels/{channel}/events` | Retrieve logged events with optional filtering by type and time. |
 | WS | `/channels/{channel}/events` | WebSocket stream that pushes queue and settings events for overlays. |
 
@@ -134,8 +221,8 @@ All payloads only expose queue-facing data:
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/channels/{channel}/streams` | List stream sessions for a channel. |
-| POST | `/channels/{channel}/streams/start` | Ensure a stream session exists and return its ID (admin). |
-| POST | `/channels/{channel}/streams/archive` | Close the current stream and start a new session (admin). |
+| POST | `/channels/{channel}/streams/start` | Ensure a stream session exists and return its ID (channel key or admin). |
+| POST | `/channels/{channel}/streams/archive` | Close the current stream and start a new session (channel key or admin). |
 
 ## Stats
 | Method | Path | Description |
@@ -143,4 +230,35 @@ All payloads only expose queue-facing data:
 | GET | `/channels/{channel}/stats/general` | General statistics for the current stream such as total requests. |
 | GET | `/channels/{channel}/stats/songs` | Top requested songs for the current stream. |
 | GET | `/channels/{channel}/stats/users` | Top requesting users for the current stream. |
+
+## Current user
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/me` | Return the authenticated Twitch user from the bearer token or admin session cookie. |
+| GET | `/me/channels` | List channels the user owns or moderates. |
+
+### `/me`
+- **Authentication**: `Authorization: Bearer <user OAuth token>` or `admin_oauth_token` cookie.
+- **Response**: `{ "login", "display_name", "profile_image_url" }`. The backend attempts a best-effort Twitch `/helix/users` lookup to populate display name and avatar; falls back to the stored username on failure.
+- **Errors**: 401 when no token or cookie is provided.
+
+### `/me/channels`
+- **Authentication**: Same as `/me`.
+- **Response**: Array of `{ "channel_name", "role" }` entries where `role` is `owner` for `ActiveChannel.owner_id` matches, and `moderator` for linked `ChannelModerator` rows.
+
+## Channel moderation
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/channels/{channel}/mods` | Add a moderator link for a channel. |
+| POST | `/channels/{channel}/bot_status` | Update the bot activity/error state for a channel. |
+
+### `/channels/{channel}/mods`
+- **Authentication**: Requires `X-Admin-Token` header matching `ADMIN_TOKEN` *or* a valid bearer token/session cookie (validated via Twitch). When using a bearer token, the caller must be the channel owner; otherwise a 403 error is returned.
+- **Payload**: `{ "twitch_id": "<user id>", "username": "<login>" }`.
+- **Behavior**: Upserts the Twitch user if missing, then creates the `ChannelModerator` link when absent. Returns `{ "success": true }` on success.
+
+### `/channels/{channel}/bot_status`
+- **Authentication**: Requires `X-Admin-Token` or a valid bearer token/session cookie. No additional role check is enforced beyond token validity.
+- **Payload**: `{ "active": <bool>, "error": "<optional last error>" }`.
+- **Behavior**: Ensures a `ChannelBotState` row exists, updates `active` and `last_error`, persists changes, and emits a queue change notification.
 

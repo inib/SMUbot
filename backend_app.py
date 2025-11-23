@@ -120,6 +120,51 @@ _ytmusic_client: Optional[YTMusic] = None
 _ytmusic_lock = Lock()
 
 
+def generate_channel_key() -> str:
+    """Create a per-channel secret using `secrets.token_urlsafe` for authenticated access.
+
+    Dependencies: Relies on the standard-library `secrets` module for entropy.
+    Code customers: Channel creation flows and migration helpers call this utility.
+    Used variables/origin: No external inputs; uses `secrets.token_urlsafe(32)` to produce the key material.
+    """
+
+    return secrets.token_urlsafe(32)
+
+
+def ensure_channel_key_schema() -> None:
+    """Ensure the `channel_key` column exists in the `active_channels` table before startup.
+
+    Dependencies: Uses SQLAlchemy `inspect` and a raw `ALTER TABLE` executed via `engine.begin()`.
+    Code customers: Invoked at module import to keep persisted databases aligned with the model.
+    Used variables/origin: Reads from the global `engine` metadata and mutates the `active_channels` table when needed.
+    """
+
+    inspector = inspect(engine)
+    columns = {col["name"] for col in inspector.get_columns("active_channels")}
+    if "channel_key" not in columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE active_channels ADD COLUMN channel_key VARCHAR"))
+
+
+def backfill_missing_channel_keys() -> None:
+    """Assign generated keys to any existing channels lacking a `channel_key` value.
+
+    Dependencies: Opens a database session via `SessionLocal` and uses `generate_channel_key` for new secrets.
+    Code customers: Runs during startup to keep legacy rows compatible with the channel-key auth dependency.
+    Used variables/origin: Reads `ActiveChannel.channel_key` and writes generated values back to the same records.
+    """
+
+    db = SessionLocal()
+    try:
+        missing = db.query(ActiveChannel).filter(
+            (ActiveChannel.channel_key.is_(None)) | (ActiveChannel.channel_key == "")
+        ).all()
+        for channel in missing:
+            channel.channel_key = generate_channel_key()
+        if missing:
+            db.commit()
+    finally:
+        db.close()
 def _load_settings_from_db() -> Dict[str, Optional[str]]:
     db = SessionLocal()
     try:
@@ -394,6 +439,7 @@ class ActiveChannel(Base):
     id = Column(Integer, primary_key=True)
     channel_id = Column(String, unique=True, nullable=False)  # Twitch channel ID
     channel_name = Column(String, nullable=False)
+    channel_key = Column(String, nullable=True, unique=True)
     join_active = Column(Integer, default=1)
     authorized = Column(Boolean, default=False)
     owner_id = Column(Integer, ForeignKey("twitch_users.id"))
@@ -729,6 +775,12 @@ class ChannelOAuthOut(BaseModel):
     authorized: bool
     owner_login: Optional[str] = None
     scopes: List[str] = Field(default_factory=list)
+
+
+class ChannelKeyOut(BaseModel):
+    channel_id: int
+    channel_name: str
+    channel_key: str
 
 class ChannelSettingsIn(BaseModel):
     max_requests_per_user: int = -1
@@ -1783,6 +1835,9 @@ def _auto_register_channel_from_token(user: TwitchUser, data: dict[str, Any], db
         if channel.owner_id != user.id:
             channel.owner_id = user.id
             changed = True
+        if not channel.channel_key:
+            channel.channel_key = generate_channel_key()
+            changed = True
         if not channel.authorized:
             channel.authorized = True
             changed = True
@@ -1793,6 +1848,7 @@ def _auto_register_channel_from_token(user: TwitchUser, data: dict[str, Any], db
         channel = ActiveChannel(
             channel_id=channel_id,
             channel_name=login,
+            channel_key=generate_channel_key(),
             join_active=1,
             authorized=True,
             owner_id=user.id,
@@ -1853,6 +1909,45 @@ def require_token(
         if _user_has_access(user, channel_pk, db):
             return
     raise HTTPException(status_code=401, detail="invalid admin token")
+
+
+def require_channel_key(
+    channel: str,
+    x_channel_key: Optional[str] = Header(None, alias="X-Channel-Key"),
+    channel_key_query: Optional[str] = Query(None, alias="channel_key"),
+    x_admin_token: str = Header(None),
+    authorization: str = Header(None),
+    admin_session: Optional[str] = Cookie(None, alias=ADMIN_SESSION_COOKIE),
+    db: Session = Depends(get_db),
+):
+    """Validate channel-level access using the shared key or existing admin/OAuth credentials.
+
+    Dependencies: Reads `ActiveChannel` records via `get_channel_pk`/`Session` and reuses `require_token` for admin flows.
+    Code customers: Queue, playlist, and other channel-safe endpoints inject this dependency for authentication.
+    Used variables/origin: Accepts the `X-Channel-Key` header or `channel_key` query param and compares against `channel.channel_key`.
+    """
+
+    channel_pk = get_channel_pk(channel, db)
+    provided_key = x_channel_key or channel_key_query
+    if provided_key:
+        channel_obj = db.get(ActiveChannel, channel_pk)
+        stored_key = channel_obj.channel_key if channel_obj else None
+        if stored_key and hmac.compare_digest(stored_key, provided_key):
+            return
+
+    try:
+        require_token(
+            channel=channel,
+            x_admin_token=x_admin_token,
+            authorization=authorization,
+            admin_session=admin_session,
+            db=db,
+        )
+        return
+    except HTTPException:
+        pass
+
+    raise HTTPException(status_code=401, detail="invalid channel key")
 
 def get_channel_pk(channel: str, db: Session) -> int:
     """Return the primary key for a channel, matching name case-insensitively."""
@@ -1957,6 +2052,7 @@ def auth_callback(
         ch = ActiveChannel(
             channel_id=user_info["id"],
             channel_name=user_info["login"],
+            channel_key=generate_channel_key(),
             join_active=1,
             authorized=True,
             owner_id=user.id,
@@ -1965,6 +2061,8 @@ def auth_callback(
     else:
         ch.owner_id = user.id
         ch.authorized = True
+        if not ch.channel_key:
+            ch.channel_key = generate_channel_key()
     db.commit()
     if return_to:
         parsed = urlparse(return_to)
@@ -2917,6 +3015,7 @@ def seed_default_data():
         channel = ActiveChannel(
             channel_id="example-channel-id",
             channel_name="example_channel",
+            channel_key=generate_channel_key(),
             join_active=1,
             authorized=True,
         )
@@ -3021,6 +3120,8 @@ def seed_default_data():
         db.close()
 
 
+ensure_channel_key_schema()
+backfill_missing_channel_keys()
 seed_default_data()
 
 # =====================================
@@ -3185,7 +3286,12 @@ def get_channel_live_status(db: Session = Depends(get_db)):
 
 @app.post("/channels", response_model=ChannelOut, dependencies=[Depends(require_token)])
 def add_channel(payload: ChannelIn, db: Session = Depends(get_db)):
-    ch = ActiveChannel(channel_id=payload.channel_id, channel_name=payload.channel_name, join_active=payload.join_active)
+    ch = ActiveChannel(
+        channel_id=payload.channel_id,
+        channel_name=payload.channel_name,
+        channel_key=generate_channel_key(),
+        join_active=payload.join_active,
+    )
     db.add(ch)
     db.commit()
     db.refresh(ch)
@@ -3274,6 +3380,57 @@ def get_channel_oauth(channel: str, db: Session = Depends(get_db)):
         scopes=scopes,
     )
 
+
+@app.get("/channels/{channel}/key", response_model=ChannelKeyOut)
+def get_channel_key(
+    channel: str,
+    current: TwitchUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return the current channel key to authorized owners and moderators.
+
+    Dependencies: Uses `get_current_user` plus `Session` to confirm channel-level roles via `_user_has_access`.
+    Code customers: Control panels that need to display or share the active key with trusted operators.
+    Used variables/origin: Reads `ActiveChannel.channel_key` for the requested `channel` path parameter.
+    """
+
+    channel_pk = get_channel_pk(channel, db)
+    if not _user_has_access(current, channel_pk, db):
+        raise HTTPException(status_code=403, detail="not authorized for channel")
+    ch = db.get(ActiveChannel, channel_pk)
+    if not ch:
+        raise HTTPException(status_code=404, detail="channel not found")
+    if not ch.channel_key:
+        ch.channel_key = generate_channel_key()
+        db.commit()
+        db.refresh(ch)
+    return ChannelKeyOut(channel_id=ch.id, channel_name=ch.channel_name, channel_key=ch.channel_key)
+
+
+@app.post("/channels/{channel}/key/regenerate", response_model=ChannelKeyOut)
+def regenerate_channel_key(
+    channel: str,
+    current: TwitchUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Replace and return the channel key for owners or moderators who need to rotate secrets.
+
+    Dependencies: Shares the same authentication stack as `get_channel_key`, using `get_current_user` and the database session.
+    Code customers: Interfaces that allow moderators to cycle compromised keys without database access.
+    Used variables/origin: Writes a new `generate_channel_key` output onto the matched `ActiveChannel` row.
+    """
+
+    channel_pk = get_channel_pk(channel, db)
+    if not _user_has_access(current, channel_pk, db):
+        raise HTTPException(status_code=403, detail="not authorized for channel")
+    ch = db.get(ActiveChannel, channel_pk)
+    if not ch:
+        raise HTTPException(status_code=404, detail="channel not found")
+    ch.channel_key = generate_channel_key()
+    db.commit()
+    db.refresh(ch)
+    return ChannelKeyOut(channel_id=ch.id, channel_name=ch.channel_name, channel_key=ch.channel_key)
+
 @app.put("/channels/{channel}/settings", dependencies=[Depends(require_token)])
 def set_channel_settings(channel: str, payload: ChannelSettingsIn, db: Session = Depends(get_db)):
     channel_pk = get_channel_pk(channel, db)
@@ -3339,7 +3496,7 @@ def search_ytmusic(query: str = Query(..., min_length=1, max_length=200)):
 # =====================================
 
 
-@app.get("/channels/{channel}/playlists", response_model=List[PlaylistOut], dependencies=[Depends(require_token)])
+@app.get("/channels/{channel}/playlists", response_model=List[PlaylistOut], dependencies=[Depends(require_channel_key)])
 def list_playlists(channel: str, db: Session = Depends(get_db)):
     channel_pk = get_channel_pk(channel, db)
     playlists = (
@@ -3427,7 +3584,7 @@ def list_public_playlists(
 @app.post(
     "/channels/{channel}/playlists",
     response_model=dict,
-    dependencies=[Depends(require_token)],
+    dependencies=[Depends(require_channel_key)],
 )
 def create_playlist(channel: str, payload: PlaylistCreate, db: Session = Depends(get_db)):
     channel_pk = get_channel_pk(channel, db)
@@ -3499,7 +3656,7 @@ def create_playlist(channel: str, payload: PlaylistCreate, db: Session = Depends
 @app.put(
     "/channels/{channel}/playlists/{playlist_id}",
     response_model=PlaylistOut,
-    dependencies=[Depends(require_token)],
+    dependencies=[Depends(require_channel_key)],
 )
 def update_playlist(
     channel: str,
@@ -3561,7 +3718,7 @@ def update_playlist(
 @app.delete(
     "/channels/{channel}/playlists/{playlist_id}",
     status_code=204,
-    dependencies=[Depends(require_token)],
+    dependencies=[Depends(require_channel_key)],
 )
 def delete_playlist(channel: str, playlist_id: int, db: Session = Depends(get_db)):
     channel_pk = get_channel_pk(channel, db)
@@ -3580,7 +3737,7 @@ def delete_playlist(channel: str, playlist_id: int, db: Session = Depends(get_db
 @app.get(
     "/channels/{channel}/playlists/{playlist_id}/items",
     response_model=List[PlaylistItemOut],
-    dependencies=[Depends(require_token)],
+    dependencies=[Depends(require_channel_key)],
 )
 def list_playlist_items(channel: str, playlist_id: int, db: Session = Depends(get_db)):
     channel_pk = get_channel_pk(channel, db)
@@ -3724,7 +3881,7 @@ def delete_playlist_item(
 @app.post(
     "/channels/{channel}/playlists/{playlist_id}/queue",
     response_model=dict,
-    dependencies=[Depends(require_token)],
+    dependencies=[Depends(require_channel_key)],
 )
 def queue_playlist_item(
     channel: str,
@@ -3826,7 +3983,7 @@ def request_playlist_item(
 @app.post(
     "/channels/{channel}/playlists/random_request",
     response_model=RandomPlaylistRequestOut,
-    dependencies=[Depends(require_token)],
+    dependencies=[Depends(require_channel_key)],
 )
 def random_playlist_request(
     channel: str,
@@ -4311,15 +4468,16 @@ def _normalize_ytmusic_result(item: Mapping[str, Any]) -> Optional[YTMusicSearch
     )
 
 
-@app.get("/channels/{channel}/queue/full", response_model=List[QueueItemFull])
+@app.get(
+    "/channels/{channel}/queue/full",
+    response_model=List[QueueItemFull],
+    dependencies=[Depends(require_channel_key)],
+)
 def get_queue_full(
     channel: str,
-    current: TwitchUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     channel_pk = get_channel_pk(channel, db)
-    if not _user_has_access(current, channel_pk, db):
-        raise HTTPException(status_code=403, detail="not authorized for channel")
     sid = current_stream(db, channel_pk)
     rows: list[Request] = (
         db.query(Request)
@@ -4391,7 +4549,7 @@ def get_queue_full(
     return result
 
 
-@app.get("/channels/{channel}/queue/stream")
+@app.get("/channels/{channel}/queue/stream", dependencies=[Depends(require_channel_key)])
 async def stream_queue(channel: str, db: Session = Depends(get_db)):
     channel_pk = get_channel_pk(channel, db)
     q = _subscribe_queue(channel_pk)
@@ -4457,7 +4615,7 @@ async def channel_event_stream(channel: str, websocket: WebSocket) -> None:
         db.close()
 
 
-@app.get("/channels/{channel}/queue", response_model=List[RequestOut])
+@app.get("/channels/{channel}/queue", response_model=List[RequestOut], dependencies=[Depends(require_channel_key)])
 def get_queue(channel: str, db: Session = Depends(get_db)):
     channel_pk = get_channel_pk(channel, db)
     sid = current_stream(db, channel_pk)
@@ -4477,7 +4635,7 @@ def get_queue(channel: str, db: Session = Depends(get_db)):
         .all()
     )
 
-@app.get("/channels/{channel}/streams/{stream_id}/queue", response_model=List[RequestOut])
+@app.get("/channels/{channel}/streams/{stream_id}/queue", response_model=List[RequestOut], dependencies=[Depends(require_channel_key)])
 def get_stream_queue(channel: str, stream_id: int, db: Session = Depends(get_db)):
     channel_pk = get_channel_pk(channel, db)
     return (
@@ -4493,7 +4651,7 @@ def get_stream_queue(channel: str, stream_id: int, db: Session = Depends(get_db)
         .all()
     )
 
-@app.post("/channels/{channel}/queue", response_model=dict, dependencies=[Depends(require_token)])
+@app.post("/channels/{channel}/queue", response_model=dict, dependencies=[Depends(require_channel_key)])
 def add_request(channel: str, payload: RequestCreate, db: Session = Depends(get_db)):
     channel_pk = get_channel_pk(channel, db)
     # Checks
@@ -4567,6 +4725,8 @@ def add_request(channel: str, payload: RequestCreate, db: Session = Depends(get_
     publish_queue_changed(channel_pk)
     return {"request_id": req.id}
 
+@app.put("/channels/{channel}/queue/{request_id}", dependencies=[Depends(require_channel_key)])
+def update_request(channel: str, request_id: int, payload: RequestUpdate, db: Session = Depends(get_db)):
 REQUEST_IDENTIFIER_PATTERN = r"(?i)^(?:\d+|top|previous|last|random)$"
 
 
@@ -4701,7 +4861,7 @@ def remove_request(
     publish_queue_changed(channel_pk)
     return {"success": True}
 
-@app.post("/channels/{channel}/queue/clear", dependencies=[Depends(require_token)])
+@app.post("/channels/{channel}/queue/clear", dependencies=[Depends(require_channel_key)])
 def clear_queue(channel: str, db: Session = Depends(get_db)):
     channel_pk = get_channel_pk(channel, db)
     sid = current_stream(db, channel_pk)
@@ -4710,7 +4870,10 @@ def clear_queue(channel: str, db: Session = Depends(get_db)):
     publish_queue_changed(channel_pk)
     return {"success": True}
 
-@app.get("/channels/{channel}/queue/random_nonpriority")
+@app.get(
+    "/channels/{channel}/queue/random_nonpriority",
+    dependencies=[Depends(require_channel_key)],
+)
 def random_nonpriority(channel: str, db: Session = Depends(get_db)):
     channel_pk = get_channel_pk(channel, db)
     sid = current_stream(db, channel_pk)
@@ -4734,12 +4897,8 @@ def random_nonpriority(channel: str, db: Session = Depends(get_db)):
         "user": {"id": u.id, "username": u.username}
     }
 
-@app.post("/channels/{channel}/queue/{request_id}/bump_admin", dependencies=[Depends(require_token)])
-def bump_admin(
-    channel: str,
-    request_id: str = Path(..., pattern=REQUEST_IDENTIFIER_PATTERN),
-    db: Session = Depends(get_db),
-):
+@app.post("/channels/{channel}/queue/{request_id}/bump_admin", dependencies=[Depends(require_channel_key)])
+def bump_admin(channel: str, request_id: int, db: Session = Depends(get_db)):
     channel_pk = get_channel_pk(channel, db)
     req = resolve_queue_request(db, channel_pk, request_id)
     req.is_priority = 1
@@ -4751,13 +4910,17 @@ def bump_admin(
     publish_queue_changed(channel_pk)
     return {"success": True}
 
-@app.post("/channels/{channel}/queue/{request_id}/move", dependencies=[Depends(require_token)])
-def move_request(
-    channel: str,
-    payload: MoveRequestIn,
-    request_id: str = Path(..., pattern=REQUEST_IDENTIFIER_PATTERN),
-    db: Session = Depends(get_db),
-):
+def _get_req(db, channel_pk: int, request_id: int):
+    req = db.execute(
+        select(Request).where(and_(Request.id == request_id,
+                                        Request.channel_id == channel_pk))
+    ).scalar_one_or_none()
+    if not req:
+        raise HTTPException(status_code=404, detail="request not found")
+    return req
+
+@app.post("/channels/{channel}/queue/{request_id}/move", dependencies=[Depends(require_channel_key)])
+def move_request(channel: str, request_id: int, payload: MoveRequestIn, db: Session = Depends(get_db)):
     channel_pk = get_channel_pk(channel, db)
     direction = payload.direction
     req = resolve_queue_request(db, channel_pk, request_id)
@@ -4787,12 +4950,8 @@ def move_request(
     publish_queue_changed(channel_pk)
     return {"success": True}
 
-@app.post("/channels/{channel}/queue/{request_id}/skip", dependencies=[Depends(require_token)])
-def skip_request(
-    channel: str,
-    request_id: str = Path(..., pattern=REQUEST_IDENTIFIER_PATTERN),
-    db: Session = Depends(get_db),
-):
+@app.post("/channels/{channel}/queue/{request_id}/skip", dependencies=[Depends(require_channel_key)])
+def skip_request(channel: str, request_id: int, db: Session = Depends(get_db)):
     channel_pk = get_channel_pk(channel, db)
     req = resolve_queue_request(db, channel_pk, request_id)
     # move to bottom of pending
@@ -4810,13 +4969,8 @@ def skip_request(
     publish_queue_changed(channel_pk)
     return {"success": True}
 
-@app.post("/channels/{channel}/queue/{request_id}/priority", dependencies=[Depends(require_token)])
-def set_priority(
-    channel: str,
-    enabled: bool,
-    request_id: str = Path(..., pattern=REQUEST_IDENTIFIER_PATTERN),
-    db: Session = Depends(get_db),
-):
+@app.post("/channels/{channel}/queue/{request_id}/priority", dependencies=[Depends(require_channel_key)])
+def set_priority(channel: str, request_id: int, enabled: bool, db: Session = Depends(get_db)):
     channel_pk = get_channel_pk(channel, db)
     req = resolve_queue_request(db, channel_pk, request_id)
     was_priority = bool(req.is_priority)
@@ -4832,12 +4986,8 @@ def set_priority(
     publish_queue_changed(channel_pk)
     return {"success": True}
 
-@app.post("/channels/{channel}/queue/{request_id}/played", dependencies=[Depends(require_token)])
-def mark_played(
-    channel: str,
-    request_id: str = Path(..., pattern=REQUEST_IDENTIFIER_PATTERN),
-    db: Session = Depends(get_db),
-):
+@app.post("/channels/{channel}/queue/{request_id}/played", dependencies=[Depends(require_channel_key)])
+def mark_played(channel: str, request_id: int, db: Session = Depends(get_db)):
     channel_pk = get_channel_pk(channel, db)
     req = resolve_queue_request(db, channel_pk, request_id)
     req.played = 1
@@ -4860,7 +5010,7 @@ def mark_played(
 # =====================================
 # Routes: Events
 # =====================================
-@app.post("/channels/{channel}/events", response_model=dict, dependencies=[Depends(require_token)])
+@app.post("/channels/{channel}/events", response_model=dict, dependencies=[Depends(require_channel_key)])
 def log_event(channel: str, payload: EventIn, db: Session = Depends(get_db)):
     channel_pk = get_channel_pk(channel, db)
     meta = payload.meta or {}
@@ -4916,13 +5066,13 @@ def list_streams(channel: str, db: Session = Depends(get_db)):
         .all()
     )
 
-@app.post("/channels/{channel}/streams/start", response_model=dict, dependencies=[Depends(require_token)])
+@app.post("/channels/{channel}/streams/start", response_model=dict, dependencies=[Depends(require_channel_key)])
 def start_stream(channel: str, db: Session = Depends(get_db)):
     channel_pk = get_channel_pk(channel, db)
     sid = current_stream(db, channel_pk)
     return {"stream_id": sid}
 
-@app.post("/channels/{channel}/streams/archive", response_model=dict, dependencies=[Depends(require_token)])
+@app.post("/channels/{channel}/streams/archive", response_model=dict, dependencies=[Depends(require_channel_key)])
 def archive_stream(channel: str, db: Session = Depends(get_db)):
     channel_pk = get_channel_pk(channel, db)
     # close current
