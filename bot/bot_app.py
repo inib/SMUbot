@@ -1405,12 +1405,23 @@ class SongBot(commands.Bot):
             )
 
     async def listen_backend(self, ch_name: str) -> None:
+        """Stream authenticated queue updates from the backend for ``ch_name``.
+
+        Dependencies: relies on the shared ``backend`` client session and its
+        configured ``backend.headers`` for authentication.
+        Code customers: backend listener tasks spawned in ``ensure_listener``
+        and reconnection logic expecting live queue events.
+        Variables/origins: ``ch_name`` is the backend channel slug; ``url``
+        derives from ``backend.base`` and the channel path; ``backend.session``
+        is initialized via ``backend.start`` before use.
+        """
+
         url = f"{backend.base}/channels/{ch_name}/queue/stream"
         while True:
             try:
                 if backend.session is None:
                     await backend.start()
-                async with backend.session.get(url) as resp:
+                async with backend.session.get(url, headers=backend.headers) as resp:
                     async for line in resp.content:
                         line = line.decode().strip()
                         if line.startswith('data:'):
@@ -2076,12 +2087,22 @@ class BotService:
             )
 
     async def listen_backend(self, ch_name: str):
+        """Stream authenticated queue updates from the backend for ``ch_name``.
+
+        Dependencies: uses the shared ``backend`` client session and
+        ``backend.headers`` for authentication.
+        Code customers: listener tasks created by queue monitoring routines
+        that expect real-time updates.
+        Variables/origins: ``ch_name`` identifies the backend channel; ``url``
+        uses ``backend.base``; ``backend.session`` comes from ``backend.start``.
+        """
+
         url = f"{backend.base}/channels/{ch_name}/queue/stream"
         while True:
             try:
                 if backend.session is None:
                     await backend.start()
-                async with backend.session.get(url) as resp:
+                async with backend.session.get(url, headers=backend.headers) as resp:
                     async for line in resp.content:
                         line = line.decode().strip()
                         if line.startswith("data:"):
