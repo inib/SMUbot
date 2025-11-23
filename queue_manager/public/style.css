@@ -234,6 +234,20 @@ a:hover{text-decoration:underline}
 .event-entry-type{color:var(--accent)}
 .event-entry-body{margin:0;white-space:pre-wrap;word-break:break-word}
 .overlay-hint{margin-top:18px}
+.streamerbot-notes,.streamerbot-shortcuts{margin-top:12px;display:flex;flex-direction:column;gap:10px;padding:12px;border-radius:12px;border:1px solid #24283b;background:#121423}
+.streamerbot-shortcuts.disabled{opacity:.65}
+.streamerbot-notes label{font-weight:700;color:var(--text)}
+#streamerbot-notes-field{width:100%;min-height:90px;resize:vertical;padding:.6rem .7rem;border-radius:10px;border:1px solid #24283b;background:#0f1117;color:var(--text);font-size:13px}
+#streamerbot-notes-field:focus{outline:2px solid var(--accent);outline-offset:2px}
+.streamerbot-shortcut-list{display:flex;flex-direction:column;gap:10px}
+.streamerbot-shortcut{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:12px;border-radius:10px;border:1px solid #24283b;background:#0f1117}
+.streamerbot-shortcut-info{display:flex;flex-direction:column;gap:6px;flex:1 1 auto;min-width:0}
+.streamerbot-shortcut-title{margin:0;font-size:14px}
+.streamerbot-shortcut-desc{margin:0;color:var(--muted);font-size:12px}
+.streamerbot-shortcut-url{display:block;padding:.4rem .5rem;border-radius:8px;background:#121423;border:1px dashed #24283b;color:var(--text);font-family:"SFMono-Regular","Consolas","Liberation Mono",monospace;font-size:12px;word-break:break-all}
+.streamerbot-shortcut-actions{display:flex;align-items:center;gap:10px}
+.streamerbot-copy{padding:.4rem .75rem;border-radius:8px;border:1px solid var(--accent);background:rgba(139,92,246,0.12);color:var(--accent);cursor:pointer;font-weight:600;font-size:12px;white-space:nowrap}
+.streamerbot-copy:hover{background:rgba(139,92,246,0.2)}
 
 .settings-list{display:flex;flex-direction:column;gap:14px;margin-top:16px}
 .setting-row{display:flex;flex-wrap:wrap;gap:18px;align-items:center;justify-content:space-between;padding:16px;border-radius:12px;border:1px solid #24283b;background:#121423}
