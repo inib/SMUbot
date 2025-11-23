@@ -4754,7 +4754,7 @@ def add_request(channel: str, payload: RequestCreate, db: Session = Depends(get_
 REQUEST_IDENTIFIER_PATTERN = r"(?i)^(?:\d+|top|previous|last|random)$"
 
 
-def resolve_queue_request(db: Session, channel_pk: int, identifier: str) -> Request:
+def resolve_queue_request(db: Session, channel_pk: int, identifier: str | int) -> Request:
     """
     Locate a queue request by numeric id or keyword for a given channel.
 
@@ -4762,7 +4762,7 @@ def resolve_queue_request(db: Session, channel_pk: int, identifier: str) -> Requ
     Code customers: queue update endpoints relying on flexible identifiers.
     Variables origin: ``identifier`` comes from path parameters supplied by clients.
     """
-    normalized = (identifier or "").strip()
+    normalized = str(identifier or "").strip()
     if not normalized:
         raise HTTPException(status_code=404, detail="request not found")
 
@@ -4942,8 +4942,45 @@ def random_nonpriority(channel: str, db: Session = Depends(get_db)):
         "user": {"id": u.id, "username": u.username}
     }
 
-@app.post("/channels/{channel}/queue/{request_id}/bump_admin", dependencies=[Depends(require_channel_key)])
-def bump_admin(channel: str, request_id: int, db: Session = Depends(get_db)):
+def _mark_state_change_no_cache(response: Response) -> None:
+    """Add headers preventing caches from storing mutation responses.
+
+    Dependencies: None beyond the provided `Response` object from FastAPI.
+    Code customers: State-changing GET endpoints call this helper to protect
+    against intermediary caching.
+    Used variables/origin: Mutates the passed-in `response.headers` with
+    `Cache-Control: no-store, max-age=0` and `Pragma: no-cache`.
+    """
+
+    response.headers["Cache-Control"] = "no-store, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+
+
+@app.api_route(
+    "/channels/{channel}/queue/{request_id}/bump_admin",
+    methods=["POST", "GET"],
+    dependencies=[Depends(require_channel_key)],
+)
+def bump_admin(
+    channel: str,
+    request_id: int,
+    request: FastAPIRequest,
+    response: Response,
+    db: Session = Depends(get_db),
+):
+    """Elevate a queue request to admin-driven priority status.
+
+    Dependencies: Channel-key or admin auth via `require_channel_key`, database
+    session from `get_db`, and request resolution through `resolve_queue_request`.
+    Code customers: Queue manager UI actions and automation scripts that
+    immediately promote a request.
+    Used variables/origin: Path `channel` and `request_id` identify the record;
+    `request.method` governs cache headers for GET; `req.priority_source`
+    tracks why the entry became priority.
+    """
+
+    if request.method == "GET":
+        _mark_state_change_no_cache(response)
     channel_pk = get_channel_pk(channel, db)
     req = resolve_queue_request(db, channel_pk, request_id)
     req.is_priority = 1
@@ -4964,10 +5001,51 @@ def _get_req(db, channel_pk: int, request_id: int):
         raise HTTPException(status_code=404, detail="request not found")
     return req
 
-@app.post("/channels/{channel}/queue/{request_id}/move", dependencies=[Depends(require_channel_key)])
-def move_request(channel: str, request_id: int, payload: MoveRequestIn, db: Session = Depends(get_db)):
+@app.api_route(
+    "/channels/{channel}/queue/{request_id}/move",
+    methods=["POST", "GET"],
+    dependencies=[Depends(require_channel_key)],
+)
+def move_request(
+    channel: str,
+    request_id: int,
+    request: FastAPIRequest,
+    response: Response,
+    payload: Optional[MoveRequestIn] = Body(None),
+    direction_query: Optional[str] = Query(
+        None,
+        alias="direction",
+        description="Direction to move the request when using GET: 'up' or 'down'.",
+    ),
+    db: Session = Depends(get_db),
+):
+    """Reorder a queue entry relative to neighbors within the same stream.
+
+    Dependencies: Channel-key/admin auth via `require_channel_key`, database
+    session from `get_db`, and request resolution handled by
+    `resolve_queue_request`.
+    Code customers: Moderator tools invoking bump/skip behaviors and automated
+    bots that adjust ordering.
+    Used variables/origin: Path `channel`/`request_id` locate the entry; body
+    `payload.direction` is honored for POST while `direction_query` is required
+    for GET; `request.method` controls cache headers.
+    """
+
+    if request.method == "GET":
+        _mark_state_change_no_cache(response)
+    allowed_directions = {"up", "down"}
+    if request.method == "GET":
+        direction = direction_query
+    else:
+        direction = payload.direction if payload else None
+    if not direction:
+        raise HTTPException(
+            status_code=400,
+            detail="direction is required (POST body or GET query parameter)",
+        )
+    if direction not in allowed_directions:
+        raise HTTPException(status_code=400, detail="direction must be 'up' or 'down'")
     channel_pk = get_channel_pk(channel, db)
-    direction = payload.direction
     req = resolve_queue_request(db, channel_pk, request_id)
     # find neighbor within same stream
     if direction == "up":
@@ -4995,8 +5073,31 @@ def move_request(channel: str, request_id: int, payload: MoveRequestIn, db: Sess
     publish_queue_changed(channel_pk)
     return {"success": True}
 
-@app.post("/channels/{channel}/queue/{request_id}/skip", dependencies=[Depends(require_channel_key)])
-def skip_request(channel: str, request_id: int, db: Session = Depends(get_db)):
+@app.api_route(
+    "/channels/{channel}/queue/{request_id}/skip",
+    methods=["POST", "GET"],
+    dependencies=[Depends(require_channel_key)],
+)
+def skip_request(
+    channel: str,
+    request_id: int,
+    request: FastAPIRequest,
+    response: Response,
+    db: Session = Depends(get_db),
+):
+    """Send a pending request to the back of the queue for the current stream.
+
+    Dependencies: Auth via `require_channel_key`, DB session from `get_db`, and
+    queue lookup through `resolve_queue_request`.
+    Code customers: Moderator skip controls and automated workflows that defer a
+    request.
+    Used variables/origin: Path parameters provide the target request; cache
+    headers applied when `request.method` is GET; `max_pos` is derived from
+    pending request ordering.
+    """
+
+    if request.method == "GET":
+        _mark_state_change_no_cache(response)
     channel_pk = get_channel_pk(channel, db)
     req = resolve_queue_request(db, channel_pk, request_id)
     # move to bottom of pending
@@ -5014,13 +5115,50 @@ def skip_request(channel: str, request_id: int, db: Session = Depends(get_db)):
     publish_queue_changed(channel_pk)
     return {"success": True}
 
-@app.post("/channels/{channel}/queue/{request_id}/priority", dependencies=[Depends(require_channel_key)])
-def set_priority(channel: str, request_id: int, enabled: bool, db: Session = Depends(get_db)):
+@app.api_route(
+    "/channels/{channel}/queue/{request_id}/priority",
+    methods=["POST", "GET"],
+    dependencies=[Depends(require_channel_key)],
+)
+def set_priority(
+    channel: str,
+    request_id: int,
+    request: FastAPIRequest,
+    response: Response,
+    enabled_body: Optional[bool] = Body(None, embed=True),
+    enabled_query: Optional[bool] = Query(
+        None, alias="enabled", description="Whether to enable priority when using GET"
+    ),
+    db: Session = Depends(get_db),
+):
+    """Toggle the priority flag for a queue request.
+
+    Dependencies: Channel-key/admin auth via `require_channel_key`, DB session
+    via `get_db`, and request resolution with `resolve_queue_request`.
+    Code customers: Queue UI toggles, chat bot commands, and scheduled scripts
+    that adjust priority eligibility.
+    Used variables/origin: Path params target the request; POST primarily uses
+    `enabled_body` (with query fallback) while GET requires `enabled_query`;
+    `request.method` gates cache headers for GET responses.
+    """
+
+    if request.method == "GET":
+        _mark_state_change_no_cache(response)
+    enabled_value: Optional[bool]
+    if request.method == "GET":
+        enabled_value = enabled_query
+    else:
+        enabled_value = enabled_body if enabled_body is not None else enabled_query
+    if enabled_value is None:
+        raise HTTPException(
+            status_code=400,
+            detail="enabled is required as a boolean (body for POST, query for GET)",
+        )
     channel_pk = get_channel_pk(channel, db)
     req = resolve_queue_request(db, channel_pk, request_id)
     was_priority = bool(req.is_priority)
     # optional: refund or spend points can be inserted here
-    req.is_priority = 1 if enabled else 0
+    req.is_priority = 1 if enabled_value else 0
     if req.is_priority and not req.priority_source:
         req.priority_source = 'admin'
     db.commit()
@@ -5031,8 +5169,32 @@ def set_priority(channel: str, request_id: int, enabled: bool, db: Session = Dep
     publish_queue_changed(channel_pk)
     return {"success": True}
 
-@app.post("/channels/{channel}/queue/{request_id}/played", dependencies=[Depends(require_channel_key)])
-def mark_played(channel: str, request_id: int, db: Session = Depends(get_db)):
+@app.api_route(
+    "/channels/{channel}/queue/{request_id}/played",
+    methods=["POST", "GET"],
+    dependencies=[Depends(require_channel_key)],
+)
+def mark_played(
+    channel: str,
+    request_id: int,
+    request: FastAPIRequest,
+    response: Response,
+    db: Session = Depends(get_db),
+):
+    """Mark a queue entry as played and broadcast the next-up entry.
+
+    Dependencies: Channel-key/admin auth enforced by `require_channel_key`, DB
+    session via `get_db`, and request resolution handled by
+    `resolve_queue_request`.
+    Code customers: Playback UIs, overlays, and automation that finalize song
+    requests.
+    Used variables/origin: Path parameters locate the request; GET responses
+    receive cache-busting headers; `req.played` persists the state change and
+    `up_next` is derived via `_next_pending_request`.
+    """
+
+    if request.method == "GET":
+        _mark_state_change_no_cache(response)
     channel_pk = get_channel_pk(channel, db)
     req = resolve_queue_request(db, channel_pk, request_id)
     req.played = 1
