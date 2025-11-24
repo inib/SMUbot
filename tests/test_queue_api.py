@@ -505,3 +505,129 @@ class QueueApiTests(unittest.TestCase):
         finally:
             db.close()
 
+    def test_next_nonpriority_handles_empty_queue(self) -> None:
+        db = backend_app.SessionLocal()
+        try:
+            channel_name, _ = _seed_queue_fixture(db)
+            base_request = db.query(backend_app.Request).first()
+            assert base_request
+            base_request.played = 1
+            base_request.is_priority = 1
+            db.commit()
+        finally:
+            db.close()
+
+        response = self._client.get(
+            f"/channels/{channel_name}/queue/next_nonpriority",
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertIsNone(response.json())
+
+    def test_next_nonpriority_prefers_bumped_entries(self) -> None:
+        db = backend_app.SessionLocal()
+        try:
+            channel_name, _ = _seed_queue_fixture(db)
+            channel = (
+                db.query(backend_app.ActiveChannel)
+                .filter_by(channel_name=channel_name)
+                .one()
+            )
+            stream = db.query(backend_app.StreamSession).filter_by(channel_id=channel.id).one()
+            song = db.query(backend_app.Song).filter_by(channel_id=channel.id).first()
+            user = db.query(backend_app.User).filter_by(channel_id=channel.id).first()
+            assert song and user
+            bumped_request = _add_request(
+                db,
+                channel_id=channel.id,
+                stream_id=stream.id,
+                song_id=song.id,
+                user_id=user.id,
+                position=5,
+                bumped=1,
+            )
+            bumped_request_id = bumped_request.id
+            db.commit()
+        finally:
+            db.close()
+
+        response = self._client.get(
+            f"/channels/{channel_name}/queue/next_nonpriority",
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertIsNotNone(payload)
+        assert payload
+        self.assertEqual(payload["request"]["id"], bumped_request_id)
+        self.assertEqual(payload["request"]["bumped"], 1)
+
+    def test_queue_stats_count_variants(self) -> None:
+        db = backend_app.SessionLocal()
+        try:
+            channel_name, _ = _seed_queue_fixture(db)
+            channel = (
+                db.query(backend_app.ActiveChannel)
+                .filter_by(channel_name=channel_name)
+                .one()
+            )
+            stream = db.query(backend_app.StreamSession).filter_by(channel_id=channel.id).one()
+            song = db.query(backend_app.Song).filter_by(channel_id=channel.id).first()
+            user = db.query(backend_app.User).filter_by(channel_id=channel.id).first()
+            assert song and user
+            _add_request(
+                db,
+                channel_id=channel.id,
+                stream_id=stream.id,
+                song_id=song.id,
+                user_id=user.id,
+                position=2,
+                is_priority=1,
+            )
+            _add_request(
+                db,
+                channel_id=channel.id,
+                stream_id=stream.id,
+                song_id=song.id,
+                user_id=user.id,
+                position=3,
+                played=1,
+            )
+            db.commit()
+        finally:
+            db.close()
+
+        stats_response = self._client.get(
+            f"/channels/{channel_name}/queue/stats",
+        )
+        self.assertEqual(stats_response.status_code, 200, stats_response.text)
+        stats = stats_response.json()
+        self.assertEqual(stats["total_unplayed"], 2)
+        self.assertEqual(stats["total_priority"], 1)
+        self.assertEqual(stats["total_nonpriority"], 1)
+        self.assertEqual(stats["total_played"], 1)
+
+        priority_only = self._client.get(
+            f"/channels/{channel_name}/queue/stats/total_priority",
+        )
+        self.assertEqual(priority_only.status_code, 200, priority_only.text)
+        self.assertEqual(priority_only.json(), 1)
+
+        nonpriority_only = self._client.get(
+            f"/channels/{channel_name}/queue/stats/total_nonpriority",
+        )
+        self.assertEqual(nonpriority_only.status_code, 200, nonpriority_only.text)
+        self.assertEqual(nonpriority_only.json(), 1)
+
+        unplayed_only = self._client.get(
+            f"/channels/{channel_name}/queue/stats/total_unplayed",
+        )
+        self.assertEqual(unplayed_only.status_code, 200, unplayed_only.text)
+        self.assertEqual(unplayed_only.json(), 2)
+
+        played_only = self._client.get(
+            f"/channels/{channel_name}/queue/stats/total_played",
+        )
+        self.assertEqual(played_only.status_code, 200, played_only.text)
+        self.assertEqual(played_only.json(), 1)
+

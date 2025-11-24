@@ -1498,6 +1498,49 @@ def _next_pending_request(
     return _serialize_request_event(db, next_req)
 
 
+def _next_nonpriority_request(
+    db: Session, channel_pk: int, stream_id: Optional[int]
+) -> Optional[Dict[str, Any]]:
+    """Return the next unplayed non-priority request ordered by bumps and position.
+
+    Dependencies: Relies on an active SQLAlchemy session and current stream identifier
+    supplied by `current_stream`. Code customers: public queue readers needing a
+    predictable "next up" view without exposing priority-only selections. Used
+    variables/origin: Filters `Request` rows scoped to `channel_pk` and `stream_id`
+    where `played==0` and `is_priority==0`, then joins `Song` and `User` for
+    serialization.
+    """
+
+    if stream_id is None:
+        return None
+    row = (
+        db.query(Request, Song, User)
+        .join(Song, Song.id == Request.song_id)
+        .join(User, User.id == Request.user_id)
+        .filter(
+            Request.channel_id == channel_pk,
+            Request.stream_id == stream_id,
+            Request.played == 0,
+            Request.is_priority == 0,
+        )
+        .order_by(
+            Request.bumped.desc(),
+            Request.position.asc(),
+            Request.request_time.asc(),
+            Request.id.asc(),
+        )
+        .first()
+    )
+    if not row:
+        return None
+    req, song, user = row
+    return {
+        "request": RequestOut.model_validate(req).model_dump(),
+        "song": SongOut.model_validate(song).model_dump(),
+        "user": UserOut.model_validate(user).model_dump(),
+    }
+
+
 def _serialize_settings_event(settings: ChannelSettings) -> Dict[str, Any]:
     return {
         "max_requests_per_user": settings.max_requests_per_user,
@@ -4941,6 +4984,151 @@ def random_nonpriority(channel: str, db: Session = Depends(get_db)):
         "song": {"id": s.id, "artist": s.artist, "title": s.title},
         "user": {"id": u.id, "username": u.username}
     }
+
+
+@app.get(
+    "/channels/{channel}/queue/next_nonpriority",
+)
+def next_nonpriority(channel: str, db: Session = Depends(get_db)):
+    """Return the next queued non-priority request, preferring bumped entries first.
+
+    Dependencies: Opens a database session via `get_db` and consults
+    `current_stream` for the active stream id. Code customers: overlays or bots
+    that need a deterministic next-up item without requiring authentication.
+    Used variables/origin: Resolves `channel_pk` from the path, filters the
+    queue by `played==0` and `is_priority==0`, and orders by `bumped`,
+    `position`, then `request_time` to surface bumped picks.
+    """
+
+    channel_pk = get_channel_pk(channel, db)
+    sid = current_stream(db, channel_pk)
+    return _next_nonpriority_request(db, channel_pk, sid)
+
+
+def _queue_stats_for_stream(db: Session, channel_pk: int, stream_id: Optional[int]) -> Dict[str, int]:
+    """Compute queue counters for the given channel stream without authentication.
+
+    Dependencies: SQLAlchemy session scoped to the app's engine. Code customers:
+    public statistics endpoints summarizing the active queue state. Used
+    variables/origin: Filters `Request` rows by `channel_pk` and `stream_id`,
+    counting played/unplayed and priority/non-priority subsets. When no stream
+    id exists, returns zeroed counters.
+    """
+
+    if stream_id is None:
+        return {
+            "total_unplayed": 0,
+            "total_priority": 0,
+            "total_nonpriority": 0,
+            "total_played": 0,
+        }
+
+    base_query = db.query(Request).filter(
+        Request.channel_id == channel_pk, Request.stream_id == stream_id
+    )
+    total_unplayed = base_query.filter(Request.played == 0).count()
+    total_priority = base_query.filter(Request.played == 0, Request.is_priority == 1).count()
+    total_nonpriority = base_query.filter(Request.played == 0, Request.is_priority == 0).count()
+    total_played = base_query.filter(Request.played == 1).count()
+    return {
+        "total_unplayed": total_unplayed,
+        "total_priority": total_priority,
+        "total_nonpriority": total_nonpriority,
+        "total_played": total_played,
+    }
+
+
+@app.get(
+    "/channels/{channel}/queue/stats",
+)
+@app.get(
+    "/channels/{channel}/queue/queue_stats",
+)
+def queue_stats(channel: str, db: Session = Depends(get_db)):
+    """Return aggregate queue statistics for the active stream (public access).
+
+    Dependencies: Uses the shared database session from `get_db` and the
+    `current_stream` helper to scope counts. Code customers: dashboards wanting
+    a single call for queue totals. Used variables/origin: Resolves `channel_pk`
+    and forwards to `_queue_stats_for_stream` to gather counts for unplayed and
+    played requests split by priority.
+    """
+
+    channel_pk = get_channel_pk(channel, db)
+    sid = current_stream(db, channel_pk)
+    return _queue_stats_for_stream(db, channel_pk, sid)
+
+
+@app.get(
+    "/channels/{channel}/queue/stats/total_priority",
+)
+def queue_total_priority(channel: str, db: Session = Depends(get_db)):
+    """Expose only the unplayed priority count for the active stream (public).
+
+    Dependencies: Shared FastAPI session dependency `get_db` plus `current_stream`.
+    Code customers: lightweight widgets that only need the priority backlog size.
+    Used variables/origin: Path `channel` resolves to `channel_pk`, which scopes
+    `_queue_stats_for_stream` to return integer totals.
+    """
+
+    channel_pk = get_channel_pk(channel, db)
+    sid = current_stream(db, channel_pk)
+    stats = _queue_stats_for_stream(db, channel_pk, sid)
+    return stats["total_priority"]
+
+
+@app.get(
+    "/channels/{channel}/queue/stats/total_nonpriority",
+)
+def queue_total_nonpriority(channel: str, db: Session = Depends(get_db)):
+    """Expose only the unplayed non-priority count for the active stream (public).
+
+    Dependencies: Database session from `get_db` and active stream lookup via
+    `current_stream`. Code customers: counters that highlight the non-priority
+    backlog size. Used variables/origin: Resolves `channel_pk` from the path and
+    reads non-priority totals from `_queue_stats_for_stream`.
+    """
+
+    channel_pk = get_channel_pk(channel, db)
+    sid = current_stream(db, channel_pk)
+    stats = _queue_stats_for_stream(db, channel_pk, sid)
+    return stats["total_nonpriority"]
+
+
+@app.get(
+    "/channels/{channel}/queue/stats/total_unplayed",
+)
+def queue_total_unplayed(channel: str, db: Session = Depends(get_db)):
+    """Expose only the total unplayed queue count for the active stream (public).
+
+    Dependencies: Database session via `get_db` and stream scoping via
+    `current_stream`. Code customers: widgets needing the combined pending
+    length. Used variables/origin: Resolves `channel_pk` then reads the
+    aggregated unplayed count from `_queue_stats_for_stream`.
+    """
+
+    channel_pk = get_channel_pk(channel, db)
+    sid = current_stream(db, channel_pk)
+    stats = _queue_stats_for_stream(db, channel_pk, sid)
+    return stats["total_unplayed"]
+
+
+@app.get(
+    "/channels/{channel}/queue/stats/total_played",
+)
+def queue_total_played(channel: str, db: Session = Depends(get_db)):
+    """Expose only the played request count for the active stream (public).
+
+    Dependencies: Shares the `get_db` session and `current_stream` lookup.
+    Code customers: analytics views that chart how many songs have been played.
+    Used variables/origin: Extracts `channel_pk` from the path and pulls the
+    played total via `_queue_stats_for_stream`.
+    """
+
+    channel_pk = get_channel_pk(channel, db)
+    sid = current_stream(db, channel_pk)
+    stats = _queue_stats_for_stream(db, channel_pk, sid)
+    return stats["total_played"]
 
 def _mark_state_change_no_cache(response: Response) -> None:
     """Add headers preventing caches from storing mutation responses.
