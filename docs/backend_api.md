@@ -134,6 +134,12 @@ This document summarizes the REST endpoints exposed by `backend_app.py`.
 | DELETE | `/channels/{channel}/queue/{request_id}` | Remove a request (channel key or admin). |
 | POST | `/channels/{channel}/queue/clear` | Remove all pending requests for the current stream (channel key or admin). |
 | GET | `/channels/{channel}/queue/random_nonpriority` | Fetch a random non-priority request from the queue (public read; no auth required). |
+| GET | `/channels/{channel}/queue/next_nonpriority` | Fetch the next non-priority pending request, preferring bumped entries (public read; no auth required). |
+| GET | `/channels/{channel}/queue/stats` | Retrieve aggregate queue counters for the active stream (public read; no auth required). |
+| GET | `/channels/{channel}/queue/stats/total_priority` | Return only the unplayed priority request count for the active stream (public read; no auth required). |
+| GET | `/channels/{channel}/queue/stats/total_nonpriority` | Return only the unplayed non-priority request count for the active stream (public read; no auth required). |
+| GET | `/channels/{channel}/queue/stats/total_unplayed` | Return only the total unplayed request count for the active stream (public read; no auth required). |
+| GET | `/channels/{channel}/queue/stats/total_played` | Return only the played request count for the active stream (public read; no auth required). |
 | POST/GET | `/channels/{channel}/queue/{request_id}/bump_admin` | Force a request to priority status (channel key or admin). |
 | POST/GET | `/channels/{channel}/queue/{request_id}/move` | Move a request up or down in the queue (channel key or admin). |
 | POST/GET | `/channels/{channel}/queue/{request_id}/skip` | Send a request to the end of the queue (channel key or admin). |
@@ -148,6 +154,25 @@ This document summarizes the REST endpoints exposed by `backend_app.py`.
   - Joins request rows with `Song` and `User` models and enriches users with VIP/subscriber status when available.
 - **Response**: Array of `{ "request": { "id", "song_id", "user_id", "request_time", "is_priority", "bumped", "played", "priority_source" }, "song": { "id", "artist", "title", "youtube_link", ... }, "user": { "id", "twitch_id", "username", "is_vip", "is_subscriber", "subscriber_tier" } }`.
 - **Use cases**: Drive moderator dashboards or overlay widgets that need a complete view of the queue without issuing multiple lookups per request.
+
+### `/channels/{channel}/queue/next_nonpriority`
+- **Authentication**: None; public access.
+- **Behavior**
+  - Finds the active stream for the channel and filters pending requests where `is_priority == 0` and `played == 0`.
+  - Orders by `bumped` descending, then manual `position`, `request_time`, and `id` to surface bumped picks first.
+  - Serializes request, song, and user payloads consistent with queue listings.
+- **Response**: Either `null` when no eligible request exists or `{ "request": RequestOut, "song": SongOut, "user": UserOut }`.
+
+### `/channels/{channel}/queue/stats` and `/channels/{channel}/queue/stats/total_*`
+- **Authentication**: None; public access.
+- **Behavior**
+  - Scopes counts to the active stream and returns:
+    - `total_unplayed`: Number of pending requests regardless of priority.
+    - `total_priority`: Pending requests where `is_priority == 1`.
+    - `total_nonpriority`: Pending requests where `is_priority == 0`.
+    - `total_played`: Requests already marked played for the stream.
+  - `/stats/total_priority`, `/stats/total_nonpriority`, `/stats/total_unplayed`, `/stats/total_played` return the individual integers only.
+- **Response**: `/stats` returns `{ "total_unplayed", "total_priority", "total_nonpriority", "total_played" }`; the `/total_*` routes return an integer body.
 
 ## YouTube Music
 | Method | Path | Description |
