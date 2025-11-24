@@ -135,6 +135,8 @@ This document summarizes the REST endpoints exposed by `backend_app.py`.
 | POST | `/channels/{channel}/queue/clear` | Remove all pending requests for the current stream (channel key or admin). |
 | GET | `/channels/{channel}/queue/random_nonpriority` | Fetch a random non-priority request from the queue (public read; no auth required). |
 | GET | `/channels/{channel}/queue/next_nonpriority` | Fetch the next non-priority pending request, preferring bumped entries (public read; no auth required). |
+| GET | `/channels/{channel}/queue/next_priority` | Fetch the next priority pending request, preferring bumped entries (public read; no auth required). |
+| GET | `/channels/{channel}/queue/next_song` | Fetch the next song, choosing priority first then non-priority (public read; no auth required). |
 | GET | `/channels/{channel}/queue/stats` | Retrieve aggregate queue counters for the active stream (public read; no auth required). |
 | GET | `/channels/{channel}/queue/stats/total_priority` | Return only the unplayed priority request count for the active stream (public read; no auth required). |
 | GET | `/channels/{channel}/queue/stats/total_nonpriority` | Return only the unplayed non-priority request count for the active stream (public read; no auth required). |
@@ -160,6 +162,22 @@ This document summarizes the REST endpoints exposed by `backend_app.py`.
 - **Behavior**
   - Finds the active stream for the channel and filters pending requests where `is_priority == 0` and `played == 0`.
   - Orders by `bumped` descending, then manual `position`, `request_time`, and `id` to surface bumped picks first.
+  - Serializes request, song, and user payloads consistent with queue listings.
+- **Response**: Either `null` when no eligible request exists or `{ "request": RequestOut, "song": SongOut, "user": UserOut }`.
+
+### `/channels/{channel}/queue/next_priority`
+- **Authentication**: None; public access.
+- **Behavior**
+  - Finds the active stream for the channel and filters pending requests where `is_priority == 1` and `played == 0`.
+  - Orders by `bumped` descending, then manual `position`, `request_time`, and `id` to keep bumped priority picks ahead.
+  - Serializes request, song, and user payloads consistent with queue listings.
+- **Response**: Either `null` when no eligible request exists or `{ "request": RequestOut, "song": SongOut, "user": UserOut }`.
+
+### `/channels/{channel}/queue/next_song`
+- **Authentication**: None; public access.
+- **Behavior**
+  - Resolves the active stream, returns the next priority request when available, otherwise falls back to the next non-priority item.
+  - Uses the same bumped-aware ordering as the dedicated priority/non-priority routes.
   - Serializes request, song, and user payloads consistent with queue listings.
 - **Response**: Either `null` when no eligible request exists or `{ "request": RequestOut, "song": SongOut, "user": UserOut }`.
 

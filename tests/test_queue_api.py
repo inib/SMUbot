@@ -562,6 +562,102 @@ class QueueApiTests(unittest.TestCase):
         self.assertEqual(payload["request"]["id"], bumped_request_id)
         self.assertEqual(payload["request"]["bumped"], 1)
 
+    def test_next_priority_prefers_bumped_entries(self) -> None:
+        db = backend_app.SessionLocal()
+        try:
+            channel_name, _ = _seed_queue_fixture(db)
+            channel = (
+                db.query(backend_app.ActiveChannel)
+                .filter_by(channel_name=channel_name)
+                .one()
+            )
+            stream = db.query(backend_app.StreamSession).filter_by(channel_id=channel.id).one()
+            song = db.query(backend_app.Song).filter_by(channel_id=channel.id).first()
+            user = db.query(backend_app.User).filter_by(channel_id=channel.id).first()
+            assert song and user
+            priority_request = _add_request(
+                db,
+                channel_id=channel.id,
+                stream_id=stream.id,
+                song_id=song.id,
+                user_id=user.id,
+                position=2,
+                is_priority=1,
+                bumped=1,
+            )
+            priority_request_id = priority_request.id
+            db.commit()
+        finally:
+            db.close()
+
+        response = self._client.get(
+            f"/channels/{channel_name}/queue/next_priority",
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertIsNotNone(payload)
+        assert payload
+        self.assertEqual(payload["request"]["id"], priority_request_id)
+        self.assertEqual(payload["request"]["bumped"], 1)
+
+    def test_next_song_prefers_priority_then_nonpriority(self) -> None:
+        db = backend_app.SessionLocal()
+        try:
+            channel_name, _ = _seed_queue_fixture(db)
+            channel = (
+                db.query(backend_app.ActiveChannel)
+                .filter_by(channel_name=channel_name)
+                .one()
+            )
+            stream = db.query(backend_app.StreamSession).filter_by(channel_id=channel.id).one()
+            song = db.query(backend_app.Song).filter_by(channel_id=channel.id).first()
+            user = db.query(backend_app.User).filter_by(channel_id=channel.id).first()
+            assert song and user
+            non_priority_request = db.query(backend_app.Request).first()
+            assert non_priority_request
+            non_priority_request_id = non_priority_request.id
+            priority_request = _add_request(
+                db,
+                channel_id=channel.id,
+                stream_id=stream.id,
+                song_id=song.id,
+                user_id=user.id,
+                position=5,
+                is_priority=1,
+            )
+            priority_request_id = priority_request.id
+            db.commit()
+        finally:
+            db.close()
+
+        response = self._client.get(
+            f"/channels/{channel_name}/queue/next_song",
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        first_payload = response.json()
+        assert first_payload
+        self.assertEqual(first_payload["request"]["id"], priority_request_id)
+
+        db = backend_app.SessionLocal()
+        try:
+            base = db.get(backend_app.Request, priority_request_id)
+            assert base
+            base.played = 1
+            db.commit()
+        finally:
+            db.close()
+
+        response = self._client.get(
+            f"/channels/{channel_name}/queue/next_song",
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        second_payload = response.json()
+        assert second_payload
+        self.assertEqual(second_payload["request"]["id"], non_priority_request_id)
+
     def test_queue_stats_count_variants(self) -> None:
         db = backend_app.SessionLocal()
         try:

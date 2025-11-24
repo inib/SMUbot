@@ -1541,6 +1541,48 @@ def _next_nonpriority_request(
     }
 
 
+def _next_priority_request(
+    db: Session, channel_pk: int, stream_id: Optional[int]
+) -> Optional[Dict[str, Any]]:
+    """Return the next unplayed priority request ordered by bumps and position.
+
+    Dependencies: Requires an active SQLAlchemy session and stream identifier
+    from `current_stream`. Code customers: public queue readers that surface the
+    next VIP pick without authentication. Used variables/origin: Filters
+    `Request` rows by `channel_pk` and `stream_id` where `played==0` and
+    `is_priority==1`, joining `Song` and `User` to serialize the response.
+    """
+
+    if stream_id is None:
+        return None
+    row = (
+        db.query(Request, Song, User)
+        .join(Song, Song.id == Request.song_id)
+        .join(User, User.id == Request.user_id)
+        .filter(
+            Request.channel_id == channel_pk,
+            Request.stream_id == stream_id,
+            Request.played == 0,
+            Request.is_priority == 1,
+        )
+        .order_by(
+            Request.bumped.desc(),
+            Request.position.asc(),
+            Request.request_time.asc(),
+            Request.id.asc(),
+        )
+        .first()
+    )
+    if not row:
+        return None
+    req, song, user = row
+    return {
+        "request": RequestOut.model_validate(req).model_dump(),
+        "song": SongOut.model_validate(song).model_dump(),
+        "user": UserOut.model_validate(user).model_dump(),
+    }
+
+
 def _serialize_settings_event(settings: ChannelSettings) -> Dict[str, Any]:
     return {
         "max_requests_per_user": settings.max_requests_per_user,
@@ -5003,6 +5045,45 @@ def next_nonpriority(channel: str, db: Session = Depends(get_db)):
     channel_pk = get_channel_pk(channel, db)
     sid = current_stream(db, channel_pk)
     return _next_nonpriority_request(db, channel_pk, sid)
+
+
+@app.get(
+    "/channels/{channel}/queue/next_priority",
+)
+def next_priority(channel: str, db: Session = Depends(get_db)):
+    """Return the next queued priority request, honoring bumped entries first.
+
+    Dependencies: Uses the shared database session from `get_db` and active
+    stream resolution via `current_stream`. Code customers: public overlays
+    surfacing VIP or priority picks. Used variables/origin: Resolves
+    `channel_pk` from the path and filters pending requests where
+    `played==0` and `is_priority==1`, ordering by `bumped` then position and
+    request time.
+    """
+
+    channel_pk = get_channel_pk(channel, db)
+    sid = current_stream(db, channel_pk)
+    return _next_priority_request(db, channel_pk, sid)
+
+
+@app.get(
+    "/channels/{channel}/queue/next_song",
+)
+def next_song(channel: str, db: Session = Depends(get_db)):
+    """Return the next queued song, preferring priority picks when available.
+
+    Dependencies: Shares the `get_db` database session and `current_stream`
+    lookup. Code customers: widgets that need a single endpoint for the next
+    song regardless of priority status. Used variables/origin: Resolves
+    `channel_pk` from the path, attempts `_next_priority_request`, and falls
+    back to `_next_nonpriority_request` when no priority items remain.
+    """
+
+    channel_pk = get_channel_pk(channel, db)
+    sid = current_stream(db, channel_pk)
+    return _next_priority_request(db, channel_pk, sid) or _next_nonpriority_request(
+        db, channel_pk, sid
+    )
 
 
 def _queue_stats_for_stream(db: Session, channel_pk: int, stream_id: Optional[int]) -> Dict[str, int]:
