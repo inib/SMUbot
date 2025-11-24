@@ -4963,9 +4963,9 @@ def _mark_state_change_no_cache(response: Response) -> None:
 )
 def bump_admin(
     channel: str,
-    request_id: str = Path(..., pattern=REQUEST_IDENTIFIER_PATTERN),
     request: FastAPIRequest,
     response: Response,
+    request_id: str = Path(..., pattern=REQUEST_IDENTIFIER_PATTERN),
     db: Session = Depends(get_db),
 ):
     """Elevate a queue request to admin-driven priority status.
@@ -4975,8 +4975,9 @@ def bump_admin(
     Code customers: Queue manager UI actions and automation scripts that
     immediately promote a request.
     Used variables/origin: Path `channel` and `request_id` identify the record;
-    `request.method` governs cache headers for GET; `req.priority_source`
-    tracks why the entry became priority.
+    `request.method` governs cache headers for GET; the injected `response`
+    carries cache-busting headers when needed; `req.priority_source` tracks why
+    the entry became priority.
     """
 
     if request.method == "GET":
@@ -5011,9 +5012,9 @@ def _get_req(db, channel_pk: int, request_id: str | int):
 )
 def move_request(
     channel: str,
-    request_id: str = Path(..., pattern=REQUEST_IDENTIFIER_PATTERN),
     request: FastAPIRequest,
     response: Response,
+    request_id: str = Path(..., pattern=REQUEST_IDENTIFIER_PATTERN),
     payload: Optional[MoveRequestIn] = Body(None),
     direction_query: Optional[str] = Query(
         None,
@@ -5031,7 +5032,8 @@ def move_request(
     bots that adjust ordering.
     Used variables/origin: Path `channel`/`request_id` locate the entry; body
     `payload.direction` is honored for POST while `direction_query` is required
-    for GET; `request.method` controls cache headers.
+    for GET; `request.method` controls cache headers, with the injected
+    `response` carrying the cache-busting headers.
     """
 
     if request.method == "GET":
@@ -5083,9 +5085,9 @@ def move_request(
 )
 def skip_request(
     channel: str,
-    request_id: str = Path(..., pattern=REQUEST_IDENTIFIER_PATTERN),
     request: FastAPIRequest,
     response: Response,
+    request_id: str = Path(..., pattern=REQUEST_IDENTIFIER_PATTERN),
     db: Session = Depends(get_db),
 ):
     """Send a pending request to the back of the queue for the current stream.
@@ -5125,9 +5127,9 @@ def skip_request(
 )
 def set_priority(
     channel: str,
-    request_id: str = Path(..., pattern=REQUEST_IDENTIFIER_PATTERN),
     request: FastAPIRequest,
     response: Response,
+    request_id: str = Path(..., pattern=REQUEST_IDENTIFIER_PATTERN),
     enabled_body: Optional[bool] = Body(None, embed=True),
     enabled_query: Optional[bool] = Query(
         None, alias="enabled", description="Whether to enable priority when using GET"
@@ -5142,7 +5144,8 @@ def set_priority(
     that adjust priority eligibility.
     Used variables/origin: Path params target the request; POST primarily uses
     `enabled_body` (with query fallback) while GET requires `enabled_query`;
-    `request.method` gates cache headers for GET responses.
+    `request.method` gates cache headers applied to the injected `response` for
+    GET responses.
     """
 
     if request.method == "GET":
@@ -5179,9 +5182,9 @@ def set_priority(
 )
 def mark_played(
     channel: str,
-    request_id: str = Path(..., pattern=REQUEST_IDENTIFIER_PATTERN),
     request: FastAPIRequest,
     response: Response,
+    request_id: str = Path(..., pattern=REQUEST_IDENTIFIER_PATTERN),
     db: Session = Depends(get_db),
 ):
     """Mark a queue entry as played and broadcast the next-up entry.
