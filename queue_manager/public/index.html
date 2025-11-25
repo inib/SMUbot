@@ -193,9 +193,13 @@
           <div id="streamerbot-shortcuts" class="streamerbot-shortcuts">
             <div class="section-header">
               <h3 class="section-title">streamer.bot API shortcuts</h3>
-              <span id="streamerbot-shortcuts-status" class="muted">Select a channel to build API links.</span>
+              <div class="streamerbot-shortcuts-meta">
+                <button id="streamerbot-load-key" type="button">Load channel key</button>
+                <span id="streamerbot-shortcuts-status" class="muted">Select a channel to build API links. Auth-only endpoints will include a placeholder key until you load it.</span>
+              </div>
             </div>
             <div id="streamerbot-shortcut-list" class="streamerbot-shortcut-list"></div>
+            <p id="streamerbot-shortcuts-footer" class="muted streamerbot-shortcuts-footer"></p>
           </div>
         </div>
 
