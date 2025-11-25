@@ -192,6 +192,12 @@ This document summarizes the REST endpoints exposed by `backend_app.py`.
   - `/stats/total_priority`, `/stats/total_nonpriority`, `/stats/total_unplayed`, `/stats/total_played` return the individual integers only.
 - **Response**: `/stats` returns `{ "total_unplayed", "total_priority", "total_nonpriority", "total_played" }`; the `/total_*` routes return an integer body.
 
+### streamer.bot automation shortcuts
+- **Context**: The Queue Manager UI surfaces streamer.bot-friendly shortcut links for quick HTTP actions.
+- **Endpoints covered**: `queue/random_nonpriority`, `queue/next_nonpriority`, `queue/next_priority`, `queue/next_song`, `queue/stats`, `queue/stats/total_priority`, `queue/stats/total_nonpriority`, `queue/stats/total_unplayed`, `queue/stats/total_played`, `queue/{request_id}/bump_admin`, `queue/{request_id}/move`, `queue/{request_id}/skip`, `queue/{request_id}/priority`, `queue/{request_id}/played`, and `queue/full`.
+- **Channel key usage**: Only the request mutation endpoints (`bump_admin`, `move`, `skip`, `priority`, `played`) require `channel_key=<key>` or `X-Channel-Key`. The lookup and stats endpoints intentionally omit the key for public overlays.
+- **Response shapes**: The lookup routes return `{ "request", "song", "user" }` payloads (or arrays of those for `/queue/full`), while stats routes return integer counts. Mutation routes echo the updated request payload for confirmation.
+
 ## YouTube Music
 | Method | Path | Description |
 |--------|------|-------------|

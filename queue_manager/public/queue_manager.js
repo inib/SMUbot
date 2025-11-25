@@ -186,6 +186,8 @@ const streamerbotNotesField = qs('streamerbot-notes-field');
 const streamerbotShortcutsEl = qs('streamerbot-shortcuts');
 const streamerbotShortcutList = qs('streamerbot-shortcut-list');
 const streamerbotShortcutStatus = qs('streamerbot-shortcuts-status');
+const streamerbotLoadKeyBtn = qs('streamerbot-load-key');
+const streamerbotShortcutFooter = qs('streamerbot-shortcuts-footer');
 
 const channelKeyCard = qs('channel-key-card');
 const channelKeySecretEl = qs('channel-key-secret');
@@ -219,27 +221,128 @@ let previewSearchToken = 0;
 let previewCopyResetTimer = null;
 const previewDefaultMessage = 'Select a request to load YouTube Music matches.';
 
+const STREAMERBOT_SHORTCUT_SUMMARY = 'Queue lookups return { request, song, user } payloads; stats endpoints return integers; admin toggles echo updated request metadata.';
+
 const STREAMERBOT_SHORTCUTS = [
   {
+    id: 'next-song',
+    title: 'Next song',
+    description: 'GET the next playable request, preferring priority picks first.',
+    path: ({ apiBase, encodedChannel }) => `${apiBase}/channels/${encodedChannel}/queue/next_song`,
+    requiresChannelKey: false,
+    responseHint: 'Returns a { request, song, user } object or null.'
+  },
+  {
+    id: 'next-priority',
+    title: 'Next priority request',
+    description: 'GET the next pending priority entry when you only want boosted picks.',
+    path: ({ apiBase, encodedChannel }) => `${apiBase}/channels/${encodedChannel}/queue/next_priority`,
+    requiresChannelKey: false,
+    responseHint: 'Returns a { request, song, user } object or null.'
+  },
+  {
+    id: 'next-nonpriority',
+    title: 'Next non-priority request',
+    description: 'GET the next pending non-priority entry, bump-aware.',
+    path: ({ apiBase, encodedChannel }) => `${apiBase}/channels/${encodedChannel}/queue/next_nonpriority`,
+    requiresChannelKey: false,
+    responseHint: 'Returns a { request, song, user } object or null.'
+  },
+  {
+    id: 'random-nonpriority',
+    title: 'Random non-priority',
+    description: 'GET a random pending non-priority request for giveaways or variety.',
+    path: ({ apiBase, encodedChannel }) => `${apiBase}/channels/${encodedChannel}/queue/random_nonpriority`,
+    requiresChannelKey: false,
+    responseHint: 'Returns a { request, song, user } object or null.'
+  },
+  {
+    id: 'queue-stats',
+    title: 'Queue stats',
+    description: 'GET aggregate counts for the active stream queue.',
+    path: ({ apiBase, encodedChannel }) => `${apiBase}/channels/${encodedChannel}/queue/stats`,
+    requiresChannelKey: false,
+    responseHint: 'Returns total_unplayed, total_priority, total_nonpriority, total_played.'
+  },
+  {
+    id: 'queue-total-priority',
+    title: 'Priority count',
+    description: 'GET only the unplayed priority request count.',
+    path: ({ apiBase, encodedChannel }) => `${apiBase}/channels/${encodedChannel}/queue/stats/total_priority`,
+    requiresChannelKey: false,
+    responseHint: 'Returns an integer count.'
+  },
+  {
+    id: 'queue-total-nonpriority',
+    title: 'Non-priority count',
+    description: 'GET only the unplayed non-priority request count.',
+    path: ({ apiBase, encodedChannel }) => `${apiBase}/channels/${encodedChannel}/queue/stats/total_nonpriority`,
+    requiresChannelKey: false,
+    responseHint: 'Returns an integer count.'
+  },
+  {
+    id: 'queue-total-unplayed',
+    title: 'Total unplayed count',
+    description: 'GET the remaining unplayed requests regardless of priority.',
+    path: ({ apiBase, encodedChannel }) => `${apiBase}/channels/${encodedChannel}/queue/stats/total_unplayed`,
+    requiresChannelKey: false,
+    responseHint: 'Returns an integer count.'
+  },
+  {
+    id: 'queue-total-played',
+    title: 'Total played count',
+    description: 'GET the number of requests already marked played.',
+    path: ({ apiBase, encodedChannel }) => `${apiBase}/channels/${encodedChannel}/queue/stats/total_played`,
+    requiresChannelKey: false,
+    responseHint: 'Returns an integer count.'
+  },
+  {
+    id: 'bump-admin',
+    title: 'Bump to priority',
+    description: 'POST/GET to force a request into priority status.',
+    path: ({ apiBase, encodedChannel }) => `${apiBase}/channels/${encodedChannel}/queue/REQUEST_ID/bump_admin`,
+    requiresChannelKey: true,
+    responseHint: 'Returns the updated request payload.'
+  },
+  {
+    id: 'move-request',
+    title: 'Move request',
+    description: 'POST/GET to move a request up or down in the queue.',
+    path: ({ apiBase, encodedChannel }) => `${apiBase}/channels/${encodedChannel}/queue/REQUEST_ID/move`,
+    requiresChannelKey: true,
+    responseHint: 'Returns the updated request payload.'
+  },
+  {
+    id: 'skip-request',
+    title: 'Skip request',
+    description: 'POST/GET to send a request to the end of the line.',
+    path: ({ apiBase, encodedChannel }) => `${apiBase}/channels/${encodedChannel}/queue/REQUEST_ID/skip`,
+    requiresChannelKey: true,
+    responseHint: 'Returns the updated request payload.'
+  },
+  {
+    id: 'toggle-priority',
+    title: 'Toggle priority',
+    description: 'POST/GET to enable or disable priority on a request.',
+    path: ({ apiBase, encodedChannel }) => `${apiBase}/channels/${encodedChannel}/queue/REQUEST_ID/priority`,
+    requiresChannelKey: true,
+    responseHint: 'Returns the updated request payload.'
+  },
+  {
     id: 'mark-played',
-    title: 'Mark song played',
-    description: 'POST to flag a queued request as played when you finish it on stream.',
-    buildUrl: ({ apiBase, encodedChannel, encodedKey }) =>
-      `${apiBase}/channels/${encodedChannel}/queue/REQUEST_ID/played?channel_key=${encodedKey}`
+    title: 'Mark played',
+    description: 'POST/GET to mark a queued request as finished.',
+    path: ({ apiBase, encodedChannel }) => `${apiBase}/channels/${encodedChannel}/queue/REQUEST_ID/played`,
+    requiresChannelKey: true,
+    responseHint: 'Returns the updated request payload.'
   },
   {
-    id: 'bump-random',
-    title: 'Bump a random song',
-    description: 'GET a non-priority request to feature; combine with bump_admin to spotlight it.',
-    buildUrl: ({ apiBase, encodedChannel, encodedKey }) =>
-      `${apiBase}/channels/${encodedChannel}/queue/random_nonpriority?channel_key=${encodedKey}`
-  },
-  {
-    id: 'up-next',
-    title: "What's up next",
-    description: 'GET the active queue and read the first unplayed entry for overlays or callouts.',
-    buildUrl: ({ apiBase, encodedChannel, encodedKey }) =>
-      `${apiBase}/channels/${encodedChannel}/queue?channel_key=${encodedKey}`
+    id: 'queue-full',
+    title: 'Full queue',
+    description: 'GET the full queue with song and requester context.',
+    path: ({ apiBase, encodedChannel }) => `${apiBase}/channels/${encodedChannel}/queue/full`,
+    requiresChannelKey: false,
+    responseHint: 'Returns an array of { request, song, user } rows.'
   }
 ];
 
@@ -2856,6 +2959,7 @@ function initOverlayBuilder() {
 }
 
 bindChannelKeyControls();
+bindStreamerbotControls();
 initOverlayBuilder();
 renderStreamerbotShortcuts();
 
@@ -3066,6 +3170,21 @@ function updateEventStatus(text, status) {
 }
 
 /**
+ * Build a streamer.bot shortcut URL, appending the channel key only when required.
+ * Dependencies: Consumes shortcut metadata, backend base URL, encoded channel name, and cached channel key token.
+ * Code customers: streamer.bot shortcut rendering and copy actions.
+ * Used variables/origin: Uses `encodedChannel` from the active selection and `encodedKey` from channel key fetches.
+ */
+function buildStreamerbotShortcutUrl(shortcut, { apiBase, encodedChannel, encodedKey }) {
+  if (!shortcut || typeof shortcut.path !== 'function') { return ''; }
+  const base = shortcut.path({ apiBase, encodedChannel, encodedKey });
+  if (!base) { return ''; }
+  if (!shortcut.requiresChannelKey) { return base; }
+  const joiner = base.includes('?') ? '&' : '?';
+  return `${base}${joiner}channel_key=${encodedKey}`;
+}
+
+/**
  * Render streamer.bot helper URLs based on the selected channel and channel key.
  * Dependencies: Uses `API`, `channelName`, `channelKeyValue`, and DOM refs for the shortcut card and notes textarea.
  * Code customers: streamer.bot section in the Events tab.
@@ -3089,15 +3208,29 @@ function renderStreamerbotShortcuts() {
 
   if (!hasChannel || !apiBase) {
     streamerbotShortcutStatus.textContent = 'Select a channel to generate shortcuts.';
+    if (streamerbotLoadKeyBtn) {
+      streamerbotLoadKeyBtn.disabled = true;
+      streamerbotLoadKeyBtn.hidden = false;
+    }
+    if (streamerbotShortcutFooter) {
+      streamerbotShortcutFooter.textContent = '';
+    }
     return;
   }
 
-  streamerbotShortcutStatus.textContent = channelKeyValue
-    ? 'Using the loaded channel API key.'
-    : 'Load the channel key in Settings to swap out the placeholder token.';
+  const hasKey = !!channelKeyValue;
+  streamerbotShortcutStatus.textContent = hasKey
+    ? 'Using the loaded channel API key when required.'
+    : 'Using a placeholder token; load the channel key to fill secured endpoints.';
+
+  if (streamerbotLoadKeyBtn) {
+    streamerbotLoadKeyBtn.disabled = channelKeyBusy;
+    streamerbotLoadKeyBtn.hidden = hasKey;
+    streamerbotLoadKeyBtn.textContent = channelKeyBusy ? 'Loading…' : 'Load channel key';
+  }
 
   STREAMERBOT_SHORTCUTS.forEach(shortcut => {
-    const url = shortcut.buildUrl({ apiBase, encodedChannel, encodedKey });
+    const url = buildStreamerbotShortcutUrl(shortcut, { apiBase, encodedChannel, encodedKey });
     const row = document.createElement('div');
     row.className = 'streamerbot-shortcut';
 
@@ -3113,6 +3246,11 @@ function renderStreamerbotShortcuts() {
     desc.className = 'streamerbot-shortcut-desc';
     desc.textContent = shortcut.description;
     info.appendChild(desc);
+
+    const output = document.createElement('p');
+    output.className = 'streamerbot-shortcut-desc muted';
+    output.textContent = shortcut.responseHint;
+    info.appendChild(output);
 
     const urlLabel = document.createElement('code');
     urlLabel.className = 'streamerbot-shortcut-url';
@@ -3132,6 +3270,24 @@ function renderStreamerbotShortcuts() {
     row.appendChild(info);
     row.appendChild(actions);
     streamerbotShortcutList.appendChild(row);
+  });
+
+  if (streamerbotShortcutFooter) {
+    streamerbotShortcutFooter.textContent = STREAMERBOT_SHORTCUT_SUMMARY;
+  }
+}
+
+/**
+ * Bind streamer.bot shortcut controls to reuse the settings channel key loader flow.
+ * Dependencies: Relies on the load key button element and the shared `requestChannelKey` helper.
+ * Code customers: Events tab shortcut list so streamer.bot users can fetch the key inline.
+ * Used variables/origin: Consumes `streamerbotLoadKeyBtn` and updates shortcut rendering after key retrieval.
+ */
+function bindStreamerbotControls() {
+  if (!streamerbotLoadKeyBtn) { return; }
+  streamerbotLoadKeyBtn.addEventListener('click', async () => {
+    await requestChannelKey();
+    renderStreamerbotShortcuts();
   });
 }
 
