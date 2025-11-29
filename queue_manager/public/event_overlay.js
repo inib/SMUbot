@@ -482,13 +482,20 @@
       case 'queue.status': {
         const closed = payload.closed;
         const status = (payload.status || '').toLowerCase();
+        const reason = payload.reason;
+        const isLimited = status === 'limited';
         const isOpen = closed === false || status === 'open';
-        titleText = isOpen ? 'Queue is now open' : 'Queue is closed';
-        bodyText = isOpen ? 'Viewers can submit new requests.' : 'Requests are paused for now.';
-        if (payload.reason && detailLevel === 'full') {
-          chips.push(payload.reason);
+        if (isLimited) {
+          titleText = 'Queue limited';
+          bodyText = 'Priority requests stay open; non-priority slots are full.';
+        } else {
+          titleText = isOpen ? 'Queue is now open' : 'Queue is closed';
+          bodyText = isOpen ? 'Viewers can submit new requests.' : 'Requests are paused for now.';
         }
-        variant = 'status';
+        if (reason && detailLevel !== 'minimal') {
+          chips.push(reason);
+        }
+        variant = isLimited ? 'alert' : 'status';
         icon = baseIcons.status;
         break;
       }
@@ -508,7 +515,7 @@
       case 'settings.updated': {
         titleText = 'Channel settings updated';
         bodyText = 'Queue preferences were refreshed.';
-        const interesting = ['max_requests_per_user', 'max_prio_points', 'prio_only', 'queue_closed', 'allow_bumps'];
+        const interesting = ['max_requests_per_user', 'max_prio_points', 'prio_only', 'queue_closed', 'allow_bumps', 'overall_queue_cap', 'nonpriority_queue_cap'];
         if (detailLevel !== 'minimal') {
           interesting.forEach((key) => {
             if (Object.prototype.hasOwnProperty.call(payload, key)) {

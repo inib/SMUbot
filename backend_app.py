@@ -493,6 +493,8 @@ class ChannelSettings(Base):
     allow_bumps = Column(Integer, default=1)
     other_flags = Column(Text)
     max_prio_points = Column(Integer, default=10)
+    overall_queue_cap = Column(Integer, default=100)
+    nonpriority_queue_cap = Column(Integer, default=100)
 
     channel = relationship("ActiveChannel", back_populates="settings")
 
@@ -789,6 +791,8 @@ class ChannelSettingsIn(BaseModel):
     allow_bumps: int = 1
     other_flags: Optional[str] = None
     max_prio_points: int = 10
+    overall_queue_cap: int = Field(100, ge=0, le=100)
+    nonpriority_queue_cap: int = Field(100, ge=0, le=100)
 
 class ChannelSettingsOut(ChannelSettingsIn):
     channel_id: int
@@ -1591,7 +1595,30 @@ def _serialize_settings_event(settings: ChannelSettings) -> Dict[str, Any]:
         "allow_bumps": settings.allow_bumps,
         "other_flags": settings.other_flags,
         "max_prio_points": settings.max_prio_points,
+        "overall_queue_cap": settings.overall_queue_cap,
+        "nonpriority_queue_cap": settings.nonpriority_queue_cap,
     }
+
+
+def emit_queue_status_event(
+    channel_pk: int, closed: bool, status: str, reason: Optional[str] = None
+) -> None:
+    """Broadcast the queue availability state to active event listeners.
+
+    Dependencies: Relies on the in-memory channel event broker created by
+    ``publish_channel_event`` and therefore only emits when listeners have
+    subscribed to the `/events` WebSocket.
+    Code customers: OBS overlays and moderator dashboards that react to
+    `queue.status` notifications when intake pauses or resumes.
+    Used variables/origin: Accepts `channel_pk` from the calling route,
+    a boolean ``closed`` flag, a ``status`` label such as ``"closed"`` or
+    ``"limited"``, and an optional human-readable ``reason`` string.
+    """
+
+    payload: Dict[str, Any] = {"closed": bool(closed), "status": status}
+    if reason:
+        payload["reason"] = reason
+    publish_channel_event(channel_pk, "queue.status", payload)
 
 
 def _normalize_return_url(value: Optional[str]) -> Optional[str]:
@@ -3067,19 +3094,76 @@ def award_prio_points(db: Session, channel_pk: int, user_id: int, delta: int):
 
 
 def enforce_queue_limits(db: Session, channel_pk: int, user_id: int, want_priority: bool):
+    """Block queue intake when channel or capacity limits are exceeded.
+
+    Dependencies: Pulls channel settings via ``get_or_create_settings``, uses the
+    active stream id from ``current_stream``, and queries ``Request`` rows to
+    measure queue depth.
+    Code customers: The queue intake endpoint (`POST /channels/{channel}/queue`)
+    calls this guard before persisting a request.
+    Used variables/origin: ``channel_pk`` is derived from the path parameter,
+    ``user_id`` and ``want_priority`` come from the request payload, and the
+    database session executes queue-count queries.
+    """
+
     settings = get_or_create_settings(db, channel_pk)
     if settings.queue_closed:
         raise HTTPException(409, detail="queue closed")
     if settings.prio_only and not want_priority:
         raise HTTPException(409, detail="priority requests only")
+
+    stream_id = current_stream(db, channel_pk)
+    base_filters = [
+        Request.channel_id == channel_pk,
+        Request.stream_id == stream_id,
+        Request.played == 0,
+    ]
+
+    overall_cap = settings.overall_queue_cap
+    if overall_cap is not None and overall_cap >= 0:
+        queue_depth = db.query(Request).filter(*base_filters).count()
+        if queue_depth >= overall_cap:
+            if not settings.queue_closed:
+                settings.queue_closed = 1
+                db.commit()
+                db.refresh(settings)
+                emit_queue_status_event(
+                    channel_pk,
+                    True,
+                    "closed",
+                    "Queue reached the overall capacity limit.",
+                )
+                publish_channel_event(
+                    channel_pk, "settings.updated", _serialize_settings_event(settings)
+                )
+            raise HTTPException(409, detail="queue capacity reached")
+
+    if not want_priority:
+        nonpriority_cap = settings.nonpriority_queue_cap
+        if nonpriority_cap is not None and nonpriority_cap >= 0:
+            nonpriority_depth = (
+                db.query(Request)
+                .filter(*base_filters, Request.is_priority == 0)
+                .count()
+            )
+            if nonpriority_depth >= nonpriority_cap:
+                emit_queue_status_event(
+                    channel_pk,
+                    False,
+                    "limited",
+                    "Non-priority queue capacity reached.",
+                )
+                raise HTTPException(409, detail="non-priority queue capacity reached")
+
     if settings.max_requests_per_user and settings.max_requests_per_user >= 0:
-        stream_id = current_stream(db, channel_pk)
         count = (
             db.query(Request)
-            .filter(Request.channel_id == channel_pk,
-                    Request.stream_id == stream_id,
-                    Request.user_id == user_id,
-                    Request.played == 0)
+            .filter(
+                Request.channel_id == channel_pk,
+                Request.stream_id == stream_id,
+                Request.user_id == user_id,
+                Request.played == 0,
+            )
             .count()
         )
         if count >= settings.max_requests_per_user:
@@ -3441,6 +3525,8 @@ def get_channel_settings(channel: str, db: Session = Depends(get_db)):
         allow_bumps=st.allow_bumps,
         other_flags=st.other_flags,
         max_prio_points=st.max_prio_points,
+        overall_queue_cap=st.overall_queue_cap,
+        nonpriority_queue_cap=st.nonpriority_queue_cap,
     )
 
 
@@ -3527,17 +3613,17 @@ def set_channel_settings(channel: str, payload: ChannelSettingsIn, db: Session =
     st.allow_bumps = payload.allow_bumps
     st.other_flags = payload.other_flags
     st.max_prio_points = payload.max_prio_points
+    st.overall_queue_cap = payload.overall_queue_cap
+    st.nonpriority_queue_cap = payload.nonpriority_queue_cap
     db.commit()
     db.refresh(st)
     updated_settings = _serialize_settings_event(st)
     if bool(st.queue_closed) != prev_queue_closed:
-        publish_channel_event(
+        emit_queue_status_event(
             channel_pk,
-            "queue.status",
-            {
-                "closed": bool(st.queue_closed),
-                "status": "closed" if st.queue_closed else "open",
-            },
+            bool(st.queue_closed),
+            "closed" if st.queue_closed else "open",
+            "Queue closed via settings update." if st.queue_closed else "Queue reopened via settings update.",
         )
     publish_channel_event(channel_pk, "settings.updated", updated_settings)
     publish_queue_changed(channel_pk)
