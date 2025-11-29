@@ -260,6 +260,7 @@ a:hover{text-decoration:underline}
 .setting-control{flex:0 0 auto;display:flex;align-items:center;gap:14px}
 .setting-control.disabled{opacity:.45;cursor:not-allowed}
 .setting-control.loading{opacity:.6}
+.scope-warning{color:#f7d046;font-size:12px;margin:0}
 .setting-toggle.loading,.setting-number.loading,.setting-text.loading{opacity:.6}
 .setting-toggle{display:flex;align-items:center;gap:10px}
 .toggle-state{font-size:13px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}

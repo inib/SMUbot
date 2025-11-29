@@ -28,6 +28,8 @@ const state = {
 };
 const setupGuardEl = document.getElementById('setup-guard');
 
+let channelScopeInfo = { scopes: [], owner: null, authorized: false, fetched: false };
+
 function showSetupGuard(message) {
   if (!setupGuardEl) return;
   if (!message) {
@@ -86,6 +88,27 @@ function getBotScopes() {
     return state.systemConfig.bot_app_scopes.filter(scope => typeof scope === 'string').map(scope => scope.trim()).filter(Boolean);
   }
   return [];
+}
+
+/**
+ * Normalize the cached OAuth scopes for the active channel into a lower-cased Set.
+ * Dependencies: consumes `channelScopeInfo` populated by loadChannelScopes() and trusts the backend `/channels/{channel}/oauth` response.
+ * Code customers: scope-aware setting guards and helper text renderers that need quick membership checks.
+ * Used variables/origin: pulls `channelScopeInfo.scopes` (backend supplied) and lowercases them for consistent comparisons.
+ */
+function getActiveChannelScopeSet() {
+  const scopes = Array.isArray(channelScopeInfo?.scopes) ? channelScopeInfo.scopes : [];
+  return new Set(scopes.map(scope => (typeof scope === 'string' ? scope.toLowerCase() : '')).filter(Boolean));
+}
+
+/**
+ * Determine whether scope data is ready for the selected channel.
+ * Dependencies: relies on channelScopeInfo flags set by loadChannelScopes() and resets performed in selectChannel().
+ * Code customers: settings builders and save guards that must avoid acting when scope state is unknown.
+ * Used variables/origin: checks `channelScopeInfo.fetched` which is set after `/channels/{channel}/oauth` requests.
+ */
+function hasChannelScopeData() {
+  return channelScopeInfo?.fetched === true;
 }
 
 function getTwitchClientId() {
@@ -562,6 +585,45 @@ let eventAutoscrollEnabled = eventAutoscrollInput ? eventAutoscrollInput.checked
 let channelEventSocket = null;
 let channelEventTimer = null;
 let channelEventShouldReconnect = false;
+
+const PRICING_SCOPE_REQUIREMENTS = {
+  prio_follow_enabled: ['moderator:read:followers'],
+  prio_raid_enabled: ['channel:bot'],
+  prio_bits_per_point: ['bits:read'],
+  prio_gifts_per_point: ['channel:read:subscriptions'],
+  prio_sub_tier1_points: ['channel:read:subscriptions'],
+  prio_sub_tier2_points: ['channel:read:subscriptions'],
+  prio_sub_tier3_points: ['channel:read:subscriptions'],
+};
+
+/**
+ * Return the set of missing Twitch scopes for a given setting key.
+ * Dependencies: requires `channelScopeInfo` to have been filled by loadChannelScopes(); falls back to
+ * treating scopes as missing when data is unavailable to avoid accidental writes.
+ * Code customers: setting form renderer and updateSetting() guard logic.
+ * Used variables/origin: pulls required scopes from PRICING_SCOPE_REQUIREMENTS and compares them to getActiveChannelScopeSet().
+ */
+function getMissingScopesForSetting(key) {
+  const required = PRICING_SCOPE_REQUIREMENTS[key];
+  if (!required || !required.length) { return []; }
+  const scopeSet = getActiveChannelScopeSet();
+  if (!hasChannelScopeData()) { return required.slice(); }
+  return required.filter(scope => !scopeSet.has(scope.toLowerCase()));
+}
+
+/**
+ * Build a user-facing helper message explaining which scopes are absent.
+ * Dependencies: uses getMissingScopesForSetting() and channelScopeInfo metadata populated from `/channels/{channel}/oauth`.
+ * Code customers: inline setting hints and client-side save guards.
+ * Used variables/origin: formats scope names from PRICING_SCOPE_REQUIREMENTS and references channelScopeInfo.owner for context.
+ */
+function formatScopeWarning(key) {
+  const missing = getMissingScopesForSetting(key);
+  if (!missing.length) { return ''; }
+  const suffix = channelScopeInfo?.owner ? ` for ${channelScopeInfo.owner}` : '';
+  const scopeLabel = missing.length === 1 ? 'scope' : 'scopes';
+  return `Missing Twitch ${scopeLabel}${suffix}: ${missing.join(', ')}. Reauthorize the channel from the landing page to unlock pricing features.`;
+}
 
 const SETTINGS_CONFIG = {
   queue_closed: {
@@ -2329,6 +2391,12 @@ function buildSettingRow(key, value, meta) {
     desc.textContent = meta.description;
     info.appendChild(desc);
   }
+  if (meta.missingScopes && meta.missingScopes.length) {
+    const scopeNote = document.createElement('p');
+    scopeNote.className = 'muted scope-warning';
+    scopeNote.textContent = meta.scopeHint || formatScopeWarning(key);
+    info.appendChild(scopeNote);
+  }
   row.appendChild(info);
 
   const controlWrap = document.createElement('div');
@@ -2611,7 +2679,19 @@ async function fetchSettings() {
   const orderedKeys = normaliseSettingOrder(data);
   orderedKeys.forEach(key => {
     if (key === 'channel_id') { return; }
-    const meta = SETTINGS_CONFIG[key] || { type: typeof data[key] === 'number' ? 'number' : 'text', label: key };
+    const meta = { ...(SETTINGS_CONFIG[key] || { type: typeof data[key] === 'number' ? 'number' : 'text', label: key }) };
+    const missingScopes = getMissingScopesForSetting(key);
+    if (missingScopes.length) {
+      meta.disabled = true;
+      meta.missingScopes = missingScopes;
+      const scopeMessage = formatScopeWarning(key);
+      if (scopeMessage) {
+        meta.scopeHint = scopeMessage;
+        if (!meta.disabledReason) {
+          meta.disabledReason = scopeMessage;
+        }
+      }
+    }
     const row = buildSettingRow(key, data[key], meta);
     if (row) {
       fragment.appendChild(row);
@@ -2627,8 +2707,22 @@ async function fetchSettings() {
   }
 }
 
+/**
+ * Persist a single setting change for the active channel when permitted by scopes.
+ * Dependencies: needs `channelName`, relies on scope data from loadChannelScopes(), and posts to `/channels/{channel}/settings`.
+ * Code customers: all setting controls generated by buildSettingRow().
+ * Used variables/origin: blocks writes when getMissingScopesForSetting reports absent Twitch scopes tied to pricing features.
+ */
 async function updateSetting(key, value) {
   if (!channelName) { return false; }
+  const missing = getMissingScopesForSetting(key);
+  if (missing.length) {
+    const message = formatScopeWarning(key);
+    if (message) {
+      alert(message);
+    }
+    return false;
+  }
   try {
     const resp = await fetch(`${API}/channels/${channelName}/settings`, {
       method: 'PUT',
@@ -3225,6 +3319,41 @@ async function updateRegButton() {
   }
 }
 
+/**
+ * Fetch the authorized scopes for the active channel from the backend.
+ * Dependencies: relies on `channelName` being set plus the `/channels/{channel}/oauth` endpoint and global API origin.
+ * Code customers: selectChannel() flow and scope-aware controls that disable pricing settings when permissions are missing.
+ * Used variables/origin: populates `channelScopeInfo` using backend-returned scopes and owner login metadata.
+ */
+async function loadChannelScopes() {
+  if (!channelName) {
+    channelScopeInfo = { scopes: [], owner: null, authorized: false, fetched: false };
+    return channelScopeInfo;
+  }
+  const encoded = encodeURIComponent(channelName);
+  channelScopeInfo = { scopes: [], owner: null, authorized: false, fetched: false };
+  try {
+    const resp = await fetch(`${API}/channels/${encoded}/oauth`, { credentials: 'include' });
+    if (!resp.ok) {
+      throw new Error(`status ${resp.status}`);
+    }
+    const payload = await resp.json();
+    const scopes = Array.isArray(payload?.scopes)
+      ? payload.scopes.filter(scope => typeof scope === 'string').map(scope => scope.trim()).filter(Boolean)
+      : [];
+    channelScopeInfo = {
+      scopes,
+      owner: typeof payload?.owner_login === 'string' ? payload.owner_login : null,
+      authorized: payload?.authorized === true,
+      fetched: true,
+    };
+  } catch (err) {
+    console.error('Failed to load channel scopes', err);
+    channelScopeInfo = { scopes: [], owner: null, authorized: false, fetched: false };
+  }
+  return channelScopeInfo;
+}
+
 function selectChannel(ch) {
   channelName = ch;
   qs('ch-badge').textContent = `channel: ${channelName}`;
@@ -3236,7 +3365,7 @@ function selectChannel(ch) {
   fetchQueue();
   fetchPlaylists();
   fetchUsers();
-  fetchSettings();
+  loadChannelScopes().then(() => fetchSettings()).catch(() => fetchSettings());
   updateOverlayBuilder();
   clearEventFeed();
   connectQueueStream();
