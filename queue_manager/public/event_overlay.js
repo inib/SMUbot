@@ -515,7 +515,7 @@
       case 'settings.updated': {
         titleText = 'Channel settings updated';
         bodyText = 'Queue preferences were refreshed.';
-        const interesting = ['max_requests_per_user', 'max_prio_points', 'prio_only', 'queue_closed', 'allow_bumps', 'overall_queue_cap', 'nonpriority_queue_cap'];
+        const interesting = ['max_requests_per_user', 'max_prio_points', 'prio_only', 'queue_closed', 'allow_bumps', 'overall_queue_cap', 'nonpriority_queue_cap', 'prio_follow_enabled', 'prio_raid_enabled', 'prio_bits_per_point', 'prio_gifts_per_point', 'prio_sub_tier1_points', 'prio_sub_tier2_points', 'prio_sub_tier3_points', 'prio_reset_points_tier1', 'prio_reset_points_tier2', 'prio_reset_points_tier3', 'prio_reset_points_vip', 'prio_reset_points_mod', 'free_mod_priority_requests'];
         if (detailLevel !== 'minimal') {
           interesting.forEach((key) => {
             if (Object.prototype.hasOwnProperty.call(payload, key)) {

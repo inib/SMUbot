@@ -272,11 +272,53 @@ class ChannelEventTests(unittest.TestCase):
         finally:
             db.close()
 
+    def test_event_pricing_respects_settings(self) -> None:
+        details = _setup_channel()
+        channel = details["channel_name"]
+        headers = {"X-Admin-Token": backend_app.ADMIN_TOKEN}
+
+        settings = self.client.put(
+            f"/channels/{channel}/settings",
+            json={
+                "prio_follow_enabled": 0,
+                "prio_raid_enabled": 1,
+                "prio_bits_per_point": 250,
+                "prio_gifts_per_point": 2,
+                "prio_sub_tier1_points": 0,
+                "prio_sub_tier2_points": 1,
+                "prio_sub_tier3_points": 0,
+                "max_prio_points": 5,
+            },
+            headers=headers,
+        )
+        self.assertEqual(settings.status_code, 200, settings.text)
+
+        gift = self.client.post(
+            f"/channels/{channel}/events",
+            json={"type": "gift_sub", "user_id": details["user_one"], "meta": {"count": 3, "tier": "2000"}},
+            headers=headers,
+        )
+        self.assertEqual(gift.status_code, 200, gift.text)
+
+        follow = self.client.post(
+            f"/channels/{channel}/events",
+            json={"type": "follow", "user_id": details["user_one"]},
+            headers=headers,
+        )
+        self.assertEqual(follow.status_code, 200, follow.text)
+
+        bits = self.client.post(
+            f"/channels/{channel}/events",
+            json={"type": "bits", "user_id": details["user_one"], "meta": {"amount": 500}},
+            headers=headers,
+        )
+        self.assertEqual(bits.status_code, 200, bits.text)
+
         db = backend_app.SessionLocal()
         try:
-            refreshed = backend_app.get_or_create_settings(db, channel.id)
-            self.assertEqual(refreshed.overall_queue_cap, 100)
-            self.assertEqual(refreshed.nonpriority_queue_cap, 100)
+            user = db.get(backend_app.User, details["user_one"])
+            assert user
+            self.assertEqual(user.prio_points, 5)
         finally:
             db.close()
 

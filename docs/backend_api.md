@@ -87,6 +87,7 @@ Channel settings include queue intake controls:
 - `overall_queue_cap` (0–100, default 100) auto-closes intake once pending requests reach the cap and emits a `queue.status` event.
 - `nonpriority_queue_cap` (0–100, default 100) rejects new non-priority submissions when full while still allowing priority requests.
 - `prio_only`, `max_requests_per_user`, `allow_bumps`, `other_flags`, and `max_prio_points` behave as before and are reflected in `settings.updated` events.
+- Priority point pricing is configurable: `prio_follow_enabled`, `prio_raid_enabled`, `prio_bits_per_point`, `prio_gifts_per_point`, and per-tier fields (`prio_sub_tier1_points`, `prio_sub_tier2_points`, `prio_sub_tier3_points`) control how many points events grant. Reset bonuses (`prio_reset_points_tier1`, `prio_reset_points_tier2`, `prio_reset_points_tier3`, `prio_reset_points_vip`, `prio_reset_points_mod`) are awarded when the queue resets for a new stream. Use `free_mod_priority_requests` to allow moderators to request priority without spending points.
 - Existing deployments should apply `migrations/20240624_queue_caps.sql` to add the new capacity columns and backfill defaults for legacy channels; the application also attempts to patch missing columns on startup for SQLite/legacy installs before enforcing queue caps.
 
 ## Songs
