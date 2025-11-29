@@ -196,6 +196,8 @@ class ChannelEventTests(unittest.TestCase):
                     "allow_bumps": 1,
                     "other_flags": None,
                     "max_prio_points": 10,
+                    "overall_queue_cap": 10,
+                    "nonpriority_queue_cap": 8,
                 },
                 headers=headers,
             )
@@ -236,6 +238,47 @@ class ChannelEventTests(unittest.TestCase):
             self.assertEqual(award_payload["user"]["id"], details["user_one"])
             self.assertEqual(award_payload["delta"], 2)
             self.assertGreaterEqual(award_payload["prio_points"], 2)
+
+    def test_get_or_create_settings_backfills_queue_caps(self) -> None:
+        """Ensure legacy channel settings rows gain default queue caps.
+
+        Dependencies: Uses ``SessionLocal`` to write a fabricated legacy
+        ``ChannelSettings`` row with null caps. Code customers: guards against
+        regressions in ``get_or_create_settings`` that would leave preexisting
+        installations without defaults. Used variables/origin: builds a new
+        ``ActiveChannel`` record locally, binds it to the manually inserted
+        settings, then re-reads via ``get_or_create_settings`` to verify
+        backfilled values.
+        """
+
+        db = backend_app.SessionLocal()
+        try:
+            channel = backend_app.ActiveChannel(
+                channel_id="legacy-channel-id",
+                channel_name="legacy",
+                join_active=1,
+            )
+            db.add(channel)
+            db.commit()
+            db.refresh(channel)
+
+            legacy_settings = backend_app.ChannelSettings(
+                channel_id=channel.id,
+                overall_queue_cap=None,
+                nonpriority_queue_cap=None,
+            )
+            db.add(legacy_settings)
+            db.commit()
+        finally:
+            db.close()
+
+        db = backend_app.SessionLocal()
+        try:
+            refreshed = backend_app.get_or_create_settings(db, channel.id)
+            self.assertEqual(refreshed.overall_queue_cap, 100)
+            self.assertEqual(refreshed.nonpriority_queue_cap, 100)
+        finally:
+            db.close()
 
 
 if __name__ == "__main__":
