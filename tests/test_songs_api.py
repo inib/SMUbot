@@ -64,7 +64,7 @@ class SongApiTests(unittest.TestCase):
                     "twitch_client_id": "client",
                     "twitch_client_secret": "secret",
                     "setup_complete": "1",
-                    "twitch_scopes": "channel:bot channel:read:subscriptions channel:read:vips",
+                    "twitch_scopes": "channel:bot channel:read:subscriptions channel:read:vips bits:read moderator:read:followers",
                     "bot_app_scopes": "user:read:chat user:write:chat user:bot",
                 },
             )

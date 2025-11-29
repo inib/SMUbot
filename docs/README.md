@@ -78,10 +78,18 @@ Songbot relies on two distinct OAuth flows that map to the two management panels
 
 2. **Channel authorization (Queue Manager)** – Channel owners sign in through the
    Queue Manager UI and complete the authorization code grant with the
-   `channel:bot channel:read:subscriptions channel:read:vips` scopes. The backend
-   records the channel during this handshake and subscribes to chat events using
-   the previously obtained app access token. Only channels that complete this
-   flow are joined by the bot.
+   `channel:bot channel:read:subscriptions channel:read:vips bits:read moderator:read:followers user:read:email` scopes. The
+   backend records the channel during this handshake and subscribes to chat
+   events using the previously obtained app access token. Only channels that
+   complete this flow are joined by the bot. Bits and follower access enable
+   pricing features tied to cheers and follow events.
+
+### Migrating existing channels
+- After deploying the expanded default scopes, ask channel owners to log out and
+  log back in through the Queue Manager so Twitch can issue tokens with the new
+  permissions.
+- Check the Queue Manager landing page for the scope list; missing `bits:read`
+  or `moderator:read:followers` indicates reauthorization is still needed.
 
 Owners can invite moderators by adding their Twitch accounts inside the Queue
 Manager, and authenticated users who manage multiple channels can switch between
