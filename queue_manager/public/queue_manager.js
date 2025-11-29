@@ -580,12 +580,17 @@ const SETTINGS_CONFIG = {
   },
   allow_bumps: {
     type: 'boolean',
-    label: 'Allow chat bumps',
-    description: 'Reserved for a future feature. Toggling this has no effect yet on queue behaviour.',
+    label: 'Enable point spending',
+    description: 'Master toggle for consuming priority points on new or existing requests.',
     onLabel: 'Enabled',
     offLabel: 'Disabled',
-    disabled: true,
-    disabledReason: 'Chat bump restrictions are not implemented yet.',
+  },
+  full_auto_priority_mode: {
+    type: 'boolean',
+    label: 'Full auto priority mode',
+    description: 'Automatically spend saved points to upgrade incoming and pending requests.',
+    onLabel: 'Auto',
+    offLabel: 'Manual',
   },
   overall_queue_cap: {
     type: 'number',

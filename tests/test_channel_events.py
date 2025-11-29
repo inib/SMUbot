@@ -239,6 +239,81 @@ class ChannelEventTests(unittest.TestCase):
             self.assertEqual(award_payload["delta"], 2)
             self.assertGreaterEqual(award_payload["prio_points"], 2)
 
+    def test_full_auto_priority_mode_auto_spends_and_upgrades(self) -> None:
+        details = _setup_channel()
+        channel = details["channel_name"]
+        headers = {"X-Admin-Token": backend_app.ADMIN_TOKEN}
+
+        with self.client.websocket_connect(f"/channels/{channel}/events") as ws:
+            settings_payload = {
+                "max_requests_per_user": -1,
+                "prio_only": 0,
+                "queue_closed": 0,
+                "allow_bumps": 1,
+                "full_auto_priority_mode": 1,
+                "other_flags": None,
+                "max_prio_points": 10,
+                "overall_queue_cap": 100,
+                "nonpriority_queue_cap": 100,
+            }
+            settings = self.client.put(
+                f"/channels/{channel}/settings",
+                json=settings_payload,
+                headers=headers,
+            )
+            self.assertEqual(settings.status_code, 200, settings.text)
+            settings_event = ws.receive_json()
+            self.assertEqual(settings_event["type"], "settings.updated")
+            self.assertEqual(settings_event["payload"].get("full_auto_priority_mode"), 1)
+
+            auto_prio = self.client.post(
+                f"/channels/{channel}/queue",
+                json={
+                    "song_id": details["song_two"],
+                    "user_id": details["user_two"],
+                    "want_priority": False,
+                    "prefer_sub_free": False,
+                    "is_subscriber": False,
+                },
+                headers=headers,
+            )
+            self.assertEqual(auto_prio.status_code, 200, auto_prio.text)
+            auto_added = ws.receive_json()
+            self.assertEqual(auto_added["type"], "request.added")
+            auto_bumped = ws.receive_json()
+            self.assertEqual(auto_bumped["type"], "request.bumped")
+            self.assertTrue(auto_bumped["payload"]["is_priority"])
+
+            baseline = self.client.post(
+                f"/channels/{channel}/queue",
+                json={
+                    "song_id": details["song_one"],
+                    "user_id": details["user_one"],
+                    "want_priority": False,
+                    "prefer_sub_free": False,
+                    "is_subscriber": False,
+                },
+                headers=headers,
+            )
+            self.assertEqual(baseline.status_code, 200, baseline.text)
+            added_event = ws.receive_json()
+            self.assertEqual(added_event["type"], "request.added")
+            pending_request_id = baseline.json()["request_id"]
+
+            db = backend_app.SessionLocal()
+            try:
+                backend_app.award_prio_points(db, details["channel_pk"], details["user_one"], 2)
+            finally:
+                db.close()
+
+            upgrade_event = ws.receive_json()
+            self.assertEqual(upgrade_event["type"], "request.bumped")
+            self.assertEqual(upgrade_event["payload"]["id"], pending_request_id)
+            award_event = ws.receive_json()
+            self.assertEqual(award_event["type"], "user.bump_awarded")
+            self.assertEqual(award_event["payload"]["user"]["id"], details["user_one"])
+            self.assertEqual(award_event["payload"].get("prio_points"), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

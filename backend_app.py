@@ -146,6 +146,31 @@ def ensure_channel_key_schema() -> None:
             conn.execute(text("ALTER TABLE active_channels ADD COLUMN channel_key VARCHAR"))
 
 
+def ensure_channel_settings_schema() -> None:
+    """Backfill new columns on `channel_settings` for legacy databases.
+
+    Dependencies: Uses SQLAlchemy inspection against the global ``engine`` and
+    executes raw ALTER TABLE statements when fields are missing.
+    Code customers: Startup bootstrap that needs the latest settings columns
+    before serving traffic.
+    Used variables/origin: Operates on the ``channel_settings`` table and adds
+    the ``full_auto_priority_mode`` flag with a default of ``0`` when absent.
+    """
+
+    inspector = inspect(engine)
+    if "channel_settings" not in inspector.get_table_names():
+        return
+
+    columns = {col["name"] for col in inspector.get_columns("channel_settings")}
+    if "full_auto_priority_mode" not in columns:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "ALTER TABLE channel_settings ADD COLUMN full_auto_priority_mode INTEGER DEFAULT 0"
+                )
+            )
+
+
 def backfill_missing_channel_keys() -> None:
     """Assign generated keys to any existing channels lacking a `channel_key` value.
 
@@ -491,6 +516,7 @@ class ChannelSettings(Base):
     prio_only = Column(Integer, default=0)
     queue_closed = Column(Integer, default=0)
     allow_bumps = Column(Integer, default=1)
+    full_auto_priority_mode = Column(Integer, default=0)
     other_flags = Column(Text)
     max_prio_points = Column(Integer, default=10)
     overall_queue_cap = Column(Integer, default=100)
@@ -789,6 +815,7 @@ class ChannelSettingsIn(BaseModel):
     prio_only: int = 0
     queue_closed: int = 0
     allow_bumps: int = 1
+    full_auto_priority_mode: int = 0
     other_flags: Optional[str] = None
     max_prio_points: int = 10
     overall_queue_cap: int = Field(100, ge=0, le=100)
@@ -1593,6 +1620,7 @@ def _serialize_settings_event(settings: ChannelSettings) -> Dict[str, Any]:
         "prio_only": settings.prio_only,
         "queue_closed": settings.queue_closed,
         "allow_bumps": settings.allow_bumps,
+        "full_auto_priority_mode": settings.full_auto_priority_mode,
         "other_flags": settings.other_flags,
         "max_prio_points": settings.max_prio_points,
         "overall_queue_cap": settings.overall_queue_cap,
@@ -3067,7 +3095,144 @@ def try_use_sub_free(db: Session, user_id: int, stream_id: int, is_subscriber: b
     return True
 
 
+def _priority_spending_enabled(settings: ChannelSettings) -> bool:
+    """Return whether the channel allows spending points to elevate requests.
+
+    Dependencies: Reads the in-memory ``ChannelSettings`` instance provided by
+    callers.
+    Code customers: Priority automation helpers gate their behaviour on this
+    signal before consuming points.
+    Used variables/origin: Evaluates the ``allow_bumps`` flag on ``settings``.
+    """
+
+    return bool(settings.allow_bumps)
+
+
+def _apply_priority_to_new_request(
+    db: Session,
+    settings: ChannelSettings,
+    user_id: int,
+    stream_id: int,
+    *,
+    want_priority: bool,
+    prefer_sub_free: bool,
+    is_subscriber: bool,
+) -> tuple[int, Optional[str]]:
+    """Try to make an incoming request priority by consuming freebies or points.
+
+    Dependencies: Uses ``try_use_sub_free`` for subscriber perks and fetches the
+    ``User`` row from the provided database session.
+    Code customers: The queue intake endpoint calls this helper to consistently
+    enforce new priority automation rules.
+    Used variables/origin: ``settings`` supplies channel toggles, ``user_id`` and
+    ``stream_id`` originate from the intake payload, and ``want_priority``
+    mirrors the caller's explicit intent before any auto-upgrade logic applies.
+    """
+
+    if not _priority_spending_enabled(settings):
+        if want_priority:
+            raise HTTPException(409, detail="Priority spending disabled")
+        return 0, None
+
+    priority_source: Optional[str] = None
+    if want_priority and prefer_sub_free and try_use_sub_free(db, user_id, stream_id, is_subscriber):
+        return 1, "sub_free"
+
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(404, "user not found")
+
+    auto_requested = settings.full_auto_priority_mode and not want_priority
+    if (want_priority or auto_requested) and (user.prio_points or 0) > 0:
+        user.prio_points = (user.prio_points or 0) - 1
+        priority_source = "points" if want_priority else "auto_points"
+        return 1, priority_source
+
+    if want_priority:
+        raise HTTPException(409, detail="No priority available")
+
+    return 0, None
+
+
+def _auto_upgrade_pending_requests(
+    db: Session,
+    channel_pk: int,
+    user_id: int,
+    settings: ChannelSettings,
+    stream_id: Optional[int] = None,
+) -> int:
+    """Promote pending requests when full-auto priority mode and points allow it.
+
+    Dependencies: Consults ``current_stream`` for default stream scoping and
+    mutates ``Request`` plus ``User`` rows within the provided ``Session``.
+    Code customers: ``award_prio_points`` invokes this helper after adding
+    points so that overlays and bots immediately reflect automatic upgrades.
+    Used variables/origin: ``channel_pk`` and ``user_id`` come from the request
+    context; ``settings`` supplies channel-wide toggles and ``stream_id`` may be
+    supplied or derived on-demand.
+    """
+
+    if not (_priority_spending_enabled(settings) and settings.full_auto_priority_mode):
+        return 0
+
+    sid = stream_id if stream_id is not None else current_stream(db, channel_pk)
+    if sid is None:
+        return 0
+
+    user = db.query(User).filter(User.id == user_id, User.channel_id == channel_pk).one_or_none()
+    if not user or (user.prio_points or 0) <= 0:
+        return 0
+
+    pending: list[Request] = (
+        db.query(Request)
+        .filter(
+            Request.channel_id == channel_pk,
+            Request.stream_id == sid,
+            Request.user_id == user_id,
+            Request.played == 0,
+            Request.is_priority == 0,
+        )
+        .order_by(
+            Request.position.asc(),
+            Request.request_time.asc(),
+            Request.id.asc(),
+        )
+        .all()
+    )
+
+    upgraded: list[Request] = []
+    for req in pending:
+        if (user.prio_points or 0) <= 0:
+            break
+        user.prio_points = max((user.prio_points or 0) - 1, 0)
+        req.is_priority = 1
+        if not req.priority_source:
+            req.priority_source = "auto_points"
+        upgraded.append(req)
+
+    if not upgraded:
+        return 0
+
+    db.commit()
+    for req in upgraded:
+        db.refresh(req)
+        publish_channel_event(channel_pk, "request.bumped", _serialize_request_event(db, req))
+    publish_queue_changed(channel_pk)
+    return len(upgraded)
+
+
 def award_prio_points(db: Session, channel_pk: int, user_id: int, delta: int):
+    """Award and potentially auto-spend priority points for a channel user.
+
+    Dependencies: Leverages ``get_or_create_settings`` for channel caps and the
+    auto-upgrade helper to keep queues synchronized.
+    Code customers: Event ingestion (follows, bits, subs) and admin tooling rely
+    on this helper to centralize balance updates.
+    Used variables/origin: ``channel_pk`` and ``user_id`` come from callers;
+    ``delta`` represents the requested adjustment; database persistence happens
+    through the shared ``Session``.
+    """
+
     user = db.query(User).filter(User.id == user_id, User.channel_id == channel_pk).one_or_none()
     if not user:
         raise HTTPException(404, detail="user not found in channel")
@@ -3077,20 +3242,23 @@ def award_prio_points(db: Session, channel_pk: int, user_id: int, delta: int):
     new_val = min(cap, old_val + delta)
     user.prio_points = new_val
     db.commit()
-    if new_val != old_val:
-        db.refresh(user)
-        applied_delta = new_val - old_val
-        if applied_delta > 0:
-            publish_channel_event(
-                channel_pk,
-                "user.bump_awarded",
-                {
-                    "user": _serialize_user_summary(user),
-                    "delta": applied_delta,
-                    "prio_points": new_val,
-                },
-            )
-    return new_val
+    db.refresh(user)
+
+    _auto_upgrade_pending_requests(db, channel_pk, user_id, settings)
+    db.refresh(user)
+
+    applied_delta = (user.prio_points or 0) - old_val
+    if applied_delta > 0:
+        publish_channel_event(
+            channel_pk,
+            "user.bump_awarded",
+            {
+                "user": _serialize_user_summary(user),
+                "delta": applied_delta,
+                "prio_points": user.prio_points,
+            },
+        )
+    return user.prio_points
 
 
 def enforce_queue_limits(db: Session, channel_pk: int, user_id: int, want_priority: bool):
@@ -3290,6 +3458,7 @@ def seed_default_data():
 
 
 ensure_channel_key_schema()
+ensure_channel_settings_schema()
 backfill_missing_channel_keys()
 seed_default_data()
 
@@ -3523,6 +3692,7 @@ def get_channel_settings(channel: str, db: Session = Depends(get_db)):
         prio_only=st.prio_only,
         queue_closed=st.queue_closed,
         allow_bumps=st.allow_bumps,
+        full_auto_priority_mode=st.full_auto_priority_mode,
         other_flags=st.other_flags,
         max_prio_points=st.max_prio_points,
         overall_queue_cap=st.overall_queue_cap,
@@ -3611,6 +3781,7 @@ def set_channel_settings(channel: str, payload: ChannelSettingsIn, db: Session =
     st.prio_only = payload.prio_only
     st.queue_closed = payload.queue_closed
     st.allow_bumps = payload.allow_bumps
+    st.full_auto_priority_mode = payload.full_auto_priority_mode
     st.other_flags = payload.other_flags
     st.max_prio_points = payload.max_prio_points
     st.overall_queue_cap = payload.overall_queue_cap
@@ -4850,9 +5021,24 @@ def get_stream_queue(channel: str, stream_id: int, db: Session = Depends(get_db)
 
 @app.post("/channels/{channel}/queue", response_model=dict, dependencies=[Depends(require_channel_key)])
 def add_request(channel: str, payload: RequestCreate, db: Session = Depends(get_db)):
+    """Create a queue request, optionally spending points automatically.
+
+    Dependencies: Resolves ``channel_pk`` via ``get_channel_pk``, loads
+    ``ChannelSettings`` for gating, enforces queue limits, and uses
+    ``current_stream`` for stream scoping.
+    Code customers: Public intake endpoints and bots call this to add requests
+    while keeping overlays synchronized through emitted events.
+    Used variables/origin: Path parameter ``channel`` maps to ``channel_pk``;
+    the payload contributes ``user_id``, ``song_id``, and priority preferences;
+    the database session persists both the new ``Request`` and any point spends.
+    """
+
     channel_pk = get_channel_pk(channel, db)
-    # Checks
-    enforce_queue_limits(db, channel_pk, payload.user_id, payload.want_priority)
+    settings = get_or_create_settings(db, channel_pk)
+    prioritized_intake = payload.want_priority or (
+        settings.full_auto_priority_mode and _priority_spending_enabled(settings)
+    )
+    enforce_queue_limits(db, channel_pk, payload.user_id, prioritized_intake)
     sid = current_stream(db, channel_pk)
 
     # If subscriber's first request this stream, award a prio point
@@ -4876,25 +5062,15 @@ def add_request(channel: str, payload: RequestCreate, db: Session = Depends(get_
     
     new_position = (max_pos or 0) + 1
 
-    is_priority = 0
-    priority_source = None
-
-    if payload.want_priority:
-        if payload.prefer_sub_free and try_use_sub_free(db, payload.user_id, sid, payload.is_subscriber):
-            is_priority = 1
-            priority_source = 'sub_free'
-        else:
-            u = db.get(User, payload.user_id)
-            if not u:
-                raise HTTPException(404, "user not found")
-            if (u.prio_points or 0) > 0:
-                u.prio_points -= 1
-                is_priority = 1
-                priority_source = 'points'
-                db.commit()
-                publish_queue_changed(channel_pk)
-            else:
-                raise HTTPException(409, detail="No priority available")
+    is_priority, priority_source = _apply_priority_to_new_request(
+        db,
+        settings,
+        payload.user_id,
+        sid,
+        want_priority=payload.want_priority,
+        prefer_sub_free=payload.prefer_sub_free,
+        is_subscriber=payload.is_subscriber,
+    )
 
     req = Request(
         channel_id=channel_pk,
