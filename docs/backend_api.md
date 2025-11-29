@@ -260,14 +260,18 @@ Example calls (keywords and numeric IDs are interchangeable):
 ## Events
 | Method | Path | Description |
 |--------|------|-------------|
+| POST | `/twitch/eventsub/callback` | Twitch EventSub webhook used for follows, raids, cheers, and subscriptions (signature verified). |
 | POST | `/channels/{channel}/events` | Log a channel event such as follows, subscriptions, or bits (channel key or admin). |
 | GET | `/channels/{channel}/events` | Retrieve logged events with optional filtering by type and time. |
+| GET | `/channels/{channel}/eventsub/health` | Inspect persisted and remote EventSub subscription status (admin/OAuth). |
 | WS | `/channels/{channel}/events` | WebSocket stream that pushes queue and settings events for overlays. |
 
-Certain events award priority points:
+Certain events award priority points and are fed by EventSub subscriptions created with the channel owner's token:
 
 - `bits` events grant 1 point for any cheer of at least 200 bits.
 - Gifted subs (`gift_sub` events) grant 1 point for every 5 subscriptions gifted.
+- Follows and raids each grant 1 point when enabled in channel settings.
+- Direct subscriptions honor the configured tier multipliers.
 
 ### Channel event stream
 

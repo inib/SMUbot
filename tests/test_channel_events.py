@@ -2,6 +2,9 @@ import unittest
 from typing import Dict
 
 from fastapi.testclient import TestClient
+import hashlib
+import hmac
+import json
 
 import backend_app
 
@@ -14,6 +17,8 @@ def _wipe_db() -> None:
             backend_app.Song,
             backend_app.User,
             backend_app.StreamSession,
+            backend_app.Event,
+            backend_app.EventSubscription,
             backend_app.PlaylistItem,
             backend_app.PlaylistKeyword,
             backend_app.Playlist,
@@ -238,6 +243,69 @@ class ChannelEventTests(unittest.TestCase):
             self.assertEqual(award_payload["user"]["id"], details["user_one"])
             self.assertEqual(award_payload["delta"], 2)
             self.assertGreaterEqual(award_payload["prio_points"], 2)
+
+    def test_eventsub_callback_logs_events(self) -> None:
+        details = _setup_channel()
+        channel = details["channel_name"]
+        secret = "abc123secret"
+        db = backend_app.SessionLocal()
+        try:
+            sub = backend_app.EventSubscription(
+                channel_id=details["channel_pk"],
+                twitch_subscription_id="sub-1",
+                type="channel.follow",
+                status="enabled",
+                secret=secret,
+                callback="https://example/callback",
+            )
+            db.add(sub)
+            db.commit()
+        finally:
+            db.close()
+
+        body = {
+            "subscription": {
+                "id": "sub-1",
+                "type": "channel.follow",
+                "status": "enabled",
+                "version": "1",
+                "condition": {"broadcaster_user_id": "cid", "moderator_user_id": "owner"},
+            },
+            "event": {
+                "user_id": "user-three",
+                "user_login": "userthree",
+                "broadcaster_user_id": "cid",
+            },
+        }
+        raw = json.dumps(body).encode()
+        message_id = "msg-1"
+        timestamp = "2023-01-01T00:00:00Z"
+        signature = hmac.new(secret.encode(), msg=(message_id + timestamp).encode() + raw, digestmod=hashlib.sha256)
+        headers = {
+            "Twitch-Eventsub-Message-Id": message_id,
+            "Twitch-Eventsub-Message-Timestamp": timestamp,
+            "Twitch-Eventsub-Message-Signature": f"sha256={signature.hexdigest()}",
+            "Twitch-Eventsub-Message-Type": "notification",
+        }
+
+        resp = self.client.post("/twitch/eventsub/callback", data=raw, headers=headers)
+        self.assertEqual(resp.status_code, 200, resp.text)
+
+        events = self.client.get(
+            f"/channels/{channel}/events",
+            headers={"X-Admin-Token": backend_app.ADMIN_TOKEN},
+        ).json()
+        self.assertEqual(events[0]["type"], "follow")
+        db = backend_app.SessionLocal()
+        try:
+            user = (
+                db.query(backend_app.User)
+                .filter(backend_app.User.channel_id == details["channel_pk"], backend_app.User.twitch_id == "user-three")
+                .one()
+            )
+            self.assertEqual(user.prio_points, 1)
+        finally:
+            db.close()
 
     def test_get_or_create_settings_backfills_queue_caps(self) -> None:
         """Ensure legacy channel settings rows gain default queue caps.

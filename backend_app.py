@@ -100,6 +100,14 @@ APP_ACCESS_TOKEN: Optional[str] = None
 APP_TOKEN_EXPIRES = 0
 BOT_USER_ID: Optional[str] = None
 
+EVENTSUB_EVENT_MAP: dict[str, str] = {
+    "channel.follow": "follow",
+    "channel.raid": "raid",
+    "channel.cheer": "bits",
+    "channel.subscribe": "sub",
+    "channel.subscription.gift": "gift_sub",
+}
+
 _bot_log_listeners: set[asyncio.Queue[str]] = set()
 _bot_oauth_states: dict[str, Dict[str, Any]] = {}
 
@@ -461,6 +469,247 @@ def get_bot_user_id() -> Optional[str]:
     return BOT_USER_ID
 
 
+def _eventsub_headers(access_token: str) -> dict[str, str]:
+    """Return Twitch Helix headers for EventSub requests using the channel token.
+
+    Dependencies: Reads the configured Twitch client ID for the application.
+    Code customers: EventSub subscription management and health probes use these
+    headers to authenticate against Twitch APIs with the channel owner token.
+    Used variables/origin: Combines the provided ``access_token`` with the
+    configured client ID to build the Authorization and Client-Id headers.
+    """
+
+    client_id = get_twitch_client_id()
+    if not client_id:
+        raise RuntimeError("twitch oauth credentials are not configured")
+    return {"Authorization": f"Bearer {access_token}", "Client-Id": client_id}
+
+
+def ensure_eventsub_subscriptions(request: FastAPIRequest, channel_pk: int, db: Session) -> None:
+    """Ensure required EventSub subscriptions are registered for a channel.
+
+    Dependencies: Issues HTTPS calls to Twitch Helix using the channel owner's
+    OAuth token and configured client ID. Persists subscription rows via the
+    provided SQLAlchemy ``Session``.
+    Code customers: The Twitch OAuth callback invokes this to keep pricing
+    events flowing automatically without extra setup.
+    Used variables/origin: ``channel_pk`` resolves the broadcaster row; the
+    callback URL derives from ``request.url_for('eventsub_callback')`` and the
+    function records the Twitch subscription identifiers plus HMAC secrets in
+    ``EventSubscription`` rows.
+    """
+
+    channel = db.get(ActiveChannel, channel_pk)
+    if not channel:
+        logger.warning("Cannot create EventSub subscriptions; channel %s missing", channel_pk)
+        return
+    owner = channel.owner
+    if not owner or not owner.access_token:
+        logger.info("Skipping EventSub setup for %s; owner token missing", channel.channel_name)
+        return
+    try:
+        headers = _eventsub_headers(owner.access_token)
+    except RuntimeError as exc:
+        logger.warning("Skipping EventSub setup for %s: %s", channel.channel_name, exc)
+        return
+
+    callback = str(request.url_for("eventsub_callback"))
+    broadcaster_id = channel.channel_id
+    moderator_id = owner.twitch_id
+    desired: list[tuple[str, dict[str, str]]] = [
+        ("channel.follow", {"broadcaster_user_id": broadcaster_id, "moderator_user_id": moderator_id}),
+        ("channel.raid", {"to_broadcaster_user_id": broadcaster_id}),
+        ("channel.cheer", {"broadcaster_user_id": broadcaster_id}),
+        ("channel.subscribe", {"broadcaster_user_id": broadcaster_id}),
+        ("channel.subscription.gift", {"broadcaster_user_id": broadcaster_id}),
+    ]
+    for event_type, condition in desired:
+        if None in condition.values():
+            logger.info(
+                "Skipping EventSub %s for %s due to incomplete condition %s",
+                event_type,
+                channel.channel_name,
+                condition,
+            )
+            continue
+        existing = (
+            db.query(EventSubscription)
+            .filter(EventSubscription.channel_id == channel_pk, EventSubscription.type == event_type)
+            .one_or_none()
+        )
+        if existing and existing.status == "enabled" and existing.callback == callback:
+            continue
+        secret = secrets.token_urlsafe(32)
+        payload = {
+            "type": event_type,
+            "version": "1",
+            "condition": condition,
+            "transport": {
+                "method": "webhook",
+                "callback": callback,
+                "secret": secret,
+            },
+        }
+        try:
+            resp = requests.post(
+                "https://api.twitch.tv/helix/eventsub/subscriptions",
+                json=payload,
+                headers=headers,
+                timeout=5,
+            )
+            resp.raise_for_status()
+            data = resp.json().get("data") or []
+            twitch_sub = data[0] if data else resp.json().get("subscription", {})
+            twitch_id = twitch_sub.get("id")
+            status = twitch_sub.get("status") or "pending"
+        except Exception as exc:  # pragma: no cover - depends on live Twitch
+            logger.warning(
+                "Failed to register EventSub %s for %s: %s", event_type, channel.channel_name, exc
+            )
+            continue
+        if not twitch_id:
+            logger.warning(
+                "EventSub %s for %s returned no subscription id; response=%s",
+                event_type,
+                channel.channel_name,
+                resp.text if "resp" in locals() else "<no response>",
+            )
+            continue
+        meta_str = json.dumps({"condition": condition})
+        if existing:
+            existing.twitch_subscription_id = twitch_id
+            existing.status = status
+            existing.secret = secret
+            existing.callback = callback
+            existing.meta = meta_str
+            if status == "enabled":
+                existing.last_verified_at = datetime.utcnow()
+        else:
+            db.add(
+                EventSubscription(
+                    channel_id=channel_pk,
+                    twitch_subscription_id=twitch_id,
+                    type=event_type,
+                    status=status,
+                    secret=secret,
+                    callback=callback,
+                    meta=meta_str,
+                    last_verified_at=datetime.utcnow() if status == "enabled" else None,
+                )
+            )
+        db.commit()
+
+
+def _verify_eventsub_signature(secret: str, message_id: str, timestamp: str, body: bytes, provided: str) -> bool:
+    """Validate the HMAC signature on an EventSub webhook payload.
+
+    Dependencies: Uses the standard library ``hmac`` and ``hashlib`` modules to
+    recompute the Twitch signature.
+    Code customers: The EventSub callback uses this guard before trusting any
+    inbound payloads.
+    Used variables/origin: Combines the ``message_id``, ``timestamp``, and raw
+    request body bytes to mirror Twitch's signature creation routine.
+    """
+
+    digest = hmac.new(secret.encode("utf-8"), msg=(message_id + timestamp).encode("utf-8") + body, digestmod=hashlib.sha256)
+    expected = f"sha256={digest.hexdigest()}"
+    return hmac.compare_digest(expected, provided or "")
+
+
+def _process_eventsub_notification(db: Session, subscription: EventSubscription, message: dict[str, Any]) -> None:
+    """Translate an EventSub notification into a stored event and priority rewards.
+
+    Dependencies: Uses ``_persist_channel_event`` to write the event and award
+    points, and ``_get_or_create_channel_user`` to make sure Twitch users are
+    represented locally.
+    Code customers: Invoked exclusively by the EventSub webhook handler so
+    pricing rewards trigger for follows, raids, cheers, and subscriptions.
+    Used variables/origin: Reads the Twitch event payload to determine the
+    originating channel, the triggering user, and any numeric metadata (bits
+    amounts or gift counts).
+    """
+
+    twitch_type = subscription.type
+    internal_type = EVENTSUB_EVENT_MAP.get(twitch_type)
+    if not internal_type:
+        logger.debug("Ignoring unhandled EventSub type %s", twitch_type)
+        return
+    channel = db.get(ActiveChannel, subscription.channel_id)
+    if not channel:
+        logger.warning("Received EventSub %s for missing channel %s", twitch_type, subscription.channel_id)
+        return
+    event_payload = message.get("event") or {}
+    broadcaster_id = (message.get("subscription") or {}).get("condition", {}).get("broadcaster_user_id")
+    if broadcaster_id and broadcaster_id != channel.channel_id:
+        logger.warning(
+            "EventSub %s target mismatch: payload broadcaster %s vs channel %s",
+            twitch_type,
+            broadcaster_id,
+            channel.channel_id,
+        )
+        return
+
+    twitch_user_id = event_payload.get("user_id") or event_payload.get("from_broadcaster_user_id")
+    username = event_payload.get("user_login") or event_payload.get("from_broadcaster_user_login") or twitch_user_id
+    meta: dict[str, Any] = {}
+    if twitch_type == "channel.raid":
+        meta["viewers"] = event_payload.get("viewers")
+    elif twitch_type == "channel.cheer":
+        meta["amount"] = event_payload.get("bits") or 0
+    elif twitch_type == "channel.subscription.gift":
+        meta["count"] = event_payload.get("total") or event_payload.get("total_subs") or 1
+        meta["tier"] = event_payload.get("tier")
+    elif twitch_type == "channel.subscribe":
+        meta["tier"] = event_payload.get("tier")
+        meta["count"] = 1
+
+    user_id: Optional[int] = None
+    if twitch_user_id:
+        user = _get_or_create_channel_user(db, channel.id, twitch_user_id, username or twitch_user_id)
+        db.flush()
+        user_id = user.id
+
+    _persist_channel_event(
+        db,
+        channel.id,
+        EventIn(type=internal_type, user_id=user_id, meta=meta),
+    )
+    subscription.last_notified_at = datetime.utcnow()
+    db.commit()
+
+
+def _fetch_remote_eventsubs(channel: ActiveChannel) -> list[dict[str, Any]]:
+    """Return live EventSub subscription data from Twitch for the channel's owner.
+
+    Dependencies: Makes a Helix request using the channel owner's access token
+    and the configured client ID via ``_eventsub_headers``.
+    Code customers: Health endpoints use this to cross-check persisted
+    subscriptions with Twitch state.
+    Used variables/origin: Reads the channel's ``owner.access_token`` and
+    ``channel.channel_id`` to scope the results to relevant subscriptions.
+    """
+
+    owner = channel.owner
+    if not owner or not owner.access_token:
+        return []
+    try:
+        headers = _eventsub_headers(owner.access_token)
+    except RuntimeError:
+        return []
+    try:
+        resp = requests.get(
+            "https://api.twitch.tv/helix/eventsub/subscriptions",
+            headers=headers,
+            timeout=5,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+        return payload.get("data") or []
+    except Exception:
+        logger.warning("Failed to fetch remote EventSub subscriptions for %s", channel.channel_name, exc_info=True)
+        return []
+
+
 def get_ytmusic_client() -> YTMusic:
     global _ytmusic_client
     if YTMusic is None:
@@ -627,6 +876,28 @@ class Event(Base):
     user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"))
     meta = Column(Text)  # JSON string
     event_time = Column(DateTime, default=datetime.utcnow)
+
+
+class EventSubscription(Base):
+    __tablename__ = "event_subscriptions"
+
+    id = Column(Integer, primary_key=True)
+    channel_id = Column(Integer, ForeignKey("active_channels.id", ondelete="CASCADE"), nullable=False)
+    twitch_subscription_id = Column(String, unique=True, nullable=False)
+    type = Column(String, nullable=False)
+    status = Column(String, nullable=False, default="pending")
+    secret = Column(String, nullable=False)
+    callback = Column(Text, nullable=False)
+    transport = Column(String, nullable=False, default="webhook")
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    last_notified_at = Column(DateTime)
+    last_verified_at = Column(DateTime)
+    meta = Column(Text)
+
+    __table_args__ = (
+        UniqueConstraint("channel_id", "type", name="uq_channel_eventsub"),
+    )
 
 class TwitchUser(Base):
     __tablename__ = "twitch_users"
@@ -1277,7 +1548,7 @@ class EventIn(BaseModel):
 
 class EventOut(BaseModel):
     id: int
-    type: str = Field(serialization_alias="event_type")
+    type: str = Field(validation_alias="event_type", serialization_alias="type")
     user_id: Optional[int]
     meta: Optional[str]
     event_time: datetime
@@ -1388,7 +1659,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-SETUP_BYPASS_PREFIXES = ("/system", "/docs", "/openapi", "/redoc")
+SETUP_BYPASS_PREFIXES = ("/system", "/docs", "/openapi", "/redoc", "/twitch/eventsub")
 
 
 @app.middleware("http")
@@ -2341,6 +2612,10 @@ def auth_callback(
         if not ch.channel_key:
             ch.channel_key = generate_channel_key()
     db.commit()
+    try:
+        ensure_eventsub_subscriptions(request, ch.id, db)
+    except Exception:
+        logger.warning("EventSub bootstrap failed for %s", ch.channel_name, exc_info=True)
     if return_to:
         parsed = urlparse(return_to)
         if parsed.scheme in {"http", "https"} and parsed.netloc:
@@ -6086,23 +6361,25 @@ def mark_played(
     return {"success": True}
 
 # =====================================
-# Routes: Events
+# Event logging helpers
 # =====================================
-@app.post("/channels/{channel}/events", response_model=dict, dependencies=[Depends(require_channel_key)])
-def log_event(channel: str, payload: EventIn, db: Session = Depends(get_db)):
-    """Record a channel event and apply configured priority point rewards.
 
-    Dependencies: Uses the database ``Session`` for persistence and
-    ``get_or_create_settings`` to read reward knobs. ``award_prio_points``
-    handles balance updates with caps.
-    Code customers: Webhooks or bot workers forward Twitch events here so
-    overlays and queues stay in sync.
-    Used variables/origin: ``payload`` supplies the event type, optional
-    ``user_id`` to reward, and metadata such as gift counts, bits amounts, or
-    subscription tiers.
+def _persist_channel_event(db: Session, channel_pk: int, payload: EventIn) -> Event:
+    """Persist and reward a channel event in a single reusable helper.
+
+    Dependencies: Requires an active database ``Session`` plus the existing
+    channel settings fetched via ``get_or_create_settings`` to compute reward
+    points. ``award_prio_points`` handles the balance mutations when a user is
+    eligible. ``publish_queue_changed`` broadcasts state updates so overlays and
+    pricing displays stay current.
+    Code customers: The `/channels/{channel}/events` endpoint and the Twitch
+    EventSub webhook both call this helper to ensure consistent reward handling
+    regardless of the ingress path.
+    Used variables/origin: ``channel_pk`` targets the owning channel; ``payload``
+    supplies the event type, ``user_id`` to reward (internal DB identifier), and
+    the free-form ``meta`` dictionary used for bits, gifts, and tier data.
     """
 
-    channel_pk = get_channel_pk(channel, db)
     meta = payload.meta or {}
     meta_str = json.dumps(meta)
     ev = Event(channel_id=channel_pk, event_type=payload.type, user_id=payload.user_id, meta=meta_str)
@@ -6133,9 +6410,113 @@ def log_event(channel: str, payload: EventIn, db: Session = Depends(get_db)):
     if payload.user_id and points > 0:
         try:
             award_prio_points(db, channel_pk, payload.user_id, points)
+            logger.info(
+                "Awarded %s priority points to user %s for %s in channel %s",
+                points,
+                payload.user_id,
+                payload.type,
+                channel_pk,
+            )
         except HTTPException:
             logger.info("Skipping award for event %s in channel %s", payload.type, channel_pk)
+    else:
+        logger.debug(
+            "Recorded event %s for channel %s with payload %s but no reward points",
+            payload.type,
+            channel_pk,
+            meta,
+        )
     publish_queue_changed(channel_pk)
+    return ev
+
+# =====================================
+# Routes: EventSub
+# =====================================
+
+@app.post("/twitch/eventsub/callback", name="eventsub_callback")
+async def eventsub_callback(request: FastAPIRequest, db: Session = Depends(get_db)):
+    """Handle Twitch EventSub verification pings and live notifications.
+
+    Dependencies: Uses the request body and headers to validate EventSub HMAC
+    signatures via ``_verify_eventsub_signature`` and persists state with the
+    injected database ``Session``. Event persistence flows through
+    ``_process_eventsub_notification`` for reward calculations.
+    Code customers: Twitch's EventSub delivery system posts challenges and event
+    notifications to this endpoint whenever pricing-relevant actions occur.
+    Used variables/origin: Reads the Twitch headers (`Twitch-Eventsub-*`) for
+    signature and message metadata plus the JSON payload to identify the
+    subscription record and event content.
+    """
+
+    body = await request.body()
+    headers = request.headers
+    message_id = headers.get("Twitch-Eventsub-Message-Id") or ""
+    timestamp = headers.get("Twitch-Eventsub-Message-Timestamp") or ""
+    signature = headers.get("Twitch-Eventsub-Message-Signature") or ""
+    message_type = headers.get("Twitch-Eventsub-Message-Type") or ""
+
+    if not message_id or not timestamp or not signature:
+        raise HTTPException(status_code=400, detail="missing signature headers")
+
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid JSON")
+
+    sub_info = payload.get("subscription") or {}
+    sub_id = sub_info.get("id")
+    if not sub_id:
+        raise HTTPException(status_code=400, detail="subscription id missing")
+
+    subscription = (
+        db.query(EventSubscription)
+        .filter(EventSubscription.twitch_subscription_id == sub_id)
+        .one_or_none()
+    )
+    if not subscription:
+        logger.warning("Ignoring callback for unknown EventSub %s", sub_id)
+        return JSONResponse(status_code=202, content={"detail": "unknown subscription"})
+
+    if not _verify_eventsub_signature(subscription.secret, message_id, timestamp, body, signature):
+        logger.warning("EventSub signature mismatch for %s", sub_id)
+        raise HTTPException(status_code=403, detail="invalid signature")
+
+    subscription.status = sub_info.get("status") or subscription.status
+    subscription.updated_at = datetime.utcnow()
+    db.flush()
+
+    if message_type == "webhook_callback_verification":
+        subscription.last_verified_at = datetime.utcnow()
+        db.commit()
+        challenge = payload.get("challenge") or ""
+        return Response(content=challenge, media_type="text/plain")
+
+    if message_type == "notification":
+        _process_eventsub_notification(db, subscription, payload)
+        return JSONResponse({"success": True})
+
+    db.commit()
+    return JSONResponse({"detail": "ignored"})
+
+# =====================================
+# Routes: Events
+# =====================================
+@app.post("/channels/{channel}/events", response_model=dict, dependencies=[Depends(require_channel_key)])
+def log_event(channel: str, payload: EventIn, db: Session = Depends(get_db)):
+    """Record a channel event and apply configured priority point rewards.
+
+    Dependencies: Uses the database ``Session`` for persistence and
+    ``get_or_create_settings`` to read reward knobs. ``award_prio_points``
+    handles balance updates with caps.
+    Code customers: Webhooks or bot workers forward Twitch events here so
+    overlays and queues stay in sync.
+    Used variables/origin: ``payload`` supplies the event type, optional
+    ``user_id`` to reward, and metadata such as gift counts, bits amounts, or
+    subscription tiers.
+    """
+
+    channel_pk = get_channel_pk(channel, db)
+    ev = _persist_channel_event(db, channel_pk, payload)
     return {"event_id": ev.id}
 
 @app.get("/channels/{channel}/events", response_model=List[EventOut])
@@ -6150,7 +6531,47 @@ def list_events(channel: str, type: Optional[str] = None, since: Optional[str] =
             q = q.filter(Event.event_time >= dt)
         except ValueError:
             raise HTTPException(400, detail="invalid since timestamp")
-    return q.order_by(Event.event_time.desc()).all()
+    events = q.order_by(Event.event_time.desc()).all()
+    result: list[dict[str, Any]] = []
+    for ev in events:
+        data = EventOut.model_validate(ev).model_dump(by_alias=True)
+        data.setdefault("event_type", data.get("type"))
+        result.append(data)
+    return result
+
+
+@app.get("/channels/{channel}/eventsub/health", response_model=Dict[str, Any], dependencies=[Depends(require_token)])
+def eventsub_health(channel: str, db: Session = Depends(get_db)):
+    """Summarize EventSub subscription state for diagnostics.
+
+    Dependencies: Enforces admin/OAuth access via ``require_token`` and uses the
+    database ``Session`` to read persisted subscriptions. Remote status is
+    pulled from Twitch through ``_fetch_remote_eventsubs`` for comparison.
+    Code customers: Operations dashboards and support tooling call this endpoint
+    to verify that follow/raid/cheer/subscription hooks are active.
+    Used variables/origin: ``channel`` path param resolves the broadcaster; the
+    response includes local subscription rows (type, status, timestamps) and any
+    remote data Twitch returns.
+    """
+
+    channel_pk = get_channel_pk(channel, db)
+    channel_obj = db.get(ActiveChannel, channel_pk)
+    if not channel_obj:
+        raise HTTPException(status_code=404, detail="channel not found")
+    local = [
+        {
+            "type": sub.type,
+            "status": sub.status,
+            "last_verified_at": sub.last_verified_at,
+            "last_notified_at": sub.last_notified_at,
+            "callback": sub.callback,
+        }
+        for sub in db.query(EventSubscription).filter(EventSubscription.channel_id == channel_pk)
+    ]
+    remote = _fetch_remote_eventsubs(channel_obj)
+    if not remote:
+        logger.info("Remote EventSub data unavailable for %s; check token/scopes", channel)
+    return {"local": local, "remote": remote}
 
 # =====================================
 # Routes: Streams
