@@ -81,6 +81,11 @@ This document summarizes the REST endpoints exposed by `backend_app.py`.
 | GET | `/channels/{channel}/settings` | Retrieve channel configuration. |
 | PUT | `/channels/{channel}/settings` | Update channel configuration (admin). |
 
+The settings update endpoint accepts partial payloads and merges them with the
+existing record so omitted fields keep their persisted values. Frontend callers
+should prefer sending the full current state when possible or rely on the
+backend merge behavior to avoid unintentionally resetting values to defaults.
+
 Channel settings include queue intake controls:
 
 - `queue_closed` toggles whether any new requests are accepted.
@@ -293,7 +298,7 @@ All payloads only expose queue-facing data:
 - `request.played` — payload `{ "request": <request summary>, "up_next": <request summary>|null }`, where `up_next` is the next pending request after the played entry.
 - `queue.status` — payload `{ "closed": bool, "status": "open"|"closed"|"limited", "reason"?: str }` indicating whether the queue accepts new requests or has restricted non-priority slots. Hitting the overall queue cap flips the queue to `closed` until it is reopened.
 - `queue.archived` — payload `{ "archived_stream_id": int|null, "new_stream_id": int }` describing the stream transition when archiving.
-- `settings.updated` — payload mirroring `ChannelSettingsIn` (`max_requests_per_user`, `prio_only`, `queue_closed`, `allow_bumps`, `other_flags`, `max_prio_points`, `overall_queue_cap`, `nonpriority_queue_cap`).
+- `settings.updated` — payload mirroring the settings fields (`max_requests_per_user`, `prio_only`, `queue_closed`, `allow_bumps`, `other_flags`, `max_prio_points`, `overall_queue_cap`, `nonpriority_queue_cap`) after merges.
 - `user.bump_awarded` — payload `{ "user": { "id", "username" }, "delta": int, "prio_points": int }` when a user earns additional priority points.
 
 ## Streams

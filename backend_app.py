@@ -1191,7 +1191,7 @@ class ChannelKeyOut(BaseModel):
     channel_name: str
     channel_key: str
 
-class ChannelSettingsIn(BaseModel):
+class ChannelSettingsBase(BaseModel):
     max_requests_per_user: int = -1
     prio_only: int = 0
     queue_closed: int = 0
@@ -1215,7 +1215,33 @@ class ChannelSettingsIn(BaseModel):
     prio_reset_points_mod: int = Field(0, ge=0)
     free_mod_priority_requests: int = 0
 
-class ChannelSettingsOut(ChannelSettingsIn):
+
+class ChannelSettingsUpdate(BaseModel):
+    max_requests_per_user: Optional[int] = None
+    prio_only: Optional[int] = None
+    queue_closed: Optional[int] = None
+    allow_bumps: Optional[int] = None
+    full_auto_priority_mode: Optional[int] = None
+    other_flags: Optional[str] = None
+    max_prio_points: Optional[int] = None
+    overall_queue_cap: Optional[int] = Field(None, ge=0, le=100)
+    nonpriority_queue_cap: Optional[int] = Field(None, ge=0, le=100)
+    prio_follow_enabled: Optional[int] = None
+    prio_raid_enabled: Optional[int] = None
+    prio_bits_per_point: Optional[int] = Field(None, ge=0)
+    prio_gifts_per_point: Optional[int] = Field(None, ge=0)
+    prio_sub_tier1_points: Optional[int] = Field(None, ge=0)
+    prio_sub_tier2_points: Optional[int] = Field(None, ge=0)
+    prio_sub_tier3_points: Optional[int] = Field(None, ge=0)
+    prio_reset_points_tier1: Optional[int] = Field(None, ge=0)
+    prio_reset_points_tier2: Optional[int] = Field(None, ge=0)
+    prio_reset_points_tier3: Optional[int] = Field(None, ge=0)
+    prio_reset_points_vip: Optional[int] = Field(None, ge=0)
+    prio_reset_points_mod: Optional[int] = Field(None, ge=0)
+    free_mod_priority_requests: Optional[int] = None
+
+
+class ChannelSettingsOut(ChannelSettingsBase):
     channel_id: int
 
 class AuthUrlOut(BaseModel):
@@ -2034,6 +2060,27 @@ def _serialize_settings_event(settings: ChannelSettings) -> Dict[str, Any]:
         "prio_reset_points_mod": settings.prio_reset_points_mod,
         "free_mod_priority_requests": settings.free_mod_priority_requests,
     }
+
+
+def _apply_settings_patch(settings: ChannelSettings, payload: ChannelSettingsUpdate) -> Dict[str, Any]:
+    """Merge a partial ``ChannelSettingsUpdate`` payload into persisted settings.
+
+    Dependencies: Expects a mutable ``ChannelSettings`` ORM entity and a
+    validated ``ChannelSettingsUpdate`` model supplied by FastAPI. Code
+    customers: ``set_channel_settings`` leverages this helper to avoid wiping
+    unspecified fields when the admin UI only transmits edited controls. Used
+    variables/origin: iterates through ``payload`` values produced by
+    ``model_dump(exclude_unset=True)`` and writes them onto the provided
+    ``settings`` instance, ignoring ``None`` for numeric fields while honoring
+    explicit nulls for ``other_flags``.
+    """
+
+    updates = payload.model_dump(exclude_unset=True)
+    for field, value in updates.items():
+        if value is None and field != "other_flags":
+            continue
+        setattr(settings, field, value)
+    return updates
 
 
 def emit_queue_status_event(
@@ -4367,32 +4414,23 @@ def regenerate_channel_key(
     return ChannelKeyOut(channel_id=ch.id, channel_name=ch.channel_name, channel_key=ch.channel_key)
 
 @app.put("/channels/{channel}/settings", dependencies=[Depends(require_token)])
-def set_channel_settings(channel: str, payload: ChannelSettingsIn, db: Session = Depends(get_db)):
+def set_channel_settings(
+    channel: str, payload: ChannelSettingsUpdate, db: Session = Depends(get_db)
+):
+    """Apply partial channel settings without resetting unspecified fields to defaults.
+
+    Dependencies: Relies on ``get_channel_pk`` for lookup and ``get_or_create_settings``
+    for fetching the persisted settings row. Code customers: the admin UI and any
+    automation calling ``/channels/{channel}/settings`` use this route to tweak
+    queue behavior incrementally. Used variables/origin: merges ``payload`` values
+    into the ``ChannelSettings`` instance via ``_apply_settings_patch`` and emits
+    queue status events when ``queue_closed`` flips.
+    """
+
     channel_pk = get_channel_pk(channel, db)
     st = get_or_create_settings(db, channel_pk)
     prev_queue_closed = bool(st.queue_closed)
-    st.max_requests_per_user = payload.max_requests_per_user
-    st.prio_only = payload.prio_only
-    st.queue_closed = payload.queue_closed
-    st.allow_bumps = payload.allow_bumps
-    st.full_auto_priority_mode = payload.full_auto_priority_mode
-    st.other_flags = payload.other_flags
-    st.max_prio_points = payload.max_prio_points
-    st.overall_queue_cap = payload.overall_queue_cap
-    st.nonpriority_queue_cap = payload.nonpriority_queue_cap
-    st.prio_follow_enabled = payload.prio_follow_enabled
-    st.prio_raid_enabled = payload.prio_raid_enabled
-    st.prio_bits_per_point = payload.prio_bits_per_point
-    st.prio_gifts_per_point = payload.prio_gifts_per_point
-    st.prio_sub_tier1_points = payload.prio_sub_tier1_points
-    st.prio_sub_tier2_points = payload.prio_sub_tier2_points
-    st.prio_sub_tier3_points = payload.prio_sub_tier3_points
-    st.prio_reset_points_tier1 = payload.prio_reset_points_tier1
-    st.prio_reset_points_tier2 = payload.prio_reset_points_tier2
-    st.prio_reset_points_tier3 = payload.prio_reset_points_tier3
-    st.prio_reset_points_vip = payload.prio_reset_points_vip
-    st.prio_reset_points_mod = payload.prio_reset_points_mod
-    st.free_mod_priority_requests = payload.free_mod_priority_requests
+    _apply_settings_patch(st, payload)
     db.commit()
     db.refresh(st)
     updated_settings = _serialize_settings_event(st)

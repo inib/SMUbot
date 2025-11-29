@@ -390,6 +390,36 @@ class ChannelEventTests(unittest.TestCase):
         finally:
             db.close()
 
+    def test_partial_settings_updates_preserve_existing_values(self) -> None:
+        details = _setup_channel()
+        channel = details["channel_name"]
+        headers = {"X-Admin-Token": backend_app.ADMIN_TOKEN}
+
+        db = backend_app.SessionLocal()
+        try:
+            settings = backend_app.get_or_create_settings(db, details["channel_pk"])
+            settings.allow_bumps = 0
+            settings.max_prio_points = 42
+            settings.overall_queue_cap = 77
+            db.commit()
+        finally:
+            db.close()
+
+        patch = self.client.put(
+            f"/channels/{channel}/settings",
+            json={"queue_closed": 1},
+            headers=headers,
+        )
+        self.assertEqual(patch.status_code, 200, patch.text)
+
+        updated = self.client.get(
+            f"/channels/{channel}/settings", headers=headers
+        ).json()
+        self.assertEqual(updated["queue_closed"], 1)
+        self.assertEqual(updated["allow_bumps"], 0)
+        self.assertEqual(updated["max_prio_points"], 42)
+        self.assertEqual(updated["overall_queue_cap"], 77)
+
 
 if __name__ == "__main__":
     unittest.main()
