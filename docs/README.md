@@ -90,6 +90,9 @@ Songbot relies on two distinct OAuth flows that map to the two management panels
   permissions.
 - Check the Queue Manager landing page for the scope list; missing `bits:read`
   or `moderator:read:followers` indicates reauthorization is still needed.
+- The Queue Manager disables pricing controls (follows, raids, bits, gifted
+  subs, and sub-tier rewards) when those scopes are missing and shows inline
+  helper text prompting reauthorization.
 
 Owners can invite moderators by adding their Twitch accounts inside the Queue
 Manager, and authenticated users who manage multiple channels can switch between
