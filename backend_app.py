@@ -5155,6 +5155,17 @@ def set_points(channel: str, user_id: int, payload: dict, db: Session = Depends(
 
 
 def _iter_twitch_collection(url: str, headers: Mapping[str, str], params: dict[str, Any]) -> Iterable[dict[str, Any]]:
+    """Yield paginated Twitch API collections safely.
+
+    Dependencies: Performs HTTP GET requests via ``requests`` using the provided
+    headers and query params, retrying pagination cursors until exhausted.
+    Code customers: Used by Twitch role helpers to enumerate VIPs and
+    subscribers without duplicating pagination logic.
+    Used variables/origin: ``url`` targets the collection endpoint while
+    ``headers`` and ``params`` originate from the caller's OAuth token and
+    broadcaster context.
+    """
+
     query: dict[str, Any] = dict(params)
     while True:
         try:
@@ -5198,18 +5209,31 @@ def _iter_twitch_collection(url: str, headers: Mapping[str, str], params: dict[s
             return
 
 
-    def _collect_channel_roles(channel_obj: ActiveChannel) -> tuple[set[str], dict[str, Optional[str]]]:
-        if not channel_obj or not channel_obj.owner or not channel_obj.channel_id:
-            return set(), {}
-        owner = channel_obj.owner
-        client_id = get_twitch_client_id()
-        if not client_id or not owner.access_token:
-            return set(), {}
-        headers = {
-            "Authorization": f"Bearer {owner.access_token}",
-            "Client-Id": client_id,
-        }
-        params = {"broadcaster_id": channel_obj.channel_id}
+def _collect_channel_roles(channel_obj: ActiveChannel) -> tuple[set[str], dict[str, Optional[str]]]:
+    """Collect VIP and subscription roles for a channel via Twitch API.
+
+    Dependencies: Requires a valid ``ActiveChannel`` with an ``owner`` that has
+    an OAuth access token, Twitch client ID via ``get_twitch_client_id``, and
+    uses ``_iter_twitch_collection`` for pagination.
+    Code customers: Role-aware queue APIs such as ``get_queue_full`` and
+    ``_award_reset_priority_points`` call this to enrich user payloads and reset
+    rewards.
+    Used variables/origin: Pulls the broadcaster ID from ``channel_obj`` to
+    scope VIP and subscriber lookups; role IDs and tiers originate from Helix
+    responses.
+    """
+
+    if not channel_obj or not channel_obj.owner or not channel_obj.channel_id:
+        return set(), {}
+    owner = channel_obj.owner
+    client_id = get_twitch_client_id()
+    if not client_id or not owner.access_token:
+        return set(), {}
+    headers = {
+        "Authorization": f"Bearer {owner.access_token}",
+        "Client-Id": client_id,
+    }
+    params = {"broadcaster_id": channel_obj.channel_id}
     vip_ids: set[str] = set()
     subs: dict[str, Optional[str]] = {}
     for row in _iter_twitch_collection("https://api.twitch.tv/helix/channels/vips", headers, params):
