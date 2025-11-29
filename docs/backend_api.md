@@ -86,11 +86,8 @@ Channel settings include queue intake controls:
 - `queue_closed` toggles whether any new requests are accepted.
 - `overall_queue_cap` (0–100, default 100) auto-closes intake once pending requests reach the cap and emits a `queue.status` event.
 - `nonpriority_queue_cap` (0–100, default 100) rejects new non-priority submissions when full while still allowing priority requests.
-- `prio_only`, `max_requests_per_user`, `other_flags`, and `max_prio_points` behave as before and are reflected in `settings.updated` events.
-- `allow_bumps` now gates all priority-point spending. Set it to `0` to block both manual and automated priority upgrades.
-- `full_auto_priority_mode` automatically spends available points on new requests and upgrades pending ones whenever users later earn more points.
-
-Automatic upgrades emit `request.bumped` events (and the usual `settings.updated` payload when toggling the modes) so overlays and chat bots can stay synchronized without polling.
+- `prio_only`, `max_requests_per_user`, `allow_bumps`, `other_flags`, and `max_prio_points` behave as before and are reflected in `settings.updated` events.
+- Existing deployments should apply `migrations/20240624_queue_caps.sql` to add the new capacity columns and backfill defaults for legacy channels.
 
 ## Songs
 | Method | Path | Description |

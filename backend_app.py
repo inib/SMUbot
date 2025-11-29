@@ -2697,10 +2697,33 @@ def add_mod(channel: str, payload: ModIn, db: Session = Depends(get_db), authori
 # =====================================
 
 def get_or_create_settings(db: Session, channel_pk: int) -> ChannelSettings:
+    """Return channel settings, creating or backfilling defaults when missing.
+
+    Dependencies: Uses the provided ``Session`` to query ``ChannelSettings`` by
+    ``channel_pk`` and will commit changes when default queue caps are applied.
+    Code customers: Any route or helper that needs consistent settings, such as
+    queue enforcement, playlist helpers, and channel metadata endpoints.
+    Used variables/origin: Receives ``channel_pk`` from upstream path parameters
+    or ownership checks, and writes default values onto the settings row when
+    ``overall_queue_cap`` or ``nonpriority_queue_cap`` are unset.
+    """
+
     st = db.query(ChannelSettings).filter(ChannelSettings.channel_id == channel_pk).one_or_none()
+    created = False
     if not st:
         st = ChannelSettings(channel_id=channel_pk)
         db.add(st)
+        created = True
+
+    backfilled = False
+    if st.overall_queue_cap is None:
+        st.overall_queue_cap = 100
+        backfilled = True
+    if st.nonpriority_queue_cap is None:
+        st.nonpriority_queue_cap = 100
+        backfilled = True
+
+    if created or backfilled:
         db.commit()
         db.refresh(st)
     return st
