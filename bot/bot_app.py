@@ -179,12 +179,13 @@ class Backend:
         return resp['id']
 
     async def add_request(self, channel: str, song_id: int, user_id: int,
-                          want_priority: bool, prefer_sub_free: bool, is_subscriber: bool):
+                          want_priority: bool, prefer_sub_free: bool, is_subscriber: bool, is_mod: bool):
         return await self._req('POST', f"/channels/{channel}/queue", {
             'song_id': song_id, 'user_id': user_id,
             'want_priority': want_priority,
             'prefer_sub_free': prefer_sub_free,
             'is_subscriber': is_subscriber,
+            'is_mod': is_mod,
         })
 
     async def get_queue(self, channel: str, include_played: bool = False):
@@ -899,6 +900,7 @@ class SongBot(commands.Bot):
                 want_priority=False,
                 prefer_sub_free=True,
                 is_subscriber=bool(msg.chatter.subscriber),
+                is_mod=bool(msg.chatter.moderator or msg.chatter.broadcaster),
             )
             await self._send_message(
                 login,
@@ -1257,6 +1259,7 @@ class SongBot(commands.Bot):
                 want_priority=True,
                 prefer_sub_free=True,
                 is_subscriber=bool(msg.chatter.subscriber),
+                is_mod=bool(msg.chatter.moderator or msg.chatter.broadcaster),
             )
             await backend.delete_request(channel, target['id'])
             await self._send_message(
@@ -1895,6 +1898,7 @@ class BotService:
                 want_priority=False,
                 prefer_sub_free=True,
                 is_subscriber=msg.author.is_subscriber,
+                is_mod=bool(msg.author.is_mod or msg.author.is_broadcaster),
             )
             await self._send_message(
                 msg.channel,
@@ -1965,6 +1969,7 @@ class BotService:
                 want_priority=True,
                 prefer_sub_free=True,
                 is_subscriber=msg.author.is_subscriber,
+                is_mod=bool(msg.author.is_mod or msg.author.is_broadcaster),
             )
             await backend.delete_request(channel, target['id'])
             await self._send_message(

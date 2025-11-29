@@ -154,7 +154,8 @@ def ensure_channel_settings_schema() -> None:
     Code customers: Startup bootstrap that needs the latest settings columns
     before serving traffic.
     Used variables/origin: Operates on the ``channel_settings`` table and adds
-    the ``full_auto_priority_mode`` flag with a default of ``0`` when absent.
+    the ``full_auto_priority_mode`` flag plus priority pricing columns with
+    defaults when absent.
     """
 
     inspector = inspect(engine)
@@ -162,13 +163,28 @@ def ensure_channel_settings_schema() -> None:
         return
 
     columns = {col["name"] for col in inspector.get_columns("channel_settings")}
-    if "full_auto_priority_mode" not in columns:
-        with engine.begin() as conn:
-            conn.execute(
-                text(
-                    "ALTER TABLE channel_settings ADD COLUMN full_auto_priority_mode INTEGER DEFAULT 0"
-                )
-            )
+    required_columns = {
+        "full_auto_priority_mode": "ALTER TABLE channel_settings ADD COLUMN full_auto_priority_mode INTEGER DEFAULT 0",
+        "prio_follow_enabled": "ALTER TABLE channel_settings ADD COLUMN prio_follow_enabled INTEGER NOT NULL DEFAULT 1",
+        "prio_raid_enabled": "ALTER TABLE channel_settings ADD COLUMN prio_raid_enabled INTEGER NOT NULL DEFAULT 1",
+        "prio_bits_per_point": "ALTER TABLE channel_settings ADD COLUMN prio_bits_per_point INTEGER NOT NULL DEFAULT 200",
+        "prio_gifts_per_point": "ALTER TABLE channel_settings ADD COLUMN prio_gifts_per_point INTEGER NOT NULL DEFAULT 5",
+        "prio_sub_tier1_points": "ALTER TABLE channel_settings ADD COLUMN prio_sub_tier1_points INTEGER NOT NULL DEFAULT 0",
+        "prio_sub_tier2_points": "ALTER TABLE channel_settings ADD COLUMN prio_sub_tier2_points INTEGER NOT NULL DEFAULT 0",
+        "prio_sub_tier3_points": "ALTER TABLE channel_settings ADD COLUMN prio_sub_tier3_points INTEGER NOT NULL DEFAULT 0",
+        "prio_reset_points_tier1": "ALTER TABLE channel_settings ADD COLUMN prio_reset_points_tier1 INTEGER NOT NULL DEFAULT 0",
+        "prio_reset_points_tier2": "ALTER TABLE channel_settings ADD COLUMN prio_reset_points_tier2 INTEGER NOT NULL DEFAULT 0",
+        "prio_reset_points_tier3": "ALTER TABLE channel_settings ADD COLUMN prio_reset_points_tier3 INTEGER NOT NULL DEFAULT 0",
+        "prio_reset_points_vip": "ALTER TABLE channel_settings ADD COLUMN prio_reset_points_vip INTEGER NOT NULL DEFAULT 0",
+        "prio_reset_points_mod": "ALTER TABLE channel_settings ADD COLUMN prio_reset_points_mod INTEGER NOT NULL DEFAULT 0",
+        "free_mod_priority_requests": "ALTER TABLE channel_settings ADD COLUMN free_mod_priority_requests INTEGER NOT NULL DEFAULT 0",
+    }
+    missing = {name: ddl for name, ddl in required_columns.items() if name not in columns}
+    if not missing:
+        return
+    with engine.begin() as conn:
+        for ddl in missing.values():
+            conn.execute(text(ddl))
 
 
 def backfill_missing_channel_keys() -> None:
@@ -521,6 +537,19 @@ class ChannelSettings(Base):
     max_prio_points = Column(Integer, default=10)
     overall_queue_cap = Column(Integer, default=100)
     nonpriority_queue_cap = Column(Integer, default=100)
+    prio_follow_enabled = Column(Integer, default=1)
+    prio_raid_enabled = Column(Integer, default=1)
+    prio_bits_per_point = Column(Integer, default=200)
+    prio_gifts_per_point = Column(Integer, default=5)
+    prio_sub_tier1_points = Column(Integer, default=0)
+    prio_sub_tier2_points = Column(Integer, default=0)
+    prio_sub_tier3_points = Column(Integer, default=0)
+    prio_reset_points_tier1 = Column(Integer, default=0)
+    prio_reset_points_tier2 = Column(Integer, default=0)
+    prio_reset_points_tier3 = Column(Integer, default=0)
+    prio_reset_points_vip = Column(Integer, default=0)
+    prio_reset_points_mod = Column(Integer, default=0)
+    free_mod_priority_requests = Column(Integer, default=0)
 
     channel = relationship("ActiveChannel", back_populates="settings")
 
@@ -700,6 +729,21 @@ def _ensure_channel_settings_schema() -> None:
             return
 
         columns = {column["name"] for column in inspector.get_columns("channel_settings")}
+        pricing_columns = {
+            "prio_follow_enabled": "ALTER TABLE channel_settings ADD COLUMN prio_follow_enabled INTEGER NOT NULL DEFAULT 1",
+            "prio_raid_enabled": "ALTER TABLE channel_settings ADD COLUMN prio_raid_enabled INTEGER NOT NULL DEFAULT 1",
+            "prio_bits_per_point": "ALTER TABLE channel_settings ADD COLUMN prio_bits_per_point INTEGER NOT NULL DEFAULT 200",
+            "prio_gifts_per_point": "ALTER TABLE channel_settings ADD COLUMN prio_gifts_per_point INTEGER NOT NULL DEFAULT 5",
+            "prio_sub_tier1_points": "ALTER TABLE channel_settings ADD COLUMN prio_sub_tier1_points INTEGER NOT NULL DEFAULT 0",
+            "prio_sub_tier2_points": "ALTER TABLE channel_settings ADD COLUMN prio_sub_tier2_points INTEGER NOT NULL DEFAULT 0",
+            "prio_sub_tier3_points": "ALTER TABLE channel_settings ADD COLUMN prio_sub_tier3_points INTEGER NOT NULL DEFAULT 0",
+            "prio_reset_points_tier1": "ALTER TABLE channel_settings ADD COLUMN prio_reset_points_tier1 INTEGER NOT NULL DEFAULT 0",
+            "prio_reset_points_tier2": "ALTER TABLE channel_settings ADD COLUMN prio_reset_points_tier2 INTEGER NOT NULL DEFAULT 0",
+            "prio_reset_points_tier3": "ALTER TABLE channel_settings ADD COLUMN prio_reset_points_tier3 INTEGER NOT NULL DEFAULT 0",
+            "prio_reset_points_vip": "ALTER TABLE channel_settings ADD COLUMN prio_reset_points_vip INTEGER NOT NULL DEFAULT 0",
+            "prio_reset_points_mod": "ALTER TABLE channel_settings ADD COLUMN prio_reset_points_mod INTEGER NOT NULL DEFAULT 0",
+            "free_mod_priority_requests": "ALTER TABLE channel_settings ADD COLUMN free_mod_priority_requests INTEGER NOT NULL DEFAULT 0",
+        }
 
         if "overall_queue_cap" not in columns:
             connection.execute(
@@ -730,6 +774,10 @@ def _ensure_channel_settings_schema() -> None:
                     "WHERE nonpriority_queue_cap IS NULL"
                 )
             )
+
+        for name, ddl in pricing_columns.items():
+            if name not in columns:
+                connection.execute(text(ddl))
 
 
 def _ensure_playlist_schema() -> None:
@@ -872,6 +920,19 @@ class ChannelSettingsIn(BaseModel):
     max_prio_points: int = 10
     overall_queue_cap: int = Field(100, ge=0, le=100)
     nonpriority_queue_cap: int = Field(100, ge=0, le=100)
+    prio_follow_enabled: int = 1
+    prio_raid_enabled: int = 1
+    prio_bits_per_point: int = Field(200, ge=0)
+    prio_gifts_per_point: int = Field(5, ge=0)
+    prio_sub_tier1_points: int = Field(0, ge=0)
+    prio_sub_tier2_points: int = Field(0, ge=0)
+    prio_sub_tier3_points: int = Field(0, ge=0)
+    prio_reset_points_tier1: int = Field(0, ge=0)
+    prio_reset_points_tier2: int = Field(0, ge=0)
+    prio_reset_points_tier3: int = Field(0, ge=0)
+    prio_reset_points_vip: int = Field(0, ge=0)
+    prio_reset_points_mod: int = Field(0, ge=0)
+    free_mod_priority_requests: int = 0
 
 class ChannelSettingsOut(ChannelSettingsIn):
     channel_id: int
@@ -1169,6 +1230,7 @@ class RequestCreate(BaseModel):
     want_priority: bool = False
     prefer_sub_free: bool = True
     is_subscriber: bool = False  # caller must tell us subscriber status
+    is_mod: bool = False
 
 class RequestUpdate(BaseModel):
     played: Optional[int] = None
@@ -1677,6 +1739,19 @@ def _serialize_settings_event(settings: ChannelSettings) -> Dict[str, Any]:
         "max_prio_points": settings.max_prio_points,
         "overall_queue_cap": settings.overall_queue_cap,
         "nonpriority_queue_cap": settings.nonpriority_queue_cap,
+        "prio_follow_enabled": settings.prio_follow_enabled,
+        "prio_raid_enabled": settings.prio_raid_enabled,
+        "prio_bits_per_point": settings.prio_bits_per_point,
+        "prio_gifts_per_point": settings.prio_gifts_per_point,
+        "prio_sub_tier1_points": settings.prio_sub_tier1_points,
+        "prio_sub_tier2_points": settings.prio_sub_tier2_points,
+        "prio_sub_tier3_points": settings.prio_sub_tier3_points,
+        "prio_reset_points_tier1": settings.prio_reset_points_tier1,
+        "prio_reset_points_tier2": settings.prio_reset_points_tier2,
+        "prio_reset_points_tier3": settings.prio_reset_points_tier3,
+        "prio_reset_points_vip": settings.prio_reset_points_vip,
+        "prio_reset_points_mod": settings.prio_reset_points_mod,
+        "free_mod_priority_requests": settings.free_mod_priority_requests,
     }
 
 
@@ -2774,6 +2849,25 @@ def get_or_create_settings(db: Session, channel_pk: int) -> ChannelSettings:
     if st.nonpriority_queue_cap is None:
         st.nonpriority_queue_cap = 100
         backfilled = True
+    default_pricing = {
+        "prio_follow_enabled": 1,
+        "prio_raid_enabled": 1,
+        "prio_bits_per_point": 200,
+        "prio_gifts_per_point": 5,
+        "prio_sub_tier1_points": 0,
+        "prio_sub_tier2_points": 0,
+        "prio_sub_tier3_points": 0,
+        "prio_reset_points_tier1": 0,
+        "prio_reset_points_tier2": 0,
+        "prio_reset_points_tier3": 0,
+        "prio_reset_points_vip": 0,
+        "prio_reset_points_mod": 0,
+        "free_mod_priority_requests": 0,
+    }
+    for field, default_value in default_pricing.items():
+        if getattr(st, field, None) is None:
+            setattr(st, field, default_value)
+            backfilled = True
 
     if created or backfilled:
         db.commit()
@@ -2988,6 +3082,94 @@ def _get_playlist_user(db: Session, channel_pk: int) -> User:
     return _get_or_create_channel_user(db, channel_pk, "__playlist__", "Playlist")
 
 
+def _award_reset_priority_points(db: Session, channel_pk: int, settings: ChannelSettings) -> None:
+    """Grant configured reset priority points to subscribers, VIPs, and mods.
+
+    Dependencies: Reuses ``_collect_channel_roles`` for live role lookups,
+    channel moderator links on ``ActiveChannel``, and ``award_prio_points`` to
+    persist capped balances.
+    Code customers: ``current_stream`` calls this helper once when a new stream
+    (and therefore queue) is created so automated perks align with configured
+    tiers.
+    Used variables/origin: ``channel_pk`` scopes the affected channel; role
+    identifiers originate from Twitch API responses or local moderator records;
+    per-role point values originate from ``settings``.
+    """
+
+    reset_values = {
+        "tier1": max(settings.prio_reset_points_tier1 or 0, 0),
+        "tier2": max(settings.prio_reset_points_tier2 or 0, 0),
+        "tier3": max(settings.prio_reset_points_tier3 or 0, 0),
+        "vip": max(settings.prio_reset_points_vip or 0, 0),
+        "mod": max(settings.prio_reset_points_mod or 0, 0),
+    }
+    if not any(reset_values.values()):
+        return
+
+    channel_obj = db.get(ActiveChannel, channel_pk)
+    if not channel_obj:
+        return
+
+    role_collector = globals().get("_collect_channel_roles")
+    if callable(role_collector):
+        vip_ids, subs = role_collector(channel_obj)
+    else:  # pragma: no cover - defensive fallback for legacy deployments
+        vip_ids, subs = set(), {}
+
+    moderator_ids: dict[str, str] = {}
+    for mod_link in channel_obj.moderators:
+        if mod_link.user and mod_link.user.twitch_id:
+            moderator_ids[mod_link.user.twitch_id] = mod_link.user.username or mod_link.user.twitch_id
+
+    existing_users = {
+        u.twitch_id: u
+        for u in db.query(User).filter(User.channel_id == channel_pk).all()
+        if u.twitch_id
+    }
+
+    def resolve_user(twitch_id: str, username: Optional[str] = None) -> Optional[User]:
+        if not twitch_id:
+            return None
+        cached = existing_users.get(twitch_id)
+        if cached:
+            return cached
+        user = _get_or_create_channel_user(db, channel_pk, twitch_id, username or twitch_id)
+        existing_users[twitch_id] = user
+        return user
+
+    pending_awards: dict[int, int] = {}
+    for twitch_id, tier in subs.items():
+        points = 0
+        if tier == "1000" or str(tier).lower() == "prime":
+            points = reset_values["tier1"]
+        elif str(tier) == "2000":
+            points = reset_values["tier2"]
+        elif str(tier) == "3000":
+            points = reset_values["tier3"]
+        if points > 0:
+            user = resolve_user(twitch_id)
+            if user:
+                pending_awards[user.id] = pending_awards.get(user.id, 0) + points
+
+    for twitch_id in vip_ids:
+        if reset_values["vip"] > 0:
+            user = resolve_user(twitch_id)
+            if user:
+                pending_awards[user.id] = pending_awards.get(user.id, 0) + reset_values["vip"]
+
+    for twitch_id, username in moderator_ids.items():
+        if reset_values["mod"] > 0:
+            user = resolve_user(twitch_id, username)
+            if user:
+                pending_awards[user.id] = pending_awards.get(user.id, 0) + reset_values["mod"]
+
+    for user_id, delta in pending_awards.items():
+        try:
+            award_prio_points(db, channel_pk, user_id, delta)
+        except HTTPException:
+            logger.info("Skipped reset award for user %s in channel %s", user_id, channel_pk)
+
+
 def _ensure_playlist_song(db: Session, channel_pk: int, item: PlaylistItem) -> Song:
     url, video_id = _canonicalize_video_url(item.url, item.video_id)
     if not url and not video_id:
@@ -3129,6 +3311,18 @@ def _create_default_favorites_playlist(db: Session, channel_pk: int) -> Playlist
 
 
 def current_stream(db: Session, channel_pk: int) -> int:
+    """Return an active stream id, creating a fresh stream and reset rewards when none exists.
+
+    Dependencies: Relies on the shared database ``Session`` to look up or
+    insert ``StreamSession`` rows, and calls ``get_or_create_settings`` plus the
+    reset award helper to initialize per-stream perks.
+    Code customers: Queue intake, playlist utilities, and stats endpoints call
+    this to scope actions to the current broadcast's queue.
+    Used variables/origin: ``channel_pk`` identifies the channel; the function
+    allocates a new stream and emits a queue change when no active session is
+    present.
+    """
+
     s = (
         db.query(StreamSession)
         .filter(StreamSession.channel_id == channel_pk, StreamSession.ended_at.is_(None))
@@ -3139,6 +3333,8 @@ def current_stream(db: Session, channel_pk: int) -> int:
     s = StreamSession(channel_id=channel_pk)
     db.add(s)
     db.commit()
+    settings = get_or_create_settings(db, channel_pk)
+    _award_reset_priority_points(db, channel_pk, settings)
     publish_queue_changed(channel_pk)
     return s.id
 
@@ -3183,6 +3379,26 @@ def _priority_spending_enabled(settings: ChannelSettings) -> bool:
     return bool(settings.allow_bumps)
 
 
+def _priority_points_for_tier(settings: ChannelSettings, tier: Optional[str]) -> int:
+    """Map Twitch subscription tiers to configured per-sub priority point values.
+
+    Dependencies: Reads ``ChannelSettings`` provided by callers.
+    Code customers: Event ingestion and queue-reset reward helpers reuse this
+    mapping to grant tier-weighted points consistently.
+    Used variables/origin: ``tier`` originates from Twitch event metadata (e.g.,
+    ``"1000"`` for tier 1). Missing or unknown tiers yield zero.
+    """
+
+    tier_str = (tier or "").strip()
+    if tier_str == "1000" or tier_str.lower() == "prime":
+        return max(settings.prio_sub_tier1_points or 0, 0)
+    if tier_str == "2000":
+        return max(settings.prio_sub_tier2_points or 0, 0)
+    if tier_str == "3000":
+        return max(settings.prio_sub_tier3_points or 0, 0)
+    return 0
+
+
 def _apply_priority_to_new_request(
     db: Session,
     settings: ChannelSettings,
@@ -3192,6 +3408,7 @@ def _apply_priority_to_new_request(
     want_priority: bool,
     prefer_sub_free: bool,
     is_subscriber: bool,
+    is_mod: bool,
 ) -> tuple[int, Optional[str]]:
     """Try to make an incoming request priority by consuming freebies or points.
 
@@ -3200,8 +3417,10 @@ def _apply_priority_to_new_request(
     Code customers: The queue intake endpoint calls this helper to consistently
     enforce new priority automation rules.
     Used variables/origin: ``settings`` supplies channel toggles, ``user_id`` and
-    ``stream_id`` originate from the intake payload, and ``want_priority``
-    mirrors the caller's explicit intent before any auto-upgrade logic applies.
+    ``stream_id`` originate from the intake payload, ``want_priority`` mirrors
+    the caller's explicit intent before any auto-upgrade logic applies, and
+    ``is_mod`` originates from chat context to allow moderator freebies when
+    configured.
     """
 
     if not _priority_spending_enabled(settings):
@@ -3210,6 +3429,8 @@ def _apply_priority_to_new_request(
         return 0, None
 
     priority_source: Optional[str] = None
+    if want_priority and settings.free_mod_priority_requests and is_mod:
+        return 1, "mod_free"
     if want_priority and prefer_sub_free and try_use_sub_free(db, user_id, stream_id, is_subscriber):
         return 1, "sub_free"
 
@@ -3772,6 +3993,19 @@ def get_channel_settings(channel: str, db: Session = Depends(get_db)):
         max_prio_points=st.max_prio_points,
         overall_queue_cap=st.overall_queue_cap,
         nonpriority_queue_cap=st.nonpriority_queue_cap,
+        prio_follow_enabled=st.prio_follow_enabled,
+        prio_raid_enabled=st.prio_raid_enabled,
+        prio_bits_per_point=st.prio_bits_per_point,
+        prio_gifts_per_point=st.prio_gifts_per_point,
+        prio_sub_tier1_points=st.prio_sub_tier1_points,
+        prio_sub_tier2_points=st.prio_sub_tier2_points,
+        prio_sub_tier3_points=st.prio_sub_tier3_points,
+        prio_reset_points_tier1=st.prio_reset_points_tier1,
+        prio_reset_points_tier2=st.prio_reset_points_tier2,
+        prio_reset_points_tier3=st.prio_reset_points_tier3,
+        prio_reset_points_vip=st.prio_reset_points_vip,
+        prio_reset_points_mod=st.prio_reset_points_mod,
+        free_mod_priority_requests=st.free_mod_priority_requests,
     )
 
 
@@ -3861,6 +4095,19 @@ def set_channel_settings(channel: str, payload: ChannelSettingsIn, db: Session =
     st.max_prio_points = payload.max_prio_points
     st.overall_queue_cap = payload.overall_queue_cap
     st.nonpriority_queue_cap = payload.nonpriority_queue_cap
+    st.prio_follow_enabled = payload.prio_follow_enabled
+    st.prio_raid_enabled = payload.prio_raid_enabled
+    st.prio_bits_per_point = payload.prio_bits_per_point
+    st.prio_gifts_per_point = payload.prio_gifts_per_point
+    st.prio_sub_tier1_points = payload.prio_sub_tier1_points
+    st.prio_sub_tier2_points = payload.prio_sub_tier2_points
+    st.prio_sub_tier3_points = payload.prio_sub_tier3_points
+    st.prio_reset_points_tier1 = payload.prio_reset_points_tier1
+    st.prio_reset_points_tier2 = payload.prio_reset_points_tier2
+    st.prio_reset_points_tier3 = payload.prio_reset_points_tier3
+    st.prio_reset_points_vip = payload.prio_reset_points_vip
+    st.prio_reset_points_mod = payload.prio_reset_points_mod
+    st.free_mod_priority_requests = payload.free_mod_priority_requests
     db.commit()
     db.refresh(st)
     updated_settings = _serialize_settings_event(st)
@@ -5105,7 +5352,8 @@ def add_request(channel: str, payload: RequestCreate, db: Session = Depends(get_
     while keeping overlays synchronized through emitted events.
     Used variables/origin: Path parameter ``channel`` maps to ``channel_pk``;
     the payload contributes ``user_id``, ``song_id``, and priority preferences;
-    the database session persists both the new ``Request`` and any point spends.
+    moderator intent arrives via ``is_mod``; the database session persists both
+    the new ``Request`` and any point spends.
     """
 
     channel_pk = get_channel_pk(channel, db)
@@ -5145,6 +5393,7 @@ def add_request(channel: str, payload: RequestCreate, db: Session = Depends(get_
         want_priority=payload.want_priority,
         prefer_sub_free=payload.prefer_sub_free,
         is_subscriber=payload.is_subscriber,
+        is_mod=payload.is_mod,
     )
 
     req = Request(
@@ -5831,6 +6080,18 @@ def mark_played(
 # =====================================
 @app.post("/channels/{channel}/events", response_model=dict, dependencies=[Depends(require_channel_key)])
 def log_event(channel: str, payload: EventIn, db: Session = Depends(get_db)):
+    """Record a channel event and apply configured priority point rewards.
+
+    Dependencies: Uses the database ``Session`` for persistence and
+    ``get_or_create_settings`` to read reward knobs. ``award_prio_points``
+    handles balance updates with caps.
+    Code customers: Webhooks or bot workers forward Twitch events here so
+    overlays and queues stay in sync.
+    Used variables/origin: ``payload`` supplies the event type, optional
+    ``user_id`` to reward, and metadata such as gift counts, bits amounts, or
+    subscription tiers.
+    """
+
     channel_pk = get_channel_pk(channel, db)
     meta = payload.meta or {}
     meta_str = json.dumps(meta)
@@ -5838,23 +6099,32 @@ def log_event(channel: str, payload: EventIn, db: Session = Depends(get_db)):
     db.add(ev)
     db.commit()
 
-    # Award points based on rules
-    if payload.type in {"follow", "raid"}:
-        if payload.user_id:
-            award_prio_points(db, channel_pk, payload.user_id, 1)
+    points = 0
+    settings = get_or_create_settings(db, channel_pk)
+    if payload.type == "follow" and settings.prio_follow_enabled:
+        points = 1
+    elif payload.type == "raid" and settings.prio_raid_enabled:
+        points = 1
     elif payload.type == "gift_sub":
-        # metadata expects {"count": N}
-        count = int(meta.get("count", 1))
-        points = count // 5
-        if payload.user_id and points > 0:  # gifter
-            award_prio_points(db, channel_pk, payload.user_id, count)
+        count = max(_coerce_int(meta.get("count"), default=1), 0)
+        tier_points = _priority_points_for_tier(settings, meta.get("tier"))
+        gift_threshold = max(settings.prio_gifts_per_point or 0, 0)
+        threshold_points = count // gift_threshold if gift_threshold else 0
+        points = threshold_points + (tier_points * count)
     elif payload.type == "bits":
-        amount = int(meta.get("amount", 0))
-        if payload.user_id and amount >= 200:
-            award_prio_points(db, channel_pk, payload.user_id, 1)
+        amount = max(_coerce_int(meta.get("amount"), default=0), 0)
+        per_point = max(settings.prio_bits_per_point or 0, 0)
+        points = amount // per_point if per_point else 0
     elif payload.type == "sub":
-        # no automatic points; handled via free-per-stream when requesting
-        pass
+        count = max(_coerce_int(meta.get("count"), default=1), 1)
+        tier_points = _priority_points_for_tier(settings, meta.get("tier"))
+        points = tier_points * count
+
+    if payload.user_id and points > 0:
+        try:
+            award_prio_points(db, channel_pk, payload.user_id, points)
+        except HTTPException:
+            logger.info("Skipping award for event %s in channel %s", payload.type, channel_pk)
     publish_queue_changed(channel_pk)
     return {"event_id": ev.id}
 
