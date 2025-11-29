@@ -196,6 +196,8 @@ class ChannelEventTests(unittest.TestCase):
                     "allow_bumps": 1,
                     "other_flags": None,
                     "max_prio_points": 10,
+                    "overall_queue_cap": 10,
+                    "nonpriority_queue_cap": 8,
                 },
                 headers=headers,
             )

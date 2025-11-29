@@ -81,6 +81,13 @@ This document summarizes the REST endpoints exposed by `backend_app.py`.
 | GET | `/channels/{channel}/settings` | Retrieve channel configuration. |
 | PUT | `/channels/{channel}/settings` | Update channel configuration (admin). |
 
+Channel settings include queue intake controls:
+
+- `queue_closed` toggles whether any new requests are accepted.
+- `overall_queue_cap` (0–100, default 100) auto-closes intake once pending requests reach the cap and emits a `queue.status` event.
+- `nonpriority_queue_cap` (0–100, default 100) rejects new non-priority submissions when full while still allowing priority requests.
+- `prio_only`, `max_requests_per_user`, `allow_bumps`, `other_flags`, and `max_prio_points` behave as before and are reflected in `settings.updated` events.
+
 ## Songs
 | Method | Path | Description |
 |--------|------|-------------|
@@ -277,9 +284,9 @@ All payloads only expose queue-facing data:
 - `request.added` — `payload` is a request summary `{ "id", "song": { "title", "artist", "youtube_link" }, "requester": { "id", "username" }, "is_priority", "bumped", "priority_source" }`.
 - `request.bumped` — same payload as `request.added`, emitted whenever a request gains priority (admin bump, playlist bump, or priority toggle).
 - `request.played` — payload `{ "request": <request summary>, "up_next": <request summary>|null }`, where `up_next` is the next pending request after the played entry.
-- `queue.status` — payload `{ "closed": bool, "status": "open"|"closed" }` indicating whether the queue accepts new requests.
+- `queue.status` — payload `{ "closed": bool, "status": "open"|"closed"|"limited", "reason"?: str }` indicating whether the queue accepts new requests or has restricted non-priority slots. Hitting the overall queue cap flips the queue to `closed` until it is reopened.
 - `queue.archived` — payload `{ "archived_stream_id": int|null, "new_stream_id": int }` describing the stream transition when archiving.
-- `settings.updated` — payload mirroring `ChannelSettingsIn` (`max_requests_per_user`, `prio_only`, `queue_closed`, `allow_bumps`, `other_flags`, `max_prio_points`).
+- `settings.updated` — payload mirroring `ChannelSettingsIn` (`max_requests_per_user`, `prio_only`, `queue_closed`, `allow_bumps`, `other_flags`, `max_prio_points`, `overall_queue_cap`, `nonpriority_queue_cap`).
 - `user.bump_awarded` — payload `{ "user": { "id", "username" }, "delta": int, "prio_points": int }` when a user earns additional priority points.
 
 ## Streams

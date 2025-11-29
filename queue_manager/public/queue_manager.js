@@ -567,7 +567,7 @@ const SETTINGS_CONFIG = {
   queue_closed: {
     type: 'boolean',
     label: 'Pause new requests',
-    description: 'When enabled, chat cannot add new songs. Existing queue entries stay untouched.',
+    description: 'When enabled, chat cannot add new songs. Hitting the overall queue cap also toggles this on automatically until you reopen it.',
     onLabel: 'Paused',
     offLabel: 'Accepting',
   },
@@ -586,6 +586,22 @@ const SETTINGS_CONFIG = {
     offLabel: 'Disabled',
     disabled: true,
     disabledReason: 'Chat bump restrictions are not implemented yet.',
+  },
+  overall_queue_cap: {
+    type: 'number',
+    label: 'Overall queue cap',
+    description: 'Maximum pending requests (0–100). When the queue reaches this size, intake pauses and a queue status event notifies overlays.',
+    min: 0,
+    max: 100,
+    step: 1,
+  },
+  nonpriority_queue_cap: {
+    type: 'number',
+    label: 'Non-priority cap',
+    description: 'Maximum pending non-priority requests (0–100). Priority submissions stay open, but regular requests are rejected when the cap is full.',
+    min: 0,
+    max: 100,
+    step: 1,
   },
   max_requests_per_user: {
     type: 'number',
