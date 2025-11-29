@@ -75,7 +75,7 @@ SETTINGS_ENV_MAP: Dict[str, str] = {
 }
 
 SETTINGS_DEFAULTS: Dict[str, Optional[str]] = {
-    "twitch_scopes": "channel:bot channel:read:subscriptions channel:read:vips",
+    "twitch_scopes": "channel:bot channel:read:subscriptions channel:read:vips bits:read moderator:read:followers",
     "bot_app_scopes": "user:read:chat user:write:chat user:bot",
 }
 
@@ -363,6 +363,16 @@ def get_bot_redirect_uri() -> Optional[str]:
 
 
 def get_twitch_scopes() -> list[str]:
+    """
+    Return the channel-level Twitch OAuth scopes required by the Queue Manager.
+
+    Dependencies: uses ``get_scopes_setting`` to read persisted overrides and the
+    ``DEFAULT_TWITCH_SCOPES`` constant for defaults. Code customers include the
+    ``/system/config`` payload that powers the Queue Manager login flow. Used
+    variables/origin: combines the stored ``twitch_scopes`` setting (if any)
+    with ``DEFAULT_TWITCH_SCOPES`` to ensure the pricing-related bits and
+    follower permissions are always requested.
+    """
     scopes = get_scopes_setting("twitch_scopes", DEFAULT_TWITCH_SCOPES)
     return scopes or list(DEFAULT_TWITCH_SCOPES)
 

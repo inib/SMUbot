@@ -3076,13 +3076,49 @@ initOverlayBuilder();
 renderStreamerbotShortcuts();
 
 // ===== Landing page & login =====
+/**
+ * Assemble the Twitch OAuth scopes requested during channel login.
+ * Dependencies: relies on getOwnerScopes() (system config) and the default
+ * channel scope list to ensure new pricing permissions are requested.
+ * Code customers: Queue Manager login button click handler and scope explainer
+ * rendered on the landing page.
+ * Used variables/origin: combines owner-configured scopes with defaults and
+ * appends user:read:email when missing.
+ */
 function buildLoginScopes() {
   const configured = getOwnerScopes();
-  const scopes = configured.length ? configured : ['channel:bot', 'channel:read:subscriptions', 'channel:read:vips'];
+  const scopes = configured.length ? configured : [
+    'channel:bot',
+    'channel:read:subscriptions',
+    'channel:read:vips',
+    'bits:read',
+    'moderator:read:followers',
+  ];
   if (!scopes.includes('user:read:email')) {
     scopes.push('user:read:email');
   }
   return scopes;
+}
+
+/**
+ * Render the OAuth scopes requested during login so channel owners can review
+ * pricing-related permissions before authorizing.
+ * Dependencies: uses buildLoginScopes() for the finalized list and the
+ * login-scope-list element in the landing view.
+ * Code customers: Queue Manager landing page.
+ * Used variables/origin: writes list items based on the scope names returned
+ * from buildLoginScopes().
+ */
+function renderLoginScopes() {
+  const list = qs('login-scope-list');
+  if (!list) { return; }
+  list.innerHTML = '';
+  const scopes = buildLoginScopes();
+  scopes.forEach(scope => {
+    const item = document.createElement('li');
+    item.textContent = scope;
+    list.appendChild(item);
+  });
 }
 
 const loginButton = qs('login-btn');
@@ -3638,6 +3674,7 @@ async function bootstrap() {
 
   try {
     await loadSystemConfig();
+    renderLoginScopes();
     showSetupGuard('');
   } catch (err) {
     showSetupGuard('Unable to load deployment configuration. Please try again later or finish the setup in the admin panel.');
