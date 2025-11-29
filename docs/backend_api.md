@@ -163,6 +163,7 @@ Channel settings include queue intake controls:
 - **Behavior**
   - Finds the current stream and orders requests by played status, priority flags, manual position, and request time.
   - Joins request rows with `Song` and `User` models and enriches users with VIP/subscriber status when available.
+  - VIP/subscriber enrichment calls Twitch Helix (VIPs and subscriptions) with the channel owner's token; when scopes or tokens are missing, the role data falls back to empty sets without failing the request.
 - **Response**: Array of `{ "request": { "id", "song_id", "user_id", "request_time", "is_priority", "bumped", "played", "priority_source" }, "song": { "id", "artist", "title", "youtube_link", ... }, "user": { "id", "twitch_id", "username", "is_vip", "is_subscriber", "subscriber_tier" } }`.
 - **Use cases**: Drive moderator dashboards or overlay widgets that need a complete view of the queue without issuing multiple lookups per request.
 
