@@ -87,7 +87,7 @@ Channel settings include queue intake controls:
 - `overall_queue_cap` (0–100, default 100) auto-closes intake once pending requests reach the cap and emits a `queue.status` event.
 - `nonpriority_queue_cap` (0–100, default 100) rejects new non-priority submissions when full while still allowing priority requests.
 - `prio_only`, `max_requests_per_user`, `allow_bumps`, `other_flags`, and `max_prio_points` behave as before and are reflected in `settings.updated` events.
-- Existing deployments should apply `migrations/20240624_queue_caps.sql` to add the new capacity columns and backfill defaults for legacy channels.
+- Existing deployments should apply `migrations/20240624_queue_caps.sql` to add the new capacity columns and backfill defaults for legacy channels; the application also attempts to patch missing columns on startup for SQLite/legacy installs before enforcing queue caps.
 
 ## Songs
 | Method | Path | Description |

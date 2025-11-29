@@ -681,6 +681,57 @@ class PlaylistItem(Base):
 Base.metadata.create_all(bind=engine)
 
 
+def _ensure_channel_settings_schema() -> None:
+    """Ensure channel settings tables include queue capacity columns for legacy DBs.
+
+    Dependencies: Relies on the module-level SQLAlchemy ``engine`` and ``inspect``
+    helpers to introspect the ``channel_settings`` table and execute ``ALTER``
+    statements when columns are missing.
+    Code customers: Runtime settings reads/writes, queue enforcement, event
+    emitters, and tests that assume queue capacity fields exist.
+    Used variables/origin: Reads the discovered column names from the inspector
+    and applies a default of ``100`` for both ``overall_queue_cap`` and
+    ``nonpriority_queue_cap`` when adding or backfilling those fields.
+    """
+
+    with engine.begin() as connection:
+        inspector = inspect(connection)
+        if "channel_settings" not in inspector.get_table_names():
+            return
+
+        columns = {column["name"] for column in inspector.get_columns("channel_settings")}
+
+        if "overall_queue_cap" not in columns:
+            connection.execute(
+                text(
+                    "ALTER TABLE channel_settings "
+                    "ADD COLUMN overall_queue_cap INTEGER NOT NULL DEFAULT 100"
+                )
+            )
+        else:
+            connection.execute(
+                text(
+                    "UPDATE channel_settings SET overall_queue_cap = 100 "
+                    "WHERE overall_queue_cap IS NULL"
+                )
+            )
+
+        if "nonpriority_queue_cap" not in columns:
+            connection.execute(
+                text(
+                    "ALTER TABLE channel_settings "
+                    "ADD COLUMN nonpriority_queue_cap INTEGER NOT NULL DEFAULT 100"
+                )
+            )
+        else:
+            connection.execute(
+                text(
+                    "UPDATE channel_settings SET nonpriority_queue_cap = 100 "
+                    "WHERE nonpriority_queue_cap IS NULL"
+                )
+            )
+
+
 def _ensure_playlist_schema() -> None:
     """Ensure legacy databases have the latest playlist columns."""
 
@@ -768,6 +819,7 @@ def _ensure_playlist_schema() -> None:
             connection.execute(text("ALTER TABLE playlists_tmp RENAME TO playlists"))
 
 
+_ensure_channel_settings_schema()
 _ensure_playlist_schema()
 bootstrap_settings_from_env()
 

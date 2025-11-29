@@ -608,6 +608,22 @@ const SETTINGS_CONFIG = {
     max: 100,
     step: 1,
   },
+  overall_queue_cap: {
+    type: 'number',
+    label: 'Overall queue cap',
+    description: 'Maximum pending requests (0–100). When the queue reaches this size, intake pauses and a queue status event notifies overlays.',
+    min: 0,
+    max: 100,
+    step: 1,
+  },
+  nonpriority_queue_cap: {
+    type: 'number',
+    label: 'Non-priority cap',
+    description: 'Maximum pending non-priority requests (0–100). Priority submissions stay open, but regular requests are rejected when the cap is full.',
+    min: 0,
+    max: 100,
+    step: 1,
+  },
   max_requests_per_user: {
     type: 'number',
     label: 'Requests per viewer',
