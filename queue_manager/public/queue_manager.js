@@ -118,6 +118,9 @@ let channelName = '';
 let userLogin = '';
 let userInfo = null;
 let channelsCache = [];
+const USER_PAGE_SIZE = 25;
+const PLAYLIST_TWITCH_USER = '__playlist__';
+const usersState = { searchTerm: '', page: 0, total: 0, ownerLogin: null, debounce: null };
 
 function qs(id) { return document.getElementById(id); }
 
@@ -992,6 +995,7 @@ const tabDevBtn = qs('tab-dev');
 if (tabDevBtn) {
   tabDevBtn.onclick = () => showTab('dev');
 }
+wireUsersControls();
 
 // ===== Queue functions =====
 function ytId(url) {
@@ -2378,20 +2382,149 @@ qs('mute-btn').onclick = () => fetch(`${API}/channels/${channelName}/settings`, 
 });
 
 // ===== Users view =====
-async function fetchUsers() {
-  const resp = await fetch(`${API}/channels/${channelName}/users`, { credentials: 'include' });
-  if (!resp.ok) { return; }
-  const data = await resp.json();
-  const u = qs('users');
-  u.innerHTML = '';
-  data.forEach(user => {
+/**
+ * Filter user rows to drop channel owner and playlist automation entries.
+ * Dependencies: leverages `usersState.ownerLogin`, the PLAYLIST_TWITCH_USER
+ * constant, and username/twitch_id fields returned by the backend.
+ * Code customers: fetchUsers() rendering flow and pagination recalculations
+ * that need a sanitized list before drawing the UI.
+ * Used variables/origin: consumes `usersState` values mutated by
+ * fetchUsers()/loadChannelScopes() plus raw user payloads from the API.
+ */
+function filterVisibleUsers(users) {
+  const owner = usersState.ownerLogin ? usersState.ownerLogin.toLowerCase() : null;
+  return users.filter(user => {
+    if (!user || typeof user !== 'object') { return false; }
+    const username = typeof user.username === 'string' ? user.username.toLowerCase() : '';
+    const twitchId = typeof user.twitch_id === 'string' ? user.twitch_id : '';
+    if (owner && username === owner) { return false; }
+    if (twitchId === PLAYLIST_TWITCH_USER || username === 'playlist') { return false; }
+    return true;
+  });
+}
+
+/**
+ * Update pagination controls to match the current user list state.
+ * Dependencies: expects DOM nodes `users-prev`, `users-next`, and
+ * `users-page` plus `usersState.total` and `USER_PAGE_SIZE` for math.
+ * Code customers: fetchUsers() after loading data and pagination button
+ * handlers after page changes.
+ * Used variables/origin: reads `usersState.page` for the current offset and
+ * derives total pages from backend-provided totals.
+ */
+function updateUsersPaginationControls() {
+  const prev = qs('users-prev');
+  const next = qs('users-next');
+  const pageLabel = qs('users-page');
+  const totalPages = Math.max(1, Math.ceil(usersState.total / USER_PAGE_SIZE) || 1);
+  const safePage = Math.min(usersState.page, totalPages - 1);
+  if (safePage !== usersState.page) {
+    usersState.page = safePage;
+  }
+  const displayPage = usersState.page + 1;
+  if (pageLabel) {
+    pageLabel.textContent = `Page ${displayPage} of ${totalPages}`;
+  }
+  if (prev) {
+    prev.disabled = usersState.page <= 0;
+  }
+  if (next) {
+    next.disabled = usersState.page + 1 >= totalPages;
+  }
+}
+
+/**
+ * Render the user list with current filters and pagination applied.
+ * Dependencies: requires `users` container element, `filterVisibleUsers`, and
+ * `modPoints` for adjusting priority points.
+ * Code customers: fetchUsers(), which passes in the latest page of results.
+ * Used variables/origin: consumes sanitized arrays of API payloads.
+ */
+function renderUsers(users) {
+  const container = qs('users');
+  if (!container) { return; }
+  container.innerHTML = '';
+  if (!users.length) {
+    const empty = document.createElement('div');
+    empty.className = 'muted';
+    empty.textContent = 'No users match your search yet.';
+    container.appendChild(empty);
+    return;
+  }
+  users.forEach(user => {
     const row = document.createElement('div');
     row.className = 'req';
     row.innerHTML = `<span>${user.username} (${user.prio_points})</span>
       <span class="ctrl"><button onclick="modPoints(${user.id},1)">+1</button><button onclick="modPoints(${user.id},-1)">-1</button></span>`;
-    u.appendChild(row);
+    container.appendChild(row);
   });
 }
+
+/**
+ * Debounce the user search box and trigger a fresh fetch when idle.
+ * Dependencies: `usersState`, `USER_PAGE_SIZE`, and the search input bound via
+ * `wireUsersControls()`.
+ * Code customers: input event listeners attached to the search field.
+ * Used variables/origin: updates `usersState.searchTerm` from DOM input values
+ * before calling fetchUsers().
+ */
+function scheduleUserSearch(term) {
+  if (usersState.debounce) {
+    clearTimeout(usersState.debounce);
+  }
+  usersState.debounce = setTimeout(() => {
+    usersState.searchTerm = term.trim();
+    usersState.page = 0;
+    fetchUsers();
+  }, 250);
+}
+
+/**
+ * Fetch users for the active channel with client-side search and paging.
+ * Dependencies: requires `channelName`, global `API`, `filterVisibleUsers`,
+ * and pagination state in `usersState`.
+ * Code customers: selectChannel() load flow, pagination buttons, and priority
+ * point adjustments that refresh the list after mutations.
+ * Used variables/origin: consumes query parameters (`searchTerm`, `page`) and
+ * backend-provided totals/owner login metadata to keep exclusions in sync.
+ */
+async function fetchUsers() {
+  if (!channelName) { return; }
+  const encodedChannel = encodeURIComponent(channelName);
+  const params = new URLSearchParams({
+    limit: `${USER_PAGE_SIZE}`,
+    offset: `${usersState.page * USER_PAGE_SIZE}`,
+  });
+  if (usersState.searchTerm) {
+    params.set('search', usersState.searchTerm);
+  }
+  const resp = await fetch(`${API}/channels/${encodedChannel}/users?${params}`, { credentials: 'include' });
+  if (!resp.ok) { return; }
+  const payload = await resp.json();
+  if (payload && typeof payload.owner_login === 'string') {
+    usersState.ownerLogin = payload.owner_login;
+  }
+  const items = Array.isArray(payload?.items) ? payload.items : [];
+  const visible = filterVisibleUsers(items);
+  const total = typeof payload?.total === 'number' ? payload.total : visible.length;
+  usersState.total = total;
+  const maxPage = Math.max(1, Math.ceil(total / USER_PAGE_SIZE) || 1);
+  if (usersState.page >= maxPage && total > 0) {
+    usersState.page = maxPage - 1;
+    return fetchUsers();
+  }
+  renderUsers(visible);
+  updateUsersPaginationControls();
+}
+
+/**
+ * Adjust a user's priority points then refresh the current page.
+ * Dependencies: relies on `channelName`, backend `/users/{id}/prio`, and
+ * fetchUsers() to reload results.
+ * Code customers: renderUsers() point adjustment buttons.
+ * Used variables/origin: consumes the target user ID and delta provided by
+ * button clicks.
+ */
 async function modPoints(uid, delta) {
   await fetch(`${API}/channels/${channelName}/users/${uid}/prio`, {
     method: 'POST',
@@ -2400,6 +2533,42 @@ async function modPoints(uid, delta) {
     credentials: 'include'
   });
   fetchUsers();
+}
+
+/**
+ * Bind search and pagination controls for the Users tab.
+ * Dependencies: DOM nodes with IDs `user-search`, `users-prev`, and
+ * `users-next`, plus the shared `usersState` pagination store.
+ * Code customers: initialization flow at script load so future channel
+ * switches only need to call fetchUsers().
+ * Used variables/origin: mutates `usersState.page` and `usersState.searchTerm`
+ * and reuses current totals to guard pagination bounds.
+ */
+function wireUsersControls() {
+  const searchInput = qs('user-search');
+  if (searchInput) {
+    searchInput.addEventListener('input', (event) => {
+      const term = typeof event?.target?.value === 'string' ? event.target.value : '';
+      scheduleUserSearch(term);
+    });
+  }
+  const prev = qs('users-prev');
+  if (prev) {
+    prev.onclick = () => {
+      if (usersState.page <= 0) { return; }
+      usersState.page -= 1;
+      fetchUsers();
+    };
+  }
+  const next = qs('users-next');
+  if (next) {
+    next.onclick = () => {
+      const maxPage = Math.max(1, Math.ceil(usersState.total / USER_PAGE_SIZE) || 1);
+      if (usersState.page + 1 >= maxPage) { return; }
+      usersState.page += 1;
+      fetchUsers();
+    };
+  }
 }
 
 // ===== Settings view =====
@@ -3442,6 +3611,7 @@ async function loadChannelScopes() {
       authorized: payload?.authorized === true,
       fetched: true,
     };
+    usersState.ownerLogin = channelScopeInfo.owner || usersState.ownerLogin;
   } catch (err) {
     console.error('Failed to load channel scopes', err);
     channelScopeInfo = { scopes: [], owner: null, authorized: false, fetched: false };
@@ -3457,6 +3627,15 @@ function selectChannel(ch) {
   resetChannelKeyCard();
   qs('landing').style.display = 'none';
   qs('app').style.display = '';
+  usersState.page = 0;
+  usersState.total = 0;
+  usersState.searchTerm = '';
+  usersState.ownerLogin = channelScopeInfo?.owner || null;
+  const userSearchInput = qs('user-search');
+  if (userSearchInput) {
+    userSearchInput.value = '';
+  }
+  updateUsersPaginationControls();
   fetchQueue();
   fetchPlaylists();
   fetchUsers();

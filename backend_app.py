@@ -85,6 +85,7 @@ DEFAULT_TWITCH_SCOPES = SETTINGS_DEFAULTS["twitch_scopes"].split()
 DEFAULT_BOT_APP_SCOPES = SETTINGS_DEFAULTS["bot_app_scopes"].split()
 
 API_VERSION = "0.1.0"
+PLAYLIST_TWITCH_ID = "__playlist__"
 
 
 def _env_flag(value: Optional[str]) -> bool:
@@ -1520,6 +1521,27 @@ class UserOut(BaseModel):
     username: str
     amount_requested: int
     prio_points: int
+
+    class Config:
+        from_attributes = True
+
+
+class UserPage(BaseModel):
+    """Paginated user listing payload with channel context metadata.
+
+    Dependencies: returned by `/channels/{channel}/users` and populated from
+    SQLAlchemy `User` queries plus channel owner lookups. Code customers:
+    Queue Manager user management, tests validating pagination, and any API
+    consumers that need item totals for paging controls. Variables originate
+    from database rows alongside query parameters `limit`, `offset`, and
+    optional `owner_login` derived from the active channel owner relationship.
+    """
+
+    total: int
+    limit: int
+    offset: int
+    owner_login: Optional[str] = None
+    items: List[UserOut]
 
     class Config:
         from_attributes = True
@@ -3411,7 +3433,7 @@ def _get_or_create_channel_user(db: Session, channel_pk: int, twitch_id: str, us
 
 
 def _get_playlist_user(db: Session, channel_pk: int) -> User:
-    return _get_or_create_channel_user(db, channel_pk, "__playlist__", "Playlist")
+    return _get_or_create_channel_user(db, channel_pk, PLAYLIST_TWITCH_ID, "Playlist")
 
 
 def _award_reset_priority_points(db: Session, channel_pk: int, settings: ChannelSettings) -> None:
@@ -5108,14 +5130,54 @@ def delete_song(channel: str, song_id: int, db: Session = Depends(get_db)):
 # =====================================
 # Routes: Users
 # =====================================
-@app.get("/channels/{channel}/users", response_model=List[UserOut])
-def search_users(channel: str, search: Optional[str] = Query(None), db: Session = Depends(get_db)):
+@app.get("/channels/{channel}/users", response_model=UserPage)
+def search_users(
+    channel: str,
+    search: Optional[str] = Query(None),
+    limit: int = Query(25, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+):
+    """List channel users with pagination, search, and system exclusions applied.
+
+    Dependencies: requires a database session plus channel lookup via
+    `get_channel_pk` and uses the `ActiveChannel.owner` relationship to infer
+    the owner login for exclusion. Code customers: Queue Manager user tab,
+    backend API clients that page through users, and tests validating owner and
+    playlist requester omissions. Variables originate from query parameters
+    (`search`, `limit`, `offset`) and the `PLAYLIST_TWITCH_ID` constant to block
+    playlist automation entries.
+    """
+
     channel_pk = get_channel_pk(channel, db)
+    channel_row = (
+        db.query(ActiveChannel)
+        .options(joinedload(ActiveChannel.owner))
+        .filter(ActiveChannel.id == channel_pk)
+        .one_or_none()
+    )
+    owner_login = channel_row.owner.username if channel_row and channel_row.owner else None
+
+    excluded_ids: set[str] = {PLAYLIST_TWITCH_ID}
+    if channel_row and channel_row.owner and channel_row.owner.twitch_id:
+        excluded_ids.add(channel_row.owner.twitch_id)
+
     q = db.query(User).filter(User.channel_id == channel_pk)
+    if excluded_ids:
+        q = q.filter(~User.twitch_id.in_(excluded_ids))
     if search:
         like = f"%{search}%"
         q = q.filter(User.username.ilike(like))
-    return q.order_by(User.username.asc()).all()
+
+    total = q.count()
+    safe_offset = max(0, offset)
+    users = (
+        q.order_by(User.username.asc())
+        .offset(safe_offset)
+        .limit(limit)
+        .all()
+    )
+    return UserPage(total=total, limit=limit, offset=safe_offset, owner_login=owner_login, items=users)
 
 @app.post("/channels/{channel}/users", response_model=dict, dependencies=[Depends(require_token)])
 def get_or_create_user(channel: str, payload: UserIn, db: Session = Depends(get_db)):
@@ -5170,11 +5232,6 @@ def get_user_stream_state(channel: str, user_id: int, db: Session = Depends(get_
         .one()
     )
     return {"stream_id": sid, "sub_free_used": int(st.sub_free_used)}
-
-@app.get("/channels/{channel}/users", dependencies=[Depends(require_token)])
-def list_users(channel: str, db: Session = Depends(get_db)):
-    channel_pk = get_channel_pk(channel, db)
-    return db.query(User).filter(User.channel_id==channel_pk).all()
 
 @app.put("/channels/{channel}/users/{user_id}/points", dependencies=[Depends(require_token)])
 def set_points(channel: str, user_id: int, payload: dict, db: Session = Depends(get_db)):
