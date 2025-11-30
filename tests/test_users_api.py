@@ -28,9 +28,12 @@ def _wipe_user_db() -> None:
             backend_app.TwitchUser,
         ]:
             db.query(model).delete()
+        db.query(backend_app.AppSetting).delete()
+        db.add(backend_app.AppSetting(key="setup_complete", value="1"))
         db.commit()
     finally:
         db.close()
+    backend_app.settings_store.invalidate()
 
 
 def _seed_channel_with_users(db: backend_app.Session, *, total: int) -> backend_app.ActiveChannel:
@@ -87,6 +90,36 @@ def _seed_channel_with_users(db: backend_app.Session, *, total: int) -> backend_
 
     db.commit()
     return channel
+
+
+def _seed_role_accounts(db: backend_app.Session, channel: backend_app.ActiveChannel) -> dict[str, str]:
+    """Attach moderator, VIP, and subscriber fixtures to a channel.
+
+    Dependencies: relies on the provided SQLAlchemy session and ``channel``
+    row, creating TwitchUser and User rows aligned to the same Twitch IDs.
+    Code customers: role assertion tests that need deterministic badges.
+    Used variables/origin: static usernames for each role and the
+    ChannelModerator link table for moderator mapping.
+    """
+
+    mod = backend_app.TwitchUser(twitch_id="mod-1", username="modder", access_token="", refresh_token="", scopes="")
+    vip = backend_app.TwitchUser(twitch_id="vip-1", username="vippy", access_token="", refresh_token="", scopes="")
+    sub = backend_app.TwitchUser(twitch_id="sub-1", username="subby", access_token="", refresh_token="", scopes="")
+    db.add_all([mod, vip, sub])
+    db.commit()
+    db.refresh(mod)
+    db.refresh(vip)
+    db.refresh(sub)
+
+    db.add(backend_app.ChannelModerator(channel_id=channel.id, user_id=mod.id))
+    db.add_all([
+        backend_app.User(channel_id=channel.id, twitch_id=mod.twitch_id, username=mod.username),
+        backend_app.User(channel_id=channel.id, twitch_id=vip.twitch_id, username=vip.username),
+        backend_app.User(channel_id=channel.id, twitch_id=sub.twitch_id, username=sub.username),
+    ])
+    db.commit()
+
+    return {"mod": mod.username, "vip": vip.username, "sub": sub.username}
 
 
 class UsersApiTests(unittest.TestCase):
@@ -146,6 +179,32 @@ class UsersApiTests(unittest.TestCase):
         expected = [idx for idx in range(30) if "user2" in f"user{idx:02d}"]
         self.assertEqual(search_payload["total"], len(expected))
         self.assertTrue(all("user2" in row["username"] for row in search_payload["items"]))
+
+    def test_user_roles_returned(self) -> None:
+        """API should annotate mod, VIP, and subscriber flags for UI badges."""
+
+        db = backend_app.SessionLocal()
+        original_collector = getattr(backend_app, "_collect_channel_roles")
+        try:
+            channel = _seed_channel_with_users(db, total=1)
+            roster = _seed_role_accounts(db, channel)
+
+            def fake_collect_roles(channel_obj):
+                return {"vip-1"}, {"sub-1": "3000"}
+
+            backend_app._collect_channel_roles = fake_collect_roles
+            payload = self.client.get(
+                f"/channels/{channel.channel_name}/users", params={"limit": 50, "offset": 0}
+            ).json()
+        finally:
+            backend_app._collect_channel_roles = original_collector
+            db.close()
+
+        flags = {row["username"]: row for row in payload["items"]}
+        self.assertTrue(flags[roster["mod"]]["is_mod"])
+        self.assertTrue(flags[roster["vip"]]["is_vip"])
+        self.assertTrue(flags[roster["sub"]]["is_subscriber"])
+        self.assertEqual(flags[roster["sub"]]["subscriber_tier"], "3000")
 
 
 if __name__ == "__main__":

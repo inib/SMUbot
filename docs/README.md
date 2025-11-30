@@ -98,6 +98,17 @@ Owners can invite moderators by adding their Twitch accounts inside the Queue
 Manager, and authenticated users who manage multiple channels can switch between
 them via `/me/channels`.
 
+## Queue Manager users tab layout
+- The Users tab renders a grid-aligned row per requester that keeps the “+1/-1”
+  priority controls on the same line as the username for quick scanning.
+- A square role badge precedes each name with priority Mod > VIP > Subscriber >
+  Viewer; subscribers show their tier number inside the badge while viewers get
+  a neutral grey marker.
+- Metadata is presented in bracketed chips (for example `[behind: 3]` and
+  `[prio: 2]`) to keep “amount behind” context aligned across rows.
+- Channel owners and the playlist automation helper are filtered out of the
+  listing, and badges update automatically as pages load or refresh.
+
 ## Development Tips
 - Install Python dependencies from `requirements.txt` for local development.
 - Run the backend directly:
