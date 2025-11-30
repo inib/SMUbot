@@ -2434,16 +2434,80 @@ function updateUsersPaginationControls() {
 }
 
 /**
+ * Determine the highest-priority badge to display for a user.
+ * Dependencies: consumes role hints (`is_mod`, `is_vip`, `is_subscriber`,
+ * `subscriber_tier`) returned by the `/channels/{channel}/users` endpoint.
+ * Code customers: renderUsers() for badge rendering and regression tests that
+ * assert role ordering. Used variables/origin: raw user payload fields plus a
+ * tier parsing helper for subscriber labels.
+ */
+function resolveUserBadge(user) {
+  const badge = { role: 'viewer', label: '•' };
+  if (user?.is_mod) {
+    badge.role = 'mod';
+    badge.label = 'M';
+    return badge;
+  }
+  if (user?.is_vip) {
+    badge.role = 'vip';
+    badge.label = 'V';
+    return badge;
+  }
+  if (user?.is_subscriber) {
+    badge.role = 'sub';
+    const tier = typeof user.subscriber_tier === 'string' ? user.subscriber_tier : '';
+    const parsed = parseInt(tier, 10);
+    if (!Number.isNaN(parsed) && parsed >= 1000) {
+      badge.label = `${Math.floor(parsed / 1000)}`;
+    } else {
+      badge.label = tier?.slice(0, 1) || 'S';
+    }
+    return badge;
+  }
+  return badge;
+}
+
+/**
+ * Create a consistently styled role badge element.
+ * Dependencies: CSS classes defined in style.css under .user-role-badge and
+ * per-role modifiers. Code customers: renderUsers() when drawing each row.
+ * Used variables/origin: derived badge metadata from resolveUserBadge().
+ */
+function renderUserBadge(user) {
+  const badge = resolveUserBadge(user);
+  const el = document.createElement('span');
+  el.className = `user-role-badge user-role-${badge.role}`;
+  el.textContent = badge.label;
+  el.setAttribute('aria-hidden', 'true');
+  return el;
+}
+
+/**
+ * Create a metadata chip with consistent brackets for extra context.
+ * Dependencies: user role list rows that expect bracketed chips.
+ * Code customers: renderUsers() meta section.
+ * Used variables/origin: label/value inputs describing points or backlog.
+ */
+function createUserMetaChip(label, value) {
+  const chip = document.createElement('span');
+  chip.className = 'user-meta-chip';
+  chip.textContent = `[${label}: ${value}]`;
+  return chip;
+}
+
+/**
  * Render the user list with current filters and pagination applied.
  * Dependencies: requires `users` container element, `filterVisibleUsers`, and
  * `modPoints` for adjusting priority points.
  * Code customers: fetchUsers(), which passes in the latest page of results.
- * Used variables/origin: consumes sanitized arrays of API payloads.
+ * Used variables/origin: consumes sanitized arrays of API payloads with role
+ * metadata and displays inline action buttons.
  */
 function renderUsers(users) {
   const container = qs('users');
   if (!container) { return; }
   container.innerHTML = '';
+   container.classList.add('users-list');
   if (!users.length) {
     const empty = document.createElement('div');
     empty.className = 'muted';
@@ -2453,9 +2517,47 @@ function renderUsers(users) {
   }
   users.forEach(user => {
     const row = document.createElement('div');
-    row.className = 'req';
-    row.innerHTML = `<span>${user.username} (${user.prio_points})</span>
-      <span class="ctrl"><button onclick="modPoints(${user.id},1)">+1</button><button onclick="modPoints(${user.id},-1)">-1</button></span>`;
+    row.className = 'user-row';
+
+    const identity = document.createElement('div');
+    identity.className = 'user-identity';
+
+    const topLine = document.createElement('div');
+    topLine.className = 'user-topline';
+    topLine.appendChild(renderUserBadge(user));
+
+    const name = document.createElement('span');
+    name.className = 'user-name';
+    name.textContent = user.username || 'Unknown user';
+    topLine.appendChild(name);
+    identity.appendChild(topLine);
+
+    const metaLine = document.createElement('div');
+    metaLine.className = 'user-meta-line';
+    const behindValue = Number.isFinite(Number(user.amount_requested)) ? Number(user.amount_requested) : null;
+    if (behindValue !== null) {
+      metaLine.appendChild(createUserMetaChip('behind', behindValue));
+    }
+    metaLine.appendChild(createUserMetaChip('prio', Math.max(0, user.prio_points || 0)));
+    identity.appendChild(metaLine);
+
+    const actions = document.createElement('div');
+    actions.className = 'user-actions';
+    const plusBtn = document.createElement('button');
+    plusBtn.type = 'button';
+    plusBtn.textContent = '+1';
+    plusBtn.setAttribute('aria-label', `Add priority point to ${user.username}`);
+    plusBtn.onclick = () => modPoints(user.id, 1);
+    const minusBtn = document.createElement('button');
+    minusBtn.type = 'button';
+    minusBtn.textContent = '-1';
+    minusBtn.setAttribute('aria-label', `Remove priority point from ${user.username}`);
+    minusBtn.onclick = () => modPoints(user.id, -1);
+    actions.appendChild(plusBtn);
+    actions.appendChild(minusBtn);
+
+    row.appendChild(identity);
+    row.appendChild(actions);
     container.appendChild(row);
   });
 }

@@ -1,6 +1,7 @@
 :root{
   --bg:#0f1117; --panel:#151821; --muted:#9aa4b2; --text:#f8fafc; --accent:#8b5cf6;
   --ok:#22c55e; --warn:#f59e0b; --danger:#ef4444;
+  --role-mod:#60a5fa; --role-vip:#fbbf24; --role-sub:#34d399; --role-none:#4b5563;
   --w: min(1100px, 96vw);
 }
 *{box-sizing:border-box}
@@ -40,6 +41,29 @@ a:hover{text-decoration:underline}
 .users-pagination button{padding:.35rem .7rem;border-radius:8px;border:1px solid #24283b;background:#1a1d29;color:var(--text);cursor:pointer;font-size:12px;font-weight:600}
 .users-pagination button:hover{background:#24283b}
 .users-pagination .muted{min-width:90px;text-align:center}
+.users-list{display:flex;flex-direction:column;gap:10px}
+.user-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:center;padding:10px 12px;border-radius:10px;border:1px solid #24283b;background:#121423}
+.user-row:hover{border-color:var(--accent)}
+.user-identity{display:flex;flex-direction:column;gap:6px;min-width:0}
+.user-topline{display:flex;align-items:center;gap:8px;min-width:0}
+.user-name{font-weight:700;white-space:nowrap;text-overflow:ellipsis;overflow:hidden}
+.user-meta-line{display:flex;flex-wrap:wrap;gap:6px}
+.user-meta-chip{padding:2px 6px;border-radius:6px;border:1px solid #24283b;background:#0f1117;color:var(--muted);font-size:12px}
+.user-actions{display:flex;gap:6px;align-items:center;justify-content:flex-end}
+.user-actions button{padding:.35rem .55rem;border-radius:8px;border:1px solid #24283b;background:#1a1d29;color:var(--text);cursor:pointer;font-size:12px;font-weight:700}
+.user-actions button:hover{background:#24283b}
+.user-role-badge{width:18px;height:18px;border-radius:5px;display:grid;place-items:center;font-size:11px;font-weight:800;color:#0b0d13;border:1px solid #0b0d13}
+.user-role-mod{background:var(--role-mod)}
+.user-role-vip{background:var(--role-vip)}
+.user-role-sub{background:var(--role-sub)}
+.user-role-viewer{background:var(--role-none);color:#e5e7eb;border-color:#303443}
+.user-row .muted{font-size:12px}
+.user-row[hidden]{display:none!important}
+.user-row .user-meta-chip{letter-spacing:.01em}
+@media (max-width: 640px){
+  .user-row{grid-template-columns:minmax(0,1fr);gap:10px}
+  .user-actions{justify-content:flex-start;flex-wrap:wrap}
+}
 .queue-layout{display:flex;flex-direction:column;gap:24px}
 .queue-column{flex:1 1 auto;min-width:min(800px,100%);display:flex;flex-direction:column;gap:12px}
 .preview-column{flex:1 1 auto}

@@ -1533,21 +1533,31 @@ class UserPage(BaseModel):
     SQLAlchemy `User` queries plus channel owner lookups. Code customers:
     Queue Manager user management, tests validating pagination, and any API
     consumers that need item totals for paging controls. Variables originate
-    from database rows alongside query parameters `limit`, `offset`, and
-    optional `owner_login` derived from the active channel owner relationship.
+    from database rows alongside query parameters `limit`, `offset`, optional
+    `owner_login` derived from the active channel owner relationship, and role
+    helpers that enrich each row with badges.
     """
 
     total: int
     limit: int
     offset: int
     owner_login: Optional[str] = None
-    items: List[UserOut]
+    items: List[UserWithRoles]
 
     class Config:
         from_attributes = True
 
 
 class UserWithRoles(UserOut):
+    """User payload enriched with channel role flags for UI rendering.
+
+    Dependencies: extends ``UserOut`` returned by user and queue endpoints.
+    Code customers: queue responses and paginated user listings that need
+    caller-friendly role flags. Used variables/origin: VIP and subscriber IDs
+    collected from Twitch plus channel moderator link rows.
+    """
+
+    is_mod: bool = False
     is_vip: bool = False
     is_subscriber: bool = False
     subscriber_tier: Optional[str] = None
@@ -5145,14 +5155,18 @@ def search_users(
     the owner login for exclusion. Code customers: Queue Manager user tab,
     backend API clients that page through users, and tests validating owner and
     playlist requester omissions. Variables originate from query parameters
-    (`search`, `limit`, `offset`) and the `PLAYLIST_TWITCH_ID` constant to block
-    playlist automation entries.
+    (`search`, `limit`, `offset`), the `PLAYLIST_TWITCH_ID` constant to block
+    playlist automation entries, and role collectors that enrich each row with
+    moderator/VIP/subscriber flags.
     """
 
     channel_pk = get_channel_pk(channel, db)
     channel_row = (
         db.query(ActiveChannel)
-        .options(joinedload(ActiveChannel.owner))
+        .options(
+            joinedload(ActiveChannel.owner),
+            joinedload(ActiveChannel.moderators).joinedload(ChannelModerator.user),
+        )
         .filter(ActiveChannel.id == channel_pk)
         .one_or_none()
     )
@@ -5177,7 +5191,34 @@ def search_users(
         .limit(limit)
         .all()
     )
-    return UserPage(total=total, limit=limit, offset=safe_offset, owner_login=owner_login, items=users)
+
+    vip_ids: set[str] = set()
+    subs: dict[str, Optional[str]] = {}
+    role_collector = globals().get("_collect_channel_roles")
+    if callable(role_collector):
+        try:
+            vip_ids, subs = role_collector(channel_row)
+        except Exception:  # pragma: no cover - fallback when Twitch lookups fail
+            logger.warning("role collection failed during user search", exc_info=True)
+    mod_ids: set[str] = set()
+    if channel_row and channel_row.moderators:
+        for mod_link in channel_row.moderators:
+            if mod_link.user and mod_link.user.twitch_id:
+                mod_ids.add(mod_link.user.twitch_id)
+
+    payload_items: list[UserWithRoles] = []
+    for user in users:
+        enriched = _build_user_with_roles(user, vip_ids, subs, mod_ids)
+        if enriched:
+            payload_items.append(enriched)
+
+    return UserPage(
+        total=total,
+        limit=limit,
+        offset=safe_offset,
+        owner_login=owner_login,
+        items=payload_items,
+    )
 
 @app.post("/channels/{channel}/users", response_model=dict, dependencies=[Depends(require_token)])
 def get_or_create_user(channel: str, payload: UserIn, db: Session = Depends(get_db)):
@@ -5391,11 +5432,21 @@ def _coerce_str(value: Any, *, default: str = "") -> str:
     return str(value)
 
 
-def _build_queue_user_payload(
+def _build_user_with_roles(
     user: User,
     vip_ids: set[str],
     subs: dict[str, Optional[str]],
+    mod_ids: Optional[set[str]] = None,
 ) -> Optional[UserWithRoles]:
+    """Normalize a ``User`` row into a role-aware payload.
+
+    Dependencies: receives role membership collections from
+    ``_collect_channel_roles`` and channel moderator relationships. Code
+    customers: queue responses and paginated user listings that need consistent
+    badge metadata. Used variables/origin: pulls IDs and stored counters from
+    the ORM row while annotating VIP, subscriber, and moderator flags.
+    """
+
     base_data = {
         "id": _coerce_int(getattr(user, "id", 0), default=0),
         "twitch_id": _coerce_str(getattr(user, "twitch_id", "")),
@@ -5413,8 +5464,10 @@ def _build_queue_user_payload(
         )
         return None
     twitch_id = base_user.twitch_id
+    mod_set = mod_ids or set()
     return UserWithRoles(
         **base_user.model_dump(),
+        is_mod=twitch_id in mod_set,
         is_vip=twitch_id in vip_ids,
         is_subscriber=twitch_id in subs,
         subscriber_tier=subs.get(twitch_id),
@@ -5583,13 +5636,18 @@ def get_queue_full(
     else:  # pragma: no cover - defensive fallback for legacy deployments
         logger.warning("_collect_channel_roles helper missing; skipping role lookup")
         vip_ids, subs = set(), {}
+    mod_ids: set[str] = set()
+    if channel_obj and channel_obj.moderators:
+        for mod_link in channel_obj.moderators:
+            if mod_link.user and mod_link.user.twitch_id:
+                mod_ids.add(mod_link.user.twitch_id)
     result: list[QueueItemFull] = []
     for row in rows:
         song = songs.get(row.song_id)
         user = users.get(row.user_id)
         if not song or not user:
             continue
-        user_payload = _build_queue_user_payload(user, vip_ids, subs)
+        user_payload = _build_user_with_roles(user, vip_ids, subs, mod_ids)
         if not user_payload:
             logger.warning(
                 "skipping request %s due to invalid user payload",
