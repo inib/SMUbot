@@ -153,6 +153,15 @@
 
         <div id="users-view" style="display:none">
           <h2>Users</h2>
+          <div class="users-controls">
+            <label class="users-search-label" for="user-search">Search users</label>
+            <input id="user-search" type="search" placeholder="Search usernames" autocomplete="off" />
+          </div>
+          <div class="users-pagination">
+            <button id="users-prev" type="button">Previous</button>
+            <span id="users-page" class="muted" role="status" aria-live="polite"></span>
+            <button id="users-next" type="button">Next</button>
+          </div>
           <div id="users" class="queue"></div>
         </div>
 

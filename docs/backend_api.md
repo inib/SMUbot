@@ -130,12 +130,17 @@ Channel settings include queue intake controls:
 ## Users
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/channels/{channel}/users` | Search or list users in a channel. Providing an admin token returns the full list. |
+| GET | `/channels/{channel}/users` | Search or list users in a channel with pagination and owner/playlist exclusions. |
 | POST | `/channels/{channel}/users` | Create or update a user record (admin). |
 | GET | `/channels/{channel}/users/{user_id}` | Retrieve user details. |
 | PUT | `/channels/{channel}/users/{user_id}` | Update user statistics such as priority points (admin). |
 | GET | `/channels/{channel}/users/{user_id}/stream_state` | Get per-stream state like free subscriber priority usage. |
 | PUT | `/channels/{channel}/users/{user_id}/points` | Set a user's priority points directly (admin). |
+
+### `/channels/{channel}/users`
+- **Query parameters**: `search` (optional substring match on usernames), `limit` (default 25, max 100), and `offset` (default 0).
+- **Response**: `{ "total": <int>, "limit": <int>, "offset": <int>, "owner_login": "<channel owner login?>", "items": [UserOut] }`.
+- **Behavior**: The endpoint excludes the channel owner and the playlist automation user (`twitch_id == "__playlist__"`) from both totals and items. Results order alphabetically by username and are safe for Queue Manager pagination controls.
 
 ## Queue
 | Method | Path | Description |
