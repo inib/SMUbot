@@ -254,6 +254,8 @@ a:hover{text-decoration:underline}
 .streamerbot-copy:hover{background:rgba(139,92,246,0.2)}
 
 .settings-list{display:flex;flex-direction:column;gap:14px;margin-top:16px}
+.settings-section{display:flex;flex-direction:column;gap:10px}
+.settings-group{display:flex;flex-direction:column;gap:12px}
 .setting-row{display:flex;flex-wrap:wrap;gap:18px;align-items:center;justify-content:space-between;padding:16px;border-radius:12px;border:1px solid #24283b;background:#121423}
 .setting-info{flex:1 1 260px;display:flex;flex-direction:column;gap:6px}
 .setting-info h3{margin:0;font-size:15px}

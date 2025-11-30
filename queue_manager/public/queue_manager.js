@@ -625,6 +625,18 @@ function formatScopeWarning(key) {
   return `Missing Twitch ${scopeLabel}${suffix}: ${missing.join(', ')}. Reauthorize the channel from the landing page to unlock pricing features.`;
 }
 
+const SETTING_GROUP_LABELS = {
+  main: 'Main Queue Controls',
+  caps: 'Queue Caps',
+  earn: 'Earn points',
+  followers: 'Followers/Raids',
+  reset: 'Points earned per Queue Reset',
+  experimental: 'Experimental flags',
+  other: 'Other settings',
+};
+
+const SETTING_GROUP_ORDER = ['main', 'caps', 'earn', 'followers', 'reset', 'experimental', 'other'];
+
 const SETTINGS_CONFIG = {
   queue_closed: {
     type: 'boolean',
@@ -632,6 +644,7 @@ const SETTINGS_CONFIG = {
     description: 'When enabled, chat cannot add new songs. Hitting the overall queue cap also toggles this on automatically until you reopen it.',
     onLabel: 'Paused',
     offLabel: 'Accepting',
+    group: 'main',
   },
   prio_only: {
     type: 'boolean',
@@ -639,6 +652,7 @@ const SETTINGS_CONFIG = {
     description: 'Require viewers to spend priority points or other privileges to add requests.',
     onLabel: 'Required',
     offLabel: 'Optional',
+    group: 'main',
   },
   allow_bumps: {
     type: 'boolean',
@@ -646,6 +660,7 @@ const SETTINGS_CONFIG = {
     description: 'Master toggle for consuming priority points on new or existing requests.',
     onLabel: 'Enabled',
     offLabel: 'Disabled',
+    group: 'main',
   },
   full_auto_priority_mode: {
     type: 'boolean',
@@ -653,6 +668,7 @@ const SETTINGS_CONFIG = {
     description: 'Automatically spend saved points to upgrade incoming and pending requests.',
     onLabel: 'Auto',
     offLabel: 'Manual',
+    group: 'main',
   },
   overall_queue_cap: {
     type: 'number',
@@ -661,6 +677,7 @@ const SETTINGS_CONFIG = {
     min: 0,
     max: 100,
     step: 1,
+    group: 'caps',
   },
   nonpriority_queue_cap: {
     type: 'number',
@@ -669,6 +686,7 @@ const SETTINGS_CONFIG = {
     min: 0,
     max: 100,
     step: 1,
+    group: 'caps',
   },
   max_requests_per_user: {
     type: 'number',
@@ -682,6 +700,7 @@ const SETTINGS_CONFIG = {
       activeLabel: 'No limit active',
       fallback: 0,
     },
+    group: 'caps',
   },
   max_prio_points: {
     type: 'number',
@@ -689,6 +708,7 @@ const SETTINGS_CONFIG = {
     description: 'Highest number of priority points that any viewer can hold.',
     min: 0,
     step: 1,
+    group: 'caps',
   },
   prio_follow_enabled: {
     type: 'boolean',
@@ -696,6 +716,7 @@ const SETTINGS_CONFIG = {
     description: 'Grant a priority point when someone follows the channel. Disable to ignore follow pings.',
     onLabel: 'Enabled',
     offLabel: 'Disabled',
+    group: 'followers',
   },
   prio_raid_enabled: {
     type: 'boolean',
@@ -703,6 +724,7 @@ const SETTINGS_CONFIG = {
     description: 'Grant a priority point to the raider when they include an ID in the event payload.',
     onLabel: 'Enabled',
     offLabel: 'Disabled',
+    group: 'followers',
   },
   prio_bits_per_point: {
     type: 'number',
@@ -710,6 +732,7 @@ const SETTINGS_CONFIG = {
     description: 'How many bits are required to earn a single priority point. Set to 0 to disable bits rewards.',
     min: 0,
     step: 50,
+    group: 'earn',
   },
   prio_gifts_per_point: {
     type: 'number',
@@ -717,6 +740,7 @@ const SETTINGS_CONFIG = {
     description: 'Number of gifted subs required to grant one priority point. Tier bonuses still apply. Set to 0 to turn off gifts-based awards.',
     min: 0,
     step: 1,
+    group: 'earn',
   },
   prio_sub_tier1_points: {
     type: 'number',
@@ -724,6 +748,7 @@ const SETTINGS_CONFIG = {
     description: 'Priority points granted per Tier 1 subscription event (or Prime). 0 disables.',
     min: 0,
     step: 1,
+    group: 'earn',
   },
   prio_sub_tier2_points: {
     type: 'number',
@@ -731,6 +756,7 @@ const SETTINGS_CONFIG = {
     description: 'Priority points granted per Tier 2 subscription event. 0 disables.',
     min: 0,
     step: 1,
+    group: 'earn',
   },
   prio_sub_tier3_points: {
     type: 'number',
@@ -738,6 +764,7 @@ const SETTINGS_CONFIG = {
     description: 'Priority points granted per Tier 3 subscription event. 0 disables.',
     min: 0,
     step: 1,
+    group: 'earn',
   },
   prio_reset_points_tier1: {
     type: 'number',
@@ -745,6 +772,7 @@ const SETTINGS_CONFIG = {
     description: 'Priority points auto-awarded to Tier 1 or Prime subscribers when a new stream/queue starts.',
     min: 0,
     step: 1,
+    group: 'reset',
   },
   prio_reset_points_tier2: {
     type: 'number',
@@ -752,6 +780,7 @@ const SETTINGS_CONFIG = {
     description: 'Priority points auto-awarded to Tier 2 subscribers when a new stream/queue starts.',
     min: 0,
     step: 1,
+    group: 'reset',
   },
   prio_reset_points_tier3: {
     type: 'number',
@@ -759,6 +788,7 @@ const SETTINGS_CONFIG = {
     description: 'Priority points auto-awarded to Tier 3 subscribers when a new stream/queue starts.',
     min: 0,
     step: 1,
+    group: 'reset',
   },
   prio_reset_points_vip: {
     type: 'number',
@@ -766,6 +796,7 @@ const SETTINGS_CONFIG = {
     description: 'Priority points auto-awarded to VIPs each time the queue resets for a new stream.',
     min: 0,
     step: 1,
+    group: 'reset',
   },
   prio_reset_points_mod: {
     type: 'number',
@@ -773,6 +804,7 @@ const SETTINGS_CONFIG = {
     description: 'Priority points auto-awarded to moderators when the queue resets. Uses saved moderator links.',
     min: 0,
     step: 1,
+    group: 'reset',
   },
   free_mod_priority_requests: {
     type: 'boolean',
@@ -780,6 +812,7 @@ const SETTINGS_CONFIG = {
     description: 'Allow moderators to mark requests as priority without spending points.',
     onLabel: 'Free',
     offLabel: 'Charged',
+    group: 'main',
   },
   other_flags: {
     type: 'text',
@@ -787,6 +820,7 @@ const SETTINGS_CONFIG = {
     description: 'Advanced, comma-separated flags for beta features. Leave blank unless directed.',
     multiline: true,
     placeholder: 'flag-one,flag-two',
+    group: 'experimental',
   },
 };
 
@@ -2369,10 +2403,79 @@ async function modPoints(uid, delta) {
 }
 
 // ===== Settings view =====
+/**
+ * Bucket settings into ordered groups to drive section headings in the UI.
+ * Dependencies: consumes SETTING_GROUP_ORDER, SETTING_GROUP_LABELS, and SETTINGS_CONFIG for metadata.
+ * Code customers: fetchSettings() rendering flow, which builds grouped cards for the settings tab.
+ * Used variables/origin: reads keys from backend `data` payload and aligns them to configured `group` entries, defaulting to `other`.
+ */
 function normaliseSettingOrder(data) {
+  const grouped = {};
+  SETTING_GROUP_ORDER.forEach(groupId => { grouped[groupId] = []; });
+
   const knownKeys = Object.keys(SETTINGS_CONFIG).filter(key => Object.prototype.hasOwnProperty.call(data, key));
+  knownKeys.forEach(key => {
+    const meta = SETTINGS_CONFIG[key] || {};
+    const groupId = SETTING_GROUP_ORDER.includes(meta.group) ? meta.group : 'other';
+    grouped[groupId].push(key);
+  });
+
   const extras = Object.keys(data).filter(key => key !== 'channel_id' && !knownKeys.includes(key));
-  return [...knownKeys, ...extras];
+  if (extras.length) {
+    grouped.other.push(...extras);
+  }
+
+  return grouped;
+}
+
+/**
+ * Build a section element containing grouped setting rows and an accessible heading.
+ * Dependencies: relies on SETTINGS_CONFIG metadata, SETTING_GROUP_LABELS for titles, and scope helpers (getMissingScopesForSetting/formatScopeWarning).
+ * Code customers: fetchSettings(), which loops groups to append populated sections.
+ * Used variables/origin: pulls values from the provided `data` object alongside the active channel's scope state.
+ */
+function buildSettingGroupSection(groupId, keys, data) {
+  const section = document.createElement('section');
+  section.className = 'settings-section';
+
+  const header = document.createElement('div');
+  header.className = 'section-header';
+  const title = document.createElement('h3');
+  title.className = 'section-title';
+  title.textContent = SETTING_GROUP_LABELS[groupId] || SETTING_GROUP_LABELS.other;
+  header.appendChild(title);
+  section.appendChild(header);
+
+  const body = document.createElement('div');
+  body.className = 'settings-group';
+
+  keys.forEach(key => {
+    if (key === 'channel_id') { return; }
+    const meta = { ...(SETTINGS_CONFIG[key] || { type: typeof data[key] === 'number' ? 'number' : 'text', label: key }) };
+    const missingScopes = getMissingScopesForSetting(key);
+    if (missingScopes.length) {
+      meta.disabled = true;
+      meta.missingScopes = missingScopes;
+      const scopeMessage = formatScopeWarning(key);
+      if (scopeMessage) {
+        meta.scopeHint = scopeMessage;
+        if (!meta.disabledReason) {
+          meta.disabledReason = scopeMessage;
+        }
+      }
+    }
+    const row = buildSettingRow(key, data[key], meta);
+    if (row) {
+      body.appendChild(row);
+    }
+  });
+
+  if (!body.childNodes.length) {
+    return null;
+  }
+
+  section.appendChild(body);
+  return section;
 }
 
 function buildSettingRow(key, value, meta) {
@@ -2666,6 +2769,12 @@ function createSettingControl(key, value, meta) {
   return wrapper;
 }
 
+/**
+ * Load settings for the active channel and render them into grouped sections.
+ * Dependencies: depends on `channelName`, SETTING_GROUP_ORDER metadata, and DOM nodes inside the settings tab.
+ * Code customers: channel selection flow, manual refresh actions, and tab entry triggers that populate the settings view.
+ * Used variables/origin: retrieves setting values from `/channels/{channel}/settings` and marries them with group config to build sections.
+ */
 async function fetchSettings() {
   if (!channelName) { return; }
   const resp = await fetch(`${API}/channels/${channelName}/settings`, { credentials: 'include' });
@@ -2676,25 +2785,11 @@ async function fetchSettings() {
   container.innerHTML = '';
   container.classList.add('settings-list');
   const fragment = document.createDocumentFragment();
-  const orderedKeys = normaliseSettingOrder(data);
-  orderedKeys.forEach(key => {
-    if (key === 'channel_id') { return; }
-    const meta = { ...(SETTINGS_CONFIG[key] || { type: typeof data[key] === 'number' ? 'number' : 'text', label: key }) };
-    const missingScopes = getMissingScopesForSetting(key);
-    if (missingScopes.length) {
-      meta.disabled = true;
-      meta.missingScopes = missingScopes;
-      const scopeMessage = formatScopeWarning(key);
-      if (scopeMessage) {
-        meta.scopeHint = scopeMessage;
-        if (!meta.disabledReason) {
-          meta.disabledReason = scopeMessage;
-        }
-      }
-    }
-    const row = buildSettingRow(key, data[key], meta);
-    if (row) {
-      fragment.appendChild(row);
+  const grouped = normaliseSettingOrder(data);
+  SETTING_GROUP_ORDER.forEach(groupId => {
+    const section = buildSettingGroupSection(groupId, grouped[groupId] || [], data);
+    if (section) {
+      fragment.appendChild(section);
     }
   });
   if (!fragment.childNodes.length) {
