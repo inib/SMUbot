@@ -1430,20 +1430,29 @@ class SongBot(commands.Bot):
         """Stream authenticated queue updates from the backend for ``ch_name``.
 
         Dependencies: relies on the shared ``backend`` client session and its
-        configured ``backend.headers`` for authentication.
+        configured ``backend.headers`` for authentication. Uses an
+        ``aiohttp.ClientTimeout`` with unlimited read time to avoid idle
+        disconnects when streams are quiet.
         Code customers: backend listener tasks spawned in ``ensure_listener``
         and reconnection logic expecting live queue events.
         Variables/origins: ``ch_name`` is the backend channel slug; ``url``
         derives from ``backend.base`` and the channel path; ``backend.session``
-        is initialized via ``backend.start`` before use.
+        is initialized via ``backend.start`` before use; ``stream_timeout``
+        originates here to guard against connect stalls.
         """
 
         url = f"{backend.base}/channels/{ch_name}/queue/stream"
+        stream_timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=None)
         while True:
             try:
                 if backend.session is None:
                     await backend.start()
-                async with backend.session.get(url, headers=backend.headers) as resp:
+                async with backend.session.get(
+                    url, headers=backend.headers, timeout=stream_timeout
+                ) as resp:
+                    if resp.status >= 400:
+                        detail = await resp.text()
+                        raise BackendError(resp.status, detail or f"GET {url} failed")
                     async for line in resp.content:
                         line = line.decode().strip()
                         if line.startswith('data:'):
@@ -2114,19 +2123,29 @@ class BotService:
         """Stream authenticated queue updates from the backend for ``ch_name``.
 
         Dependencies: uses the shared ``backend`` client session and
-        ``backend.headers`` for authentication.
+        ``backend.headers`` for authentication alongside an
+        ``aiohttp.ClientTimeout`` that disables read timeouts to avoid idle
+        disconnects.
         Code customers: listener tasks created by queue monitoring routines
         that expect real-time updates.
         Variables/origins: ``ch_name`` identifies the backend channel; ``url``
-        uses ``backend.base``; ``backend.session`` comes from ``backend.start``.
+        uses ``backend.base``; ``backend.session`` comes from ``backend.start``;
+        ``stream_timeout`` originates locally to constrain connection setup
+        while allowing endless streaming.
         """
 
         url = f"{backend.base}/channels/{ch_name}/queue/stream"
+        stream_timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=None)
         while True:
             try:
                 if backend.session is None:
                     await backend.start()
-                async with backend.session.get(url, headers=backend.headers) as resp:
+                async with backend.session.get(
+                    url, headers=backend.headers, timeout=stream_timeout
+                ) as resp:
+                    if resp.status >= 400:
+                        detail = await resp.text()
+                        raise BackendError(resp.status, detail or f"GET {url} failed")
                     async for line in resp.content:
                         line = line.decode().strip()
                         if line.startswith("data:"):

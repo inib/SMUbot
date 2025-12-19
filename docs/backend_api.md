@@ -168,6 +168,10 @@ Channel settings include queue intake controls:
 | POST/GET | `/channels/{channel}/queue/{request_id}/played` | Mark a request as played (channel key or admin). |
 | GET | `/channels/{channel}/queue/full` | Return the full queue with song and requester details (public read; no auth required). |
 
+**Streaming note**: The `/channels/{channel}/queue/stream` endpoint can stay idle for long periods when no queue changes occur.
+Clients should disable read timeouts (for example, `aiohttp.ClientTimeout(sock_read=None)`) to prevent spurious disconnects and
+"Queue stream error" logs while waiting for updates.
+
 ### `/channels/{channel}/queue/full`
 - **Authentication**: None; public read access for overlays and dashboards.
 - **Behavior**
