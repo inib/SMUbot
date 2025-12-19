@@ -1,9 +1,10 @@
 from __future__ import annotations
-import os, re, asyncio, json, yaml
+import os, re, asyncio, json, yaml, logging
 from typing import Optional, Dict, List, Tuple, Callable, Awaitable, Set
 from dataclasses import dataclass
 from pathlib import Path
 from datetime import datetime, timedelta
+from urllib.parse import quote_plus
 
 import aiohttp
 from twitchio import eventsub
@@ -143,12 +144,42 @@ class Backend:
             return None
 
     async def find_or_create_user(self, channel: str, twitch_id: str, username: str) -> int:
-        users = await self._req('GET', f"/channels/{channel}/users?search={username}")
+        """
+        Ensure a user exists for a channel by querying and optionally creating their record.
+
+        Dependencies: relies on the backend `/channels/{channel}/users` GET/POST endpoints via `_req` and an active `aiohttp` session. The method consumes the admin token configured in `self.headers`.
+        Code customers: called by chat- and event-handling flows before queuing requests to guarantee a valid user ID.
+        Variables/origin: `channel` comes from the active Twitch channel login, `twitch_id` and `username` come from Twitch user payloads.
+        """
+        search_term = quote_plus(username)
+        users = await self._req('GET', f"/channels/{channel}/users?search={search_term}")
+        if not isinstance(users, list) or not all(isinstance(u, dict) for u in users):
+            self._log_anomalous_users_response(channel, username, users)
+            resp = await self._req('POST', f"/channels/{channel}/users", { 'twitch_id': twitch_id, 'username': username })
+            return resp['id']
         for u in users:
-            if u['twitch_id'] == twitch_id:
+            if u.get('twitch_id') == twitch_id:
                 return u['id']
         resp = await self._req('POST', f"/channels/{channel}/users", { 'twitch_id': twitch_id, 'username': username })
         return resp['id']
+
+    def _log_anomalous_users_response(self, channel: str, username: str, users: object) -> None:
+        """
+        Emit structured context when the users search response does not match the expected list-of-dicts shape.
+
+        Dependencies: uses the module-level logger and has no external side effects beyond logging.
+        Code customers: internal safeguard for `find_or_create_user` to aid debugging unexpected backend responses.
+        Variables/origin: `channel` is the Twitch channel login, `username` is the query string, `users` is the raw backend payload.
+        """
+        logger = logging.getLogger(__name__)
+        logger.warning(
+            "Unexpected /channels/%s/users response; creating user fallback", channel,
+            extra={
+                'username': username,
+                'response_type': type(users).__name__,
+                'response_preview': users,
+            },
+        )
 
     async def search_song(self, channel: str, query: str) -> Optional[dict]:
         songs = await self._req('GET', f"/channels/{channel}/songs?search={query}")
