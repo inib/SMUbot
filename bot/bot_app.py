@@ -148,18 +148,26 @@ class Backend:
         Ensure a user exists for a channel by querying and optionally creating their record.
 
         Dependencies: relies on the backend `/channels/{channel}/users` GET/POST endpoints via `_req` and an active `aiohttp` session. The method consumes the admin token configured in `self.headers`.
-        Code customers: called by chat- and event-handling flows before queuing requests to guarantee a valid user ID.
+        Code customers: called by chat- and event-handling flows before queuing requests to guarantee a valid user ID. A defensive catch around the iteration step logs anomalies and falls back to user creation so callers always receive an ID instead of an exception.
         Variables/origin: `channel` comes from the active Twitch channel login, `twitch_id` and `username` come from Twitch user payloads.
         """
         search_term = quote_plus(username)
         users = await self._req('GET', f"/channels/{channel}/users?search={search_term}")
-        if not isinstance(users, list) or not all(isinstance(u, dict) for u in users):
+        if not isinstance(users, list):
             self._log_anomalous_users_response(channel, username, users)
             resp = await self._req('POST', f"/channels/{channel}/users", { 'twitch_id': twitch_id, 'username': username })
             return resp['id']
-        for u in users:
-            if u.get('twitch_id') == twitch_id:
-                return u['id']
+        try:
+            for u in users:
+                if not isinstance(u, dict):
+                    raise TypeError("Unexpected user entry type; expected mapping")
+                if u.get('twitch_id') == twitch_id:
+                    return u['id']
+        except (TypeError, KeyError):
+            # Guard against mixed-type or incomplete payloads by logging and recreating.
+            self._log_anomalous_users_response(channel, username, users)
+            resp = await self._req('POST', f"/channels/{channel}/users", { 'twitch_id': twitch_id, 'username': username })
+            return resp['id']
         resp = await self._req('POST', f"/channels/{channel}/users", { 'twitch_id': twitch_id, 'username': username })
         return resp['id']
 
