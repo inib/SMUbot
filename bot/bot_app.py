@@ -154,10 +154,29 @@ class Backend:
             return None
 
     async def find_or_create_user(self, channel: str, twitch_id: str, username: str) -> int:
-        users = await self._req('GET', f"/channels/{channel}/users?search={username}")
-        for u in users:
-            if u['twitch_id'] == twitch_id:
-                return u['id']
+        """Find an existing channel user or create one using the paginated search response.
+
+        Dependencies: consumes the `/channels/{channel}/users` paginated payload
+        with an `items` list defined by `backend_app.UserPage`. Code customers:
+        chat event handlers that map Twitch chatters to backend users. Used
+        variables/origin: caller-provided `twitch_id`/`username` parameters and
+        `items` entries returned by the backend search, which may be absent when
+        no matches exist.
+        """
+
+        users_response = await self._req('GET', f"/channels/{channel}/users?search={username}")
+        items = []
+        if isinstance(users_response, dict):
+            raw_items = users_response.get('items') or []
+            if isinstance(raw_items, list):
+                items = raw_items
+        elif isinstance(users_response, list):  # backward compatibility if pagination is bypassed
+            items = users_response
+
+        for user in items:
+            if user.get('twitch_id') == twitch_id and user.get('id') is not None:
+                return user['id']
+
         resp = await self._req('POST', f"/channels/{channel}/users", { 'twitch_id': twitch_id, 'username': username })
         return resp['id']
 
