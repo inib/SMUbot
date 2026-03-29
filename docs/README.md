@@ -13,6 +13,19 @@ Additional directories include:
 - **admin/** – static assets for the Admin control panel used to manage the shared bot account and view channel stats.
 - **data/** – persistent SQLite database storage.
 
+## Admin panel bot message controls
+- Channel detail cards in the Admin panel now include a dedicated **Bot Messages**
+  tab beside **Custom Settings** and **Active Streams**.
+- The tab reads `/channels/{channel}/settings`, shows the current
+  `bot_message_level`, and persists level changes with
+  `PUT /channels/{channel}/settings`.
+- The UI includes a read-only message catalog matrix grouped by message ID with
+  default level badges (`normal`, `verbose`, `debug`) and inherited inclusion
+  behavior: **Normal ⊂ Verbose ⊂ Debug**, while **Mute overrides all**.
+- Front-end state reserves a `perMessageOverrides` object map keyed by message
+  ID for future customization workflows (editing controls intentionally hidden
+  for now).
+
 ## Deployment setup flow
 When the stack starts for the first time, the backend remains locked until an
 administrator opens the Admin panel and saves the Twitch application
