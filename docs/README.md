@@ -194,12 +194,13 @@ them via `/me/channels`.
   `PUT /channels/{channel}/settings` with
   `{ "bot_message_level": "<level>" }`.
 - Connect/disconnect actions were moved to the **Settings** tab.
-- The Settings tab reuses the same dropdown renderer for
-  bot controls so behavior stays aligned with the header control while each
-  surface remains independently usable.
+- The Settings tab now uses the same toggle-switch visual pattern as the main
+  queue toggles for **Bot connection**, including the matching
+  **Connected/Disconnected** state label text.
 - Settings organization now includes a dedicated **Bot Control** section with
   two rows:
-  - **Bot connection** (`join/part`) -> `PUT /channels/{channel}?join_active=1|0`
+  - **Bot connection** (toggle switch) ->
+    `PUT /channels/{channel}?join_active=1|0`
   - **Bot message level** (`mute|normal|verbose|debug`) ->
     `PUT /channels/{channel}/settings` with
     `{ "bot_message_level": "<level>" }`

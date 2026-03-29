@@ -58,13 +58,14 @@ class QueueManagerUsersUiTests(unittest.TestCase):
         html = Path("queue_manager/public/index.html").read_text(encoding="utf-8")
         self.assertIn('id="bot-control-host"', html)
 
-    def test_bot_control_model_includes_connection_and_levels(self) -> None:
-        """Unified dropdown model should include connect/disconnect and all message levels."""
+    def test_bot_control_models_include_connection_and_levels(self) -> None:
+        """Bot controls should keep explicit connect/disconnect actions and message levels."""
 
         script = Path("queue_manager/public/queue_manager.js").read_text(encoding="utf-8")
-        self.assertIn("const BOT_CONTROL_OPTION_MODEL =", script)
+        self.assertIn("const BOT_CONNECTION_OPTIONS = [", script)
         self.assertIn("{ value: 'connect'", script)
         self.assertIn("{ value: 'disconnect'", script)
+        self.assertIn("const BOT_MESSAGE_LEVEL_OPTIONS = [", script)
         self.assertIn("{ value: 'mute'", script)
         self.assertIn("{ value: 'normal'", script)
         self.assertIn("{ value: 'verbose'", script)
@@ -81,32 +82,44 @@ class QueueManagerUsersUiTests(unittest.TestCase):
         self.assertIn("type: 'bot-message-level'", script)
         self.assertIn("group: 'bot'", script)
 
-    def test_bot_connection_control_maps_join_part_api_path(self) -> None:
-        """Join/part control should map through channel-status endpoint with join_active query params."""
+    def test_bot_connection_toggle_maps_join_part_api_path(self) -> None:
+        """Bot connection toggle should map to channel-status endpoint with join_active query params."""
 
         script = Path("queue_manager/public/queue_manager.js").read_text(encoding="utf-8")
-        self.assertIn("if (option.action === 'channel-status') {", script)
+        self.assertIn("const next = input.checked ? 'connect' : 'disconnect';", script)
+        self.assertIn("const option = BOT_CONNECTION_OPTIONS.find(entry => entry.value === selectionValue);", script)
         self.assertIn("`${API}/channels/${encodedChannel}?join_active=${option.joinActive}`", script)
         self.assertIn("type === 'bot-connection' || type === 'bot-message-level'", script)
-        self.assertIn("await applyBotControlSelection(next, { refreshSettingsView: false });", script)
+        self.assertIn("await applyBotConnectionSelection(next, { refreshSettingsView: false });", script)
+        self.assertIn("await fetchSettings();", script)
+
+    def test_settings_bot_section_renders_connection_toggle_pattern(self) -> None:
+        """Bot section should render connection as the shared toggle-switch pattern with connection labels."""
+
+        script = Path("queue_manager/public/queue_manager.js").read_text(encoding="utf-8")
+        self.assertIn("input.setAttribute('aria-label', meta.label || 'Bot connection');", script)
+        self.assertIn("switchLabel.className = 'toggle-switch';", script)
+        self.assertIn("slider.className = 'toggle-slider';", script)
+        self.assertIn("state.className = 'toggle-state';", script)
+        self.assertIn("const onLabel = meta.onLabel || 'Connected';", script)
+        self.assertIn("const offLabel = meta.offLabel || 'Disconnected';", script)
 
     def test_verbosity_control_remains_mapped_to_bot_message_level_setting(self) -> None:
         """Verbosity control should still persist via the bot_message_level settings payload."""
 
         script = Path("queue_manager/public/queue_manager.js").read_text(encoding="utf-8")
-        self.assertIn("body: JSON.stringify({ bot_message_level: option.messageLevel })", script)
+        self.assertIn("body: JSON.stringify({ bot_message_level: selectionValue })", script)
         self.assertIn("bot_message_level: {", script)
         self.assertIn("type: 'bot-message-level'", script)
 
-    def test_disconnected_header_control_uses_placeholder_for_connect_action(self) -> None:
-        """Disconnected header state should keep `connect` invokable via a placeholder-first dropdown."""
+    def test_disconnected_header_control_disables_verbosity_dropdown(self) -> None:
+        """Header verbosity dropdown should stay disabled whenever join_active is false."""
 
         script = Path("queue_manager/public/queue_manager.js").read_text(encoding="utf-8")
-        self.assertIn("placeholderLabel: 'Select action…'", script)
-        self.assertIn("placeholderOption.value = '';", script)
-        self.assertIn("placeholderOption.disabled = true;", script)
-        self.assertIn("if (!element.value) {", script)
-        self.assertIn("if (!selectedValue && !hasPlaceholder && options[0]?.value)", script)
+        self.assertIn("disabled: !channelInfo.join_active,", script)
+        self.assertIn("const disabledTitle = 'Connect bot in Settings to change verbosity.';", script)
+        self.assertIn("if (!channelInfo.join_active) {", script)
+        self.assertIn("controlHost.title = disabledTitle;", script)
 
     def test_quick_controls_responsive_wrap_hooks_exist(self) -> None:
         """Quick-controls should wrap by default and stay width-constrained across tabs."""
