@@ -5270,6 +5270,7 @@ def search_users(
         .limit(limit)
         .all()
     )
+    _refresh_users_with_helix_names(db, channel_row, users)
 
     vip_ids: set[str] = set()
     subs: dict[str, Optional[str]] = {}
@@ -5320,10 +5321,26 @@ def get_or_create_user(channel: str, payload: UserIn, db: Session = Depends(get_
 
 @app.get("/channels/{channel}/users/{user_id}", response_model=UserOut)
 def get_user(channel: str, user_id: int, db: Session = Depends(get_db)):
+    """Return one user row, repairing numeric fallback names when possible.
+
+    Dependencies: channel lookup helpers plus optional Twitch Helix profile
+    lookup through `_refresh_users_with_helix_names`.
+    Code customers: Queue Manager queue/user cards and Admin queue expansion.
+    Used variables/origin: route params `channel`/`user_id` and persisted `User`
+    records scoped by channel primary key.
+    """
+
     channel_pk = get_channel_pk(channel, db)
     u = db.query(User).filter(User.id == user_id, User.channel_id == channel_pk).one_or_none()
     if not u:
         raise HTTPException(404, "user not found")
+    channel_row = (
+        db.query(ActiveChannel)
+        .options(joinedload(ActiveChannel.owner))
+        .filter(ActiveChannel.id == channel_pk)
+        .one_or_none()
+    )
+    _refresh_users_with_helix_names(db, channel_row, [u])
     return u
 
 @app.put("/channels/{channel}/users/{user_id}", dependencies=[Depends(require_token)])
@@ -5360,6 +5377,28 @@ def set_points(channel: str, user_id: int, payload: dict, db: Session = Depends(
     if not u or u.channel_id != channel_pk:
         raise HTTPException(404)
     u.prio_points = int(payload.get("prio_points", 0))
+    db.commit()
+    publish_queue_changed(channel_pk)
+    return {"success": True}
+
+
+@app.delete("/channels/{channel}/users/{user_id}", dependencies=[Depends(require_token)])
+def delete_user(channel: str, user_id: int, db: Session = Depends(get_db)):
+    """Delete a user and cascade related queue state for the active channel.
+
+    Dependencies: channel resolver (`get_channel_pk`), SQLAlchemy session
+    deletion semantics, and foreign keys configured with ON DELETE CASCADE.
+    Code customers: Queue Manager Users tab delete action and admin/API scripts
+    that need to purge malformed user records.
+    Used variables/origin: route params `channel` and `user_id` identify the
+    scoped row; queue subscribers are notified via `publish_queue_changed`.
+    """
+
+    channel_pk = get_channel_pk(channel, db)
+    u = db.query(User).filter(User.id == user_id, User.channel_id == channel_pk).one_or_none()
+    if not u:
+        raise HTTPException(404, "user not found")
+    db.delete(u)
     db.commit()
     publish_queue_changed(channel_pk)
     return {"success": True}
@@ -5461,6 +5500,105 @@ def _collect_channel_roles(channel_obj: ActiveChannel) -> tuple[set[str], dict[s
         if isinstance(user_id, str):
             subs[user_id] = tier if isinstance(tier, str) else None
     return vip_ids, subs
+
+
+def _is_probable_twitch_numeric_id(value: Optional[str]) -> bool:
+    """Return True when a value looks like a Twitch numeric user identifier.
+
+    Dependencies: pure string checks only.
+    Code customers: username repair helpers in user list/detail endpoints.
+    Used variables/origin: values come from persisted `users.twitch_id` and
+    `users.username` fields.
+    """
+
+    if not isinstance(value, str):
+        return False
+    stripped = value.strip()
+    return bool(stripped) and stripped.isdigit()
+
+
+def _username_needs_refresh(user: User) -> bool:
+    """Detect user rows that likely stored an ID instead of a Twitch login name.
+
+    Dependencies: uses `_is_probable_twitch_numeric_id` plus the User ORM model.
+    Code customers: `_refresh_users_with_helix_names`.
+    Used variables/origin: compares stored `user.username` with `user.twitch_id`.
+    """
+
+    twitch_id = getattr(user, "twitch_id", None)
+    username = getattr(user, "username", None)
+    if not _is_probable_twitch_numeric_id(twitch_id):
+        return False
+    if not isinstance(username, str) or not username.strip():
+        return True
+    return username.strip() == twitch_id.strip()
+
+
+def _refresh_users_with_helix_names(db: Session, channel_obj: Optional[ActiveChannel], users: Sequence[User]) -> int:
+    """Repair numeric username placeholders by resolving Twitch logins via Helix.
+
+    Dependencies: requires a channel owner OAuth token, app client ID from
+    `get_twitch_client_id`, and `requests.get` calls to Twitch Helix `/users`.
+    Code customers: user list/detail APIs to opportunistically heal legacy rows.
+    Used variables/origin: candidate Twitch IDs originate from `users` rows and
+    updates are persisted to the same SQLAlchemy session.
+    """
+
+    if not users or not channel_obj or not channel_obj.owner:
+        return 0
+    owner = channel_obj.owner
+    client_id = get_twitch_client_id()
+    if not client_id or not owner.access_token:
+        return 0
+
+    candidates: list[User] = [user for user in users if _username_needs_refresh(user)]
+    if not candidates:
+        return 0
+
+    resolved_logins: dict[str, str] = {}
+    headers = {"Authorization": f"Bearer {owner.access_token}", "Client-Id": client_id}
+    chunk_size = 100
+    for index in range(0, len(candidates), chunk_size):
+        chunk = candidates[index:index + chunk_size]
+        params: list[tuple[str, str]] = [("id", user.twitch_id) for user in chunk if user.twitch_id]
+        if not params:
+            continue
+        try:
+            resp = requests.get("https://api.twitch.tv/helix/users", headers=headers, params=params, timeout=10)
+        except requests.RequestException:
+            logger.warning("username repair lookup failed for channel %s", channel_obj.channel_name, exc_info=True)
+            continue
+        if not resp.ok:
+            logger.warning(
+                "username repair lookup returned %s for channel %s",
+                resp.status_code,
+                channel_obj.channel_name,
+            )
+            continue
+        payload = resp.json() if resp.content else {}
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(data, list):
+            continue
+        for row in data:
+            if not isinstance(row, dict):
+                continue
+            twitch_id = row.get("id")
+            login = row.get("login")
+            if isinstance(twitch_id, str) and isinstance(login, str) and login.strip():
+                resolved_logins[twitch_id] = login.strip()
+
+    if not resolved_logins:
+        return 0
+
+    updated = 0
+    for user in candidates:
+        new_login = resolved_logins.get(user.twitch_id)
+        if new_login and user.username != new_login:
+            user.username = new_login
+            updated += 1
+    if updated:
+        db.commit()
+    return updated
 
 
 def _coerce_int(value: Any, *, default: int = 0) -> int:

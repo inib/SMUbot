@@ -152,6 +152,7 @@ Channel settings include queue intake controls:
 | POST | `/channels/{channel}/users` | Create or update a user record (admin). |
 | GET | `/channels/{channel}/users/{user_id}` | Retrieve user details. |
 | PUT | `/channels/{channel}/users/{user_id}` | Update user statistics such as priority points (admin). |
+| DELETE | `/channels/{channel}/users/{user_id}` | Delete a user and cascade queue state tied to that user (admin). |
 | GET | `/channels/{channel}/users/{user_id}/stream_state` | Get per-stream state like free subscriber priority usage. |
 | PUT | `/channels/{channel}/users/{user_id}/points` | Set a user's priority points directly (admin). |
 
@@ -159,6 +160,7 @@ Channel settings include queue intake controls:
 - **Query parameters**: `search` (optional substring match on usernames), `limit` (default 25, max 100), and `offset` (default 0).
 - **Response**: `{ "total": <int>, "limit": <int>, "offset": <int>, "owner_login": "<channel owner login?>", "items": [UserOut] }`.
 - **Behavior**: The endpoint excludes the channel owner and the playlist automation user (`twitch_id == "__playlist__"`) from both totals and items. Results order alphabetically by username and are safe for Queue Manager pagination controls.
+- **Name repair**: When a stored username matches a numeric Twitch ID placeholder, the API attempts a best-effort Twitch Helix `/users?id=...` lookup (using the owner's OAuth token) and updates the persisted username to the resolved login.
 
 ## Queue
 | Method | Path | Description |

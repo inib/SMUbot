@@ -163,6 +163,9 @@ them via `/me/channels`.
   a neutral grey marker.
 - Metadata is presented in bracketed chips (for example `[behind: 3]` and
   `[prio: 2]`) to keep “amount behind” context aligned across rows.
+- Each row includes a **Delete** action so managers can remove malformed or
+  stale user records directly from the console; related queue/request rows
+  cascade according to backend foreign-key rules.
 - Channel owners and the playlist automation helper are filtered out of the
   listing, and badges update automatically as pages load or refresh.
 

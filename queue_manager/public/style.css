@@ -52,6 +52,8 @@ a:hover{text-decoration:underline}
 .user-actions{display:flex;gap:6px;align-items:center;justify-content:flex-end}
 .user-actions button{padding:.35rem .55rem;border-radius:8px;border:1px solid #24283b;background:#1a1d29;color:var(--text);cursor:pointer;font-size:12px;font-weight:700}
 .user-actions button:hover{background:#24283b}
+.user-actions button.danger{border-color:var(--danger);color:var(--danger)}
+.user-actions button.danger:hover{background:rgba(239,68,68,0.18)}
 .user-role-badge{width:18px;height:18px;border-radius:5px;display:grid;place-items:center;font-size:11px;font-weight:800;color:#0b0d13;border:1px solid #0b0d13}
 .user-role-mod{background:var(--role-mod)}
 .user-role-vip{background:var(--role-vip)}
@@ -332,4 +334,3 @@ a:hover{text-decoration:underline}
 .channel-key-status{min-height:14px}
 .channel-key-card.loading{opacity:.7}
 .channel-key-hint{margin:0}
-
