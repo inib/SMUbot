@@ -363,6 +363,24 @@ class BotConfigApiTests(unittest.TestCase):
             "https://secure.example.com/bot/config/oauth/callback",
         )
 
+    def test_bot_oauth_html_response_success_auto_closes_popup(self) -> None:
+        response = backend_app._bot_oauth_html_response(True, "Success message")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Success message", response.body.decode())
+        self.assertIn("setTimeout(function() {", response.body.decode())
+        self.assertIn("window.close()", response.body.decode())
+        self.assertIn("You can close this window.", response.body.decode())
+
+    def test_bot_oauth_html_response_failure_keeps_popup_open(self) -> None:
+        response = backend_app._bot_oauth_html_response(False, "OAuth denied by broadcaster")
+        self.assertEqual(response.status_code, 200)
+        html_body = response.body.decode()
+        self.assertIn("OAuth denied by broadcaster", html_body)
+        self.assertIn('"success": false', html_body)
+        self.assertIn('"error": "OAuth denied by broadcaster"', html_body)
+        self.assertIn("You may close this window.", html_body)
+        self.assertNotIn("window.close()", html_body)
+
 
 if __name__ == "__main__":
     unittest.main()

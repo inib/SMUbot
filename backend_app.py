@@ -2241,12 +2241,22 @@ def _cleanup_bot_oauth_states() -> None:
 
 
 def _bot_oauth_html_response(success: bool, message: str, *, redirect_url: Optional[str] = None, status_code: int = 200) -> HTMLResponse:
+    """Build popup HTML for bot OAuth completion and notify the admin window via postMessage."""
     payload = {"type": "bot-oauth-complete", "success": success}
     if not success:
         payload["error"] = message
     script_payload = json.dumps(payload)
     message_text = html.escape(message or "")
     redirect_script = ""
+    close_script = ""
+    cta_text = "You can close this window."
+    if not success:
+        cta_text = "You may close this window."
+    else:
+        close_script = """
+        setTimeout(function() {
+          try { window.close(); } catch (err) { /* ignore */ }
+        }, 1500);"""
     if redirect_url:
         redirect_script = f"\n          setTimeout(function() {{ window.location.replace('{html.escape(redirect_url)}'); }}, 1200);"
     body = f"""<!DOCTYPE html>
@@ -2260,7 +2270,8 @@ def _bot_oauth_html_response(success: bool, message: str, *, redirect_url: Optio
   </head>
   <body>
     <h1>{'Success' if success else 'Authorization Failed'}</h1>
-    <p>{message_text or ('Authorization completed successfully. You can close this window.' if success else 'Unable to complete bot authorization.')}</p>
+    <p>{message_text or ('Authorization completed successfully.' if success else 'Unable to complete bot authorization.')}</p>
+    <p>{cta_text}</p>
     <script>
       (function() {{
         var payload = {script_payload};
@@ -2271,9 +2282,7 @@ def _bot_oauth_html_response(success: bool, message: str, *, redirect_url: Optio
             window.parent.postMessage(payload, '*');
           }}
         }} catch (err) {{ /* ignore */ }}
-        setTimeout(function() {{
-          try {{ window.close(); }} catch (err) {{ /* ignore */ }}
-        }}, 1500);{redirect_script}
+        {close_script}{redirect_script}
       }})();
     </script>
   </body>
