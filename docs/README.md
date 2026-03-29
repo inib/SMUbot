@@ -182,11 +182,13 @@ them via `/me/channels`.
 - Channel owners and the playlist automation helper are filtered out of the
   listing, and badges update automatically as pages load or refresh.
 
-## Queue Manager unified bot control dropdown
+## Queue Manager bot controls
 - The Queue Manager header shows a **verbosity-only** dropdown beside the
   channel and bot badges whenever the selected channel is authorized.
 - Header options are limited to message levels:
   `mute`, `normal`, `verbose`, and `debug`.
+- Header controls do **not** include connect/disconnect actions; those actions
+  are intentionally scoped to the Settings tab.
 - The header verbosity dropdown is disabled while the bot is disconnected
   (`join_active = 0`) and shows guidance to connect the bot in **Settings**
   before changing verbosity.

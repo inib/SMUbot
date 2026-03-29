@@ -58,18 +58,21 @@ class QueueManagerUsersUiTests(unittest.TestCase):
         html = Path("queue_manager/public/index.html").read_text(encoding="utf-8")
         self.assertIn('id="bot-control-host"', html)
 
-    def test_bot_control_models_include_connection_and_levels(self) -> None:
-        """Bot controls should keep explicit connect/disconnect actions and message levels."""
+    def test_bot_control_option_model_includes_connection_and_levels(self) -> None:
+        """Bot control option model should keep connection actions and message-level entries."""
 
         script = Path("queue_manager/public/queue_manager.js").read_text(encoding="utf-8")
-        self.assertIn("const BOT_CONNECTION_OPTIONS = [", script)
+        self.assertIn("const BOT_CONTROL_OPTION_MODEL = {", script)
+        self.assertIn("connection: [", script)
         self.assertIn("{ value: 'connect'", script)
         self.assertIn("{ value: 'disconnect'", script)
-        self.assertIn("const BOT_MESSAGE_LEVEL_OPTIONS = [", script)
+        self.assertIn("verbosity: [", script)
         self.assertIn("{ value: 'mute'", script)
         self.assertIn("{ value: 'normal'", script)
         self.assertIn("{ value: 'verbose'", script)
         self.assertIn("{ value: 'debug'", script)
+        self.assertIn("function getBotControlOptions(type) {", script)
+        self.assertIn("return Array.isArray(options) ? options.slice() : [];", script)
 
     def test_settings_bot_control_group_and_virtual_connection_row_exist(self) -> None:
         """Settings should expose a dedicated Bot Control section with join/part and message-level rows."""
@@ -87,7 +90,7 @@ class QueueManagerUsersUiTests(unittest.TestCase):
 
         script = Path("queue_manager/public/queue_manager.js").read_text(encoding="utf-8")
         self.assertIn("const next = input.checked ? 'connect' : 'disconnect';", script)
-        self.assertIn("const option = BOT_CONNECTION_OPTIONS.find(entry => entry.value === selectionValue);", script)
+        self.assertIn("const option = getBotControlOptions('connection').find(entry => entry.value === selectionValue);", script)
         self.assertIn("`${API}/channels/${encodedChannel}?join_active=${option.joinActive}`", script)
         self.assertIn("type === 'bot-connection' || type === 'bot-message-level'", script)
         self.assertIn("await applyBotConnectionSelection(next, { refreshSettingsView: false });", script)
@@ -116,6 +119,7 @@ class QueueManagerUsersUiTests(unittest.TestCase):
         """Header verbosity dropdown should stay disabled whenever join_active is false."""
 
         script = Path("queue_manager/public/queue_manager.js").read_text(encoding="utf-8")
+        self.assertIn("options: getBotControlOptions('verbosity'),", script)
         self.assertIn("disabled: !channelInfo.join_active,", script)
         self.assertIn("const disabledTitle = 'Connect bot in Settings to change verbosity.';", script)
         self.assertIn("if (!channelInfo.join_active) {", script)
