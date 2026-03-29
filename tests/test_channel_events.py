@@ -420,7 +420,33 @@ class ChannelEventTests(unittest.TestCase):
         self.assertEqual(updated["max_prio_points"], 42)
         self.assertEqual(updated["overall_queue_cap"], 77)
 
+    def test_bot_message_level_defaults_updates_and_rejects_invalid_values(self) -> None:
+        details = _setup_channel()
+        channel = details["channel_name"]
+        headers = {"X-Admin-Token": backend_app.ADMIN_TOKEN}
+
+        initial = self.client.get(f"/channels/{channel}/settings", headers=headers)
+        self.assertEqual(initial.status_code, 200, initial.text)
+        self.assertEqual(initial.json()["bot_message_level"], "normal")
+
+        update = self.client.put(
+            f"/channels/{channel}/settings",
+            json={"bot_message_level": "debug"},
+            headers=headers,
+        )
+        self.assertEqual(update.status_code, 200, update.text)
+
+        after_update = self.client.get(f"/channels/{channel}/settings", headers=headers)
+        self.assertEqual(after_update.status_code, 200, after_update.text)
+        self.assertEqual(after_update.json()["bot_message_level"], "debug")
+
+        invalid = self.client.put(
+            f"/channels/{channel}/settings",
+            json={"bot_message_level": "loud"},
+            headers=headers,
+        )
+        self.assertEqual(invalid.status_code, 422, invalid.text)
+
 
 if __name__ == "__main__":
     unittest.main()
-

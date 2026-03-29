@@ -163,8 +163,8 @@ def ensure_channel_settings_schema() -> None:
     Code customers: Startup bootstrap that needs the latest settings columns
     before serving traffic.
     Used variables/origin: Operates on the ``channel_settings`` table and adds
-    the ``full_auto_priority_mode`` flag plus priority pricing columns with
-    defaults when absent.
+    the ``full_auto_priority_mode`` flag, priority pricing columns, and
+    ``bot_message_level`` with defaults when absent.
     """
 
     inspector = inspect(engine)
@@ -187,13 +187,19 @@ def ensure_channel_settings_schema() -> None:
         "prio_reset_points_vip": "ALTER TABLE channel_settings ADD COLUMN prio_reset_points_vip INTEGER NOT NULL DEFAULT 0",
         "prio_reset_points_mod": "ALTER TABLE channel_settings ADD COLUMN prio_reset_points_mod INTEGER NOT NULL DEFAULT 0",
         "free_mod_priority_requests": "ALTER TABLE channel_settings ADD COLUMN free_mod_priority_requests INTEGER NOT NULL DEFAULT 0",
+        "bot_message_level": "ALTER TABLE channel_settings ADD COLUMN bot_message_level VARCHAR NOT NULL DEFAULT 'normal'",
     }
-    missing = {name: ddl for name, ddl in required_columns.items() if name not in columns}
-    if not missing:
-        return
     with engine.begin() as conn:
+        missing = {name: ddl for name, ddl in required_columns.items() if name not in columns}
         for ddl in missing.values():
             conn.execute(text(ddl))
+        if "bot_message_level" in columns:
+            conn.execute(
+                text(
+                    "UPDATE channel_settings SET bot_message_level = 'normal' "
+                    "WHERE bot_message_level IS NULL OR bot_message_level = ''"
+                )
+            )
 
 
 def backfill_missing_channel_keys() -> None:
@@ -810,6 +816,7 @@ class ChannelSettings(Base):
     prio_reset_points_vip = Column(Integer, default=0)
     prio_reset_points_mod = Column(Integer, default=0)
     free_mod_priority_requests = Column(Integer, default=0)
+    bot_message_level = Column(String, default="normal", nullable=False)
 
     channel = relationship("ActiveChannel", back_populates="settings")
 
@@ -1002,7 +1009,8 @@ def _ensure_channel_settings_schema() -> None:
     emitters, and tests that assume queue capacity fields exist.
     Used variables/origin: Reads the discovered column names from the inspector
     and applies a default of ``100`` for both ``overall_queue_cap`` and
-    ``nonpriority_queue_cap`` when adding or backfilling those fields.
+    ``nonpriority_queue_cap`` plus ``"normal"`` for ``bot_message_level`` when
+    adding or backfilling those fields.
     """
 
     with engine.begin() as connection:
@@ -1060,6 +1068,21 @@ def _ensure_channel_settings_schema() -> None:
         for name, ddl in pricing_columns.items():
             if name not in columns:
                 connection.execute(text(ddl))
+
+        if "bot_message_level" not in columns:
+            connection.execute(
+                text(
+                    "ALTER TABLE channel_settings "
+                    "ADD COLUMN bot_message_level VARCHAR NOT NULL DEFAULT 'normal'"
+                )
+            )
+        else:
+            connection.execute(
+                text(
+                    "UPDATE channel_settings SET bot_message_level = 'normal' "
+                    "WHERE bot_message_level IS NULL OR bot_message_level = ''"
+                )
+            )
 
 
 def _ensure_playlist_schema() -> None:
@@ -1215,6 +1238,7 @@ class ChannelSettingsBase(BaseModel):
     prio_reset_points_vip: int = Field(0, ge=0)
     prio_reset_points_mod: int = Field(0, ge=0)
     free_mod_priority_requests: int = 0
+    bot_message_level: Literal["mute", "normal", "verbose", "debug"] = "normal"
 
 
 class ChannelSettingsUpdate(BaseModel):
@@ -1240,6 +1264,7 @@ class ChannelSettingsUpdate(BaseModel):
     prio_reset_points_vip: Optional[int] = Field(None, ge=0)
     prio_reset_points_mod: Optional[int] = Field(None, ge=0)
     free_mod_priority_requests: Optional[int] = None
+    bot_message_level: Optional[Literal["mute", "normal", "verbose", "debug"]] = None
 
 
 class ChannelSettingsOut(ChannelSettingsBase):
@@ -2068,6 +2093,16 @@ def _next_priority_request(
 
 
 def _serialize_settings_event(settings: ChannelSettings) -> Dict[str, Any]:
+    """Serialize persisted settings into a stable event payload dictionary.
+
+    Dependencies: Reads fields from the provided ``ChannelSettings`` ORM
+    instance.
+    Code customers: Settings update routes and websocket publishers emitting the
+    ``settings.updated`` event.
+    Used variables/origin: Pulls each settings attribute, including
+    ``bot_message_level``, from ``settings``.
+    """
+
     return {
         "max_requests_per_user": settings.max_requests_per_user,
         "prio_only": settings.prio_only,
@@ -2091,6 +2126,7 @@ def _serialize_settings_event(settings: ChannelSettings) -> Dict[str, Any]:
         "prio_reset_points_vip": settings.prio_reset_points_vip,
         "prio_reset_points_mod": settings.prio_reset_points_mod,
         "free_mod_priority_requests": settings.free_mod_priority_requests,
+        "bot_message_level": settings.bot_message_level,
     }
 
 
@@ -3205,7 +3241,8 @@ def get_or_create_settings(db: Session, channel_pk: int) -> ChannelSettings:
     queue enforcement, playlist helpers, and channel metadata endpoints.
     Used variables/origin: Receives ``channel_pk`` from upstream path parameters
     or ownership checks, and writes default values onto the settings row when
-    ``overall_queue_cap`` or ``nonpriority_queue_cap`` are unset.
+    ``overall_queue_cap``, ``nonpriority_queue_cap``, or
+    ``bot_message_level`` are unset.
     """
 
     st = db.query(ChannelSettings).filter(ChannelSettings.channel_id == channel_pk).one_or_none()
@@ -3241,6 +3278,9 @@ def get_or_create_settings(db: Session, channel_pk: int) -> ChannelSettings:
         if getattr(st, field, None) is None:
             setattr(st, field, default_value)
             backfilled = True
+    if not st.bot_message_level:
+        st.bot_message_level = "normal"
+        backfilled = True
 
     if created or backfilled:
         db.commit()
@@ -4379,6 +4419,7 @@ def get_channel_settings(channel: str, db: Session = Depends(get_db)):
         prio_reset_points_vip=st.prio_reset_points_vip,
         prio_reset_points_mod=st.prio_reset_points_mod,
         free_mod_priority_requests=st.free_mod_priority_requests,
+        bot_message_level=st.bot_message_level,
     )
 
 
