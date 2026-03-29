@@ -206,6 +206,90 @@ class UsersApiTests(unittest.TestCase):
         self.assertTrue(flags[roster["sub"]]["is_subscriber"])
         self.assertEqual(flags[roster["sub"]]["subscriber_tier"], "3000")
 
+    def test_delete_user_removes_record(self) -> None:
+        """DELETE endpoint should remove an existing user from the channel."""
+
+        db = backend_app.SessionLocal()
+        try:
+            channel = _seed_channel_with_users(db, total=1)
+            target = (
+                db.query(backend_app.User)
+                .filter(
+                    backend_app.User.channel_id == channel.id,
+                    backend_app.User.twitch_id == "user-0",
+                )
+                .one()
+            )
+            channel_name = channel.channel_name
+            user_id = target.id
+        finally:
+            db.close()
+
+        resp = self.client.delete(
+            f"/channels/{channel_name}/users/{user_id}",
+            headers={"X-Admin-Token": backend_app.ADMIN_TOKEN},
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json().get("success"), True)
+
+        db = backend_app.SessionLocal()
+        try:
+            remaining = (
+                db.query(backend_app.User)
+                .filter(backend_app.User.channel_id == channel.id, backend_app.User.id == user_id)
+                .count()
+            )
+            self.assertEqual(remaining, 0)
+        finally:
+            db.close()
+
+    def test_user_listing_repairs_numeric_username(self) -> None:
+        """Listing should refresh numeric placeholder usernames from Twitch data."""
+
+        class _StubResponse:
+            def __init__(self, payload):
+                self.ok = True
+                self.status_code = 200
+                self.content = b"1"
+                self._payload = payload
+
+            def json(self):
+                return self._payload
+
+        db = backend_app.SessionLocal()
+        original_get = backend_app.requests.get
+        original_client_id_getter = backend_app.get_twitch_client_id
+        try:
+            channel = _seed_channel_with_users(db, total=1)
+            owner = channel.owner
+            owner.access_token = "owner-token"
+            candidate = (
+                db.query(backend_app.User)
+                .filter(
+                    backend_app.User.channel_id == channel.id,
+                    backend_app.User.twitch_id == "user-0",
+                )
+                .one()
+            )
+            candidate.twitch_id = "12345"
+            candidate.username = "12345"
+            db.commit()
+
+            backend_app.get_twitch_client_id = lambda: "client-id"  # type: ignore[assignment]
+            backend_app.requests.get = lambda *args, **kwargs: _StubResponse({  # type: ignore[assignment]
+                "data": [{"id": "12345", "login": "fixed_login"}]
+            })
+            payload = self.client.get(
+                f"/channels/{channel.channel_name}/users", params={"limit": 25, "offset": 0}
+            ).json()
+        finally:
+            backend_app.requests.get = original_get
+            backend_app.get_twitch_client_id = original_client_id_getter
+            db.close()
+
+        usernames = [row["username"] for row in payload["items"]]
+        self.assertIn("fixed_login", usernames)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2553,8 +2553,15 @@ function renderUsers(users) {
     minusBtn.textContent = '-1';
     minusBtn.setAttribute('aria-label', `Remove priority point from ${user.username}`);
     minusBtn.onclick = () => modPoints(user.id, -1);
+    const deleteBtn = document.createElement('button');
+    deleteBtn.type = 'button';
+    deleteBtn.className = 'danger';
+    deleteBtn.textContent = 'Delete';
+    deleteBtn.setAttribute('aria-label', `Delete user ${user.username}`);
+    deleteBtn.onclick = () => deleteUser(user.id, user.username, deleteBtn);
     actions.appendChild(plusBtn);
     actions.appendChild(minusBtn);
+    actions.appendChild(deleteBtn);
 
     row.appendChild(identity);
     row.appendChild(actions);
@@ -2635,6 +2642,45 @@ async function modPoints(uid, delta) {
     credentials: 'include'
   });
   fetchUsers();
+}
+
+/**
+ * Remove a user from the channel and refresh the visible users page.
+ * Dependencies: queue manager API base URL, active `channelName`, and
+ * `showToast`/`fetchUsers` for user feedback and list refresh.
+ * Code customers: delete buttons created in renderUsers().
+ * Used variables/origin: consumes user ID/name from rendered row callbacks and
+ * issues DELETE `/channels/{channel}/users/{user_id}`.
+ */
+async function deleteUser(uid, username, triggerBtn = null) {
+  if (!channelName) { return; }
+  const safeName = typeof username === 'string' && username.trim() ? username.trim() : `#${uid}`;
+  if (!confirm(`Delete user "${safeName}" from this channel?`)) {
+    return;
+  }
+  if (triggerBtn) {
+    triggerBtn.disabled = true;
+  }
+  try {
+    const encodedChannel = encodeURIComponent(channelName);
+    const resp = await fetch(`${API}/channels/${encodedChannel}/users/${uid}`, {
+      method: 'DELETE',
+      credentials: 'include',
+    });
+    if (!resp.ok) {
+      const detail = await readErrorDetail(resp, 'Failed to delete user.');
+      throw new Error(detail);
+    }
+    showToast(`Deleted user ${safeName}.`, 'success');
+    await fetchUsers();
+  } catch (e) {
+    console.error('Failed to delete user', e);
+    showToast(e.message || 'Failed to delete user.', 'error');
+  } finally {
+    if (triggerBtn) {
+      triggerBtn.disabled = false;
+    }
+  }
 }
 
 /**
