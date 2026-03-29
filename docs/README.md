@@ -54,6 +54,9 @@ unlocks the API for the bot, queue manager, and public web frontend.
 
 ## Bot Highlights
 - Automatically discovers authorized channels from the backend and joins them.
+- Honors each channel's `bot_message_level` (`mute`, `normal`, `verbose`,
+  `debug`) when deciding whether to send chat output; suppressed messages still
+  go to backend bot logs for observability.
 - Supports commands:
   - `!request` – add a song request.
   - `!playlist <name> <index>` – queue a song from a saved playlist by position.

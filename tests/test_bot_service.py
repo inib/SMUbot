@@ -432,5 +432,36 @@ class BotServiceTests(unittest.IsolatedAsyncioTestCase):
         song_bot.handle_request.assert_not_awaited()
         song_bot.handle_random_request.assert_not_awaited()
 
+    async def test_send_bot_message_policy_matrix(self) -> None:
+        song_bot = bot_app.SongBot.__new__(bot_app.SongBot)
+        song_bot.messages = bot_app.DEFAULT_MESSAGES.copy()
+        song_bot.channel_map = {
+            "mutech": {"channel_name": "MuteCh", "bot_message_level": "mute"},
+            "normalch": {"channel_name": "NormalCh", "bot_message_level": "normal"},
+            "verbosech": {"channel_name": "VerboseCh", "bot_message_level": "verbose"},
+            "debugch": {"channel_name": "DebugCh", "bot_message_level": "debug"},
+        }
+        song_bot._channel_login = bot_app.SongBot._channel_login.__get__(song_bot, bot_app.SongBot)
+        song_bot._send_message = AsyncMock()
+
+        with patch.object(bot_app, "push_console_event", AsyncMock()) as push_event:
+            await song_bot._send_bot_message("mutech", "hidden", level=bot_app.BotMessageLevel.DEBUG)
+            await song_bot._send_bot_message("normalch", "hidden", level=bot_app.BotMessageLevel.MUTE)
+            await song_bot._send_bot_message("verbosech", "hidden", level=bot_app.BotMessageLevel.NORMAL)
+            await song_bot._send_bot_message("debugch", "hidden", level=bot_app.BotMessageLevel.VERBOSE)
+
+            await song_bot._send_bot_message("normalch", "shown", level=bot_app.BotMessageLevel.NORMAL)
+            await song_bot._send_bot_message("verbosech", "shown", level=bot_app.BotMessageLevel.VERBOSE)
+            await song_bot._send_bot_message("debugch", "shown", level=bot_app.BotMessageLevel.DEBUG)
+
+        sent_calls = [call.args[1] for call in song_bot._send_message.await_args_list]
+        self.assertEqual(sent_calls, ["shown", "shown", "shown"])
+        suppressed_logs = [
+            call
+            for call in push_event.await_args_list
+            if call.kwargs.get("event") == "message_suppressed"
+        ]
+        self.assertEqual(len(suppressed_logs), 4)
+
 if __name__ == "__main__":
     unittest.main()
