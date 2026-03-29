@@ -34,14 +34,15 @@
 </div>
 
 <div id="app" style="display:none">
-  <div class="wrap">
-    <div class="header">
-      <div class="brand">Queue Manager</div>
-      <span id="ch-badge" class="badge">channel: ?</span>
-      <span id="bot-status" class="badge" hidden>bot: unknown</span>
-      <button id="reg-btn" style="display:none"></button>
-      <div class="dev-stamp" id="qm-app-dev-stamp" hidden aria-hidden="true">DEV</div>
-    </div>
+    <div class="wrap">
+      <div class="header">
+        <div class="brand">Queue Manager</div>
+        <span id="ch-badge" class="badge">channel: ?</span>
+        <span id="bot-status" class="badge" hidden>bot: unknown</span>
+        <div id="bot-control-host" class="bot-control-host"></div>
+        <button id="reg-btn" style="display:none"></button>
+        <div class="dev-stamp" id="qm-app-dev-stamp" hidden aria-hidden="true">DEV</div>
+      </div>
 
     <div class="grid">
       <div class="card">
@@ -97,7 +98,6 @@
           </div>
           <div class="footer">
             <button id="archive-btn">Archive Stream</button>
-            <button id="mute-btn">Toggle Requests</button>
           </div>
         </div>
 

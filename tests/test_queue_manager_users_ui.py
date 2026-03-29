@@ -31,6 +31,24 @@ class QueueManagerUsersUiTests(unittest.TestCase):
         self.assertIn('resolveUserBadge', script)
         self.assertIn('.user-role-badge', css)
 
+    def test_header_bot_dropdown_hook_exists(self) -> None:
+        """Queue Manager header should expose the shared bot-control dropdown mount."""
+
+        html = Path("queue_manager/public/index.html").read_text(encoding="utf-8")
+        self.assertIn('id="bot-control-host"', html)
+
+    def test_bot_control_model_includes_connection_and_levels(self) -> None:
+        """Unified dropdown model should include connect/disconnect and all message levels."""
+
+        script = Path("queue_manager/public/queue_manager.js").read_text(encoding="utf-8")
+        self.assertIn("const BOT_CONTROL_OPTION_MODEL =", script)
+        self.assertIn("{ value: 'connect'", script)
+        self.assertIn("{ value: 'disconnect'", script)
+        self.assertIn("{ value: 'mute'", script)
+        self.assertIn("{ value: 'normal'", script)
+        self.assertIn("{ value: 'verbose'", script)
+        self.assertIn("{ value: 'debug'", script)
+
 
 if __name__ == "__main__":
     unittest.main()

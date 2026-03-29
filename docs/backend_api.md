@@ -113,6 +113,23 @@ Channel settings include queue intake controls:
 - Priority point pricing is configurable: `prio_follow_enabled`, `prio_raid_enabled`, `prio_bits_per_point`, `prio_gifts_per_point`, and per-tier fields (`prio_sub_tier1_points`, `prio_sub_tier2_points`, `prio_sub_tier3_points`) control how many points events grant. Reset bonuses (`prio_reset_points_tier1`, `prio_reset_points_tier2`, `prio_reset_points_tier3`, `prio_reset_points_vip`, `prio_reset_points_mod`) are awarded when the queue resets for a new stream. Use `free_mod_priority_requests` to allow moderators to request priority without spending points.
 - Existing deployments should apply `migrations/20240624_queue_caps.sql` to add the new capacity columns and backfill defaults for legacy channels; the application also attempts to patch missing columns on startup for SQLite/legacy installs before enforcing queue caps.
 
+### Queue Manager unified bot dropdown API mapping
+- Queue Manager uses a single state-aware dropdown model with options:
+  `connect`, `disconnect`, `mute`, `normal`, `verbose`, `debug`.
+- When a channel is disconnected (`join_active = 0`), the UI shows only
+  `connect`. When connected (`join_active = 1`), it shows `disconnect` plus the
+  four message levels.
+- Endpoint wiring:
+  - `connect` => `PUT /channels/{channel}?join_active=1`
+  - `disconnect` => `PUT /channels/{channel}?join_active=0`
+  - `mute|normal|verbose|debug` =>
+    `PUT /channels/{channel}/settings` with
+    `{ "bot_message_level": "<level>" }`
+- Validation alignment:
+  - `/channels/{channel}` accepts only `join_active` values `0` or `1`.
+  - `/channels/{channel}/settings` keeps `bot_message_level` strict to enum
+    values `mute|normal|verbose|debug`.
+
 ## Songs
 | Method | Path | Description |
 |--------|------|-------------|

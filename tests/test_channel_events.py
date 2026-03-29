@@ -447,6 +447,58 @@ class ChannelEventTests(unittest.TestCase):
         )
         self.assertEqual(invalid.status_code, 422, invalid.text)
 
+    def test_channel_status_route_controls_join_active_and_rejects_invalid_values(self) -> None:
+        """Connect/disconnect should use `/channels/{channel}` with strict join_active validation."""
+
+        details = _setup_channel()
+        channel = details["channel_name"]
+        headers = {"X-Admin-Token": backend_app.ADMIN_TOKEN}
+
+        disconnect = self.client.put(
+            f"/channels/{channel}",
+            params={"join_active": 0},
+            headers=headers,
+        )
+        self.assertEqual(disconnect.status_code, 200, disconnect.text)
+
+        with backend_app.SessionLocal() as db:
+            stored = db.query(backend_app.ActiveChannel).filter_by(channel_name=channel).one()
+            self.assertEqual(stored.join_active, 0)
+
+        reconnect = self.client.put(
+            f"/channels/{channel}",
+            params={"join_active": 1},
+            headers=headers,
+        )
+        self.assertEqual(reconnect.status_code, 200, reconnect.text)
+
+        invalid = self.client.put(
+            f"/channels/{channel}",
+            params={"join_active": 2},
+            headers=headers,
+        )
+        self.assertEqual(invalid.status_code, 422, invalid.text)
+
+    def test_settings_route_ignores_join_active_and_only_updates_message_level(self) -> None:
+        """Settings updates should keep join state untouched while still applying bot message level."""
+
+        details = _setup_channel()
+        channel = details["channel_name"]
+        headers = {"X-Admin-Token": backend_app.ADMIN_TOKEN}
+
+        update = self.client.put(
+            f"/channels/{channel}/settings",
+            json={"join_active": 0, "bot_message_level": "verbose"},
+            headers=headers,
+        )
+        self.assertEqual(update.status_code, 200, update.text)
+
+        with backend_app.SessionLocal() as db:
+            stored_channel = db.query(backend_app.ActiveChannel).filter_by(channel_name=channel).one()
+            stored_settings = backend_app.get_or_create_settings(db, stored_channel.id)
+            self.assertEqual(stored_channel.join_active, 1)
+            self.assertEqual(stored_settings.bot_message_level, "verbose")
+
 
 if __name__ == "__main__":
     unittest.main()
