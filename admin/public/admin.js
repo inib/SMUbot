@@ -106,6 +106,21 @@ const state = {
   channelUiState: {},
 };
 const BOT_MESSAGE_LEVELS = ['mute', 'normal', 'verbose', 'debug'];
+const BOT_MESSAGE_FALLBACK_CATALOG = {
+  levels: [
+    { level: 'mute', description: 'No bot chat responses are sent.' },
+    { level: 'normal', description: 'Core user-visible command responses.' },
+    { level: 'verbose', description: 'Normal + informational lifecycle notices.' },
+    { level: 'debug', description: 'Verbose + diagnostic and troubleshooting output.' },
+  ],
+  messages: [
+    { id: 'queue.request.accepted', level: 'normal', description: 'Queue/request confirmation responses.', group: 'queue', customizable: true },
+    { id: 'commands.user.feedback', level: 'normal', description: 'Command feedback sent to users.', group: 'commands', customizable: true },
+    { id: 'lifecycle.join.leave', level: 'verbose', description: 'Join/leave/lifecycle activity notices.', group: 'lifecycle', customizable: false },
+    { id: 'rewards.pricing.events', level: 'verbose', description: 'Rewards and pricing event notifications.', group: 'rewards', customizable: false },
+    { id: 'errors.recoverable', level: 'debug', description: 'Debug/error diagnostics and recovery context.', group: 'errors', customizable: false },
+  ],
+};
 let botMessageLevelDescriptions = {};
 let botMessageCatalogCache = null;
 const channelListEl = document.getElementById('channel-list');
@@ -634,6 +649,52 @@ function buildBotLevelBadge(level) {
 }
 
 /**
+ * Build a prominent warning card when live bot-message catalog loading fails.
+ * Dependencies: DOM APIs and admin auth state from `state.adminToken`.
+ * Code customers: renderBotMessagesPanel fallback/error path.
+ * Variables used/origin: fetch error `err.status` from fetchAdminJson helpers.
+ */
+function renderBotCatalogWarningCard(err) {
+  const warning = document.createElement('div');
+  warning.className = 'bot-message-warning-card';
+  const heading = document.createElement('strong');
+  heading.textContent = 'Live bot-message catalog unavailable';
+  warning.appendChild(heading);
+
+  const reason = document.createElement('div');
+  if (err && typeof err.status === 'number' && err.status === 401) {
+    reason.textContent = 'Reason: 401 unauthorized.';
+  } else {
+    reason.textContent = `Reason: ${err instanceof Error ? err.message : 'request failed while loading /bot/messages/catalog.'}`;
+  }
+  warning.appendChild(reason);
+
+  const remediation = document.createElement('div');
+  remediation.textContent = 'Remediation: set admin token or sign in, then refresh to load the live matrix.';
+  warning.appendChild(remediation);
+  return warning;
+}
+
+/**
+ * Return a lightweight local fallback matrix when the catalog endpoint fails.
+ * Dependencies: local constant BOT_MESSAGE_FALLBACK_CATALOG.
+ * Code customers: renderBotMessagesPanel degraded catalog mode.
+ * Variables used/origin: module-level fallback definitions and level descriptions.
+ */
+function getFallbackBotMessageCatalog() {
+  const levels = BOT_MESSAGE_FALLBACK_CATALOG.levels.slice();
+  const messages = BOT_MESSAGE_FALLBACK_CATALOG.messages.slice();
+  botMessageLevelDescriptions = levels.reduce((acc, levelEntry) => {
+    const key = typeof levelEntry?.level === 'string' ? levelEntry.level : '';
+    if (key && typeof levelEntry?.description === 'string') {
+      acc[key] = levelEntry.description;
+    }
+    return acc;
+  }, {});
+  return { levels, messages };
+}
+
+/**
  * Render the per-channel Bot Messages tab controls and inclusion matrix.
  * Dependencies: channel settings endpoints and loadBotMessageCatalog metadata.
  * Code customers: renderChannelTree channel detail tabs.
@@ -647,6 +708,7 @@ async function renderBotMessagesPanel(container, channelName, settings) {
     state.channelUiState[channelKey] = {
       botMessages: {
         selectedLevel: 'normal',
+        // TODO(future-cleanup): currently unused until per-message editing UI lands.
         perMessageOverrides: {},
       },
     };
@@ -702,18 +764,8 @@ async function renderBotMessagesPanel(container, channelName, settings) {
   try {
     catalog = await loadBotMessageCatalog();
   } catch (err) {
-    const empty = document.createElement('div');
-    empty.className = 'empty';
-    if (err && typeof err.status === 'number' && err.status === 401) {
-      const hasAdminToken = Boolean(state.adminToken && state.adminToken.trim());
-      empty.textContent = hasAdminToken
-        ? 'Bot message catalog unavailable: admin authentication failed. Verify the X-Admin-Token value or sign in again to refresh your admin session cookie.'
-        : 'Bot message catalog unavailable: no admin authentication found. Enter an admin token or sign in to establish an admin session cookie.';
-    } else {
-      empty.textContent = err instanceof Error ? err.message : 'Bot message catalog metadata unavailable.';
-    }
-    container.appendChild(empty);
-    return;
+    container.appendChild(renderBotCatalogWarningCard(err));
+    catalog = getFallbackBotMessageCatalog();
   }
   const rows = Array.isArray(catalog?.messages) ? catalog.messages.slice() : [];
   rows.sort((a, b) => String(a.id || '').localeCompare(String(b.id || '')));
@@ -918,10 +970,15 @@ async function renderChannelTree(channels, oauthMap) {
     details.appendChild(summary);
 
     const channelTabs = document.createElement('div');
+    const channelDetailSummary = document.createElement('div');
+    channelDetailSummary.className = 'channel-detail-summary';
+    channelDetailSummary.textContent = 'Bot Messages tab shows included responses by level and contains the message matrix.';
+    details.appendChild(channelDetailSummary);
+
     channelTabs.className = 'channel-detail-tabs';
     const tabButtons = [
       { id: 'custom-settings', label: 'Custom Settings' },
-      { id: 'bot-messages', label: 'Bot Messages' },
+      { id: 'bot-messages', label: 'Bot Messages (Matrix)' },
       { id: 'active-streams', label: 'Active Streams' },
     ];
     const panelMap = new Map();
