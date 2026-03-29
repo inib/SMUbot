@@ -831,6 +831,8 @@ const SETTINGS_CONFIG = {
     type: 'bot-connection',
     label: 'Bot connection',
     description: 'Connect or disconnect the chat bot for this channel.',
+    onLabel: 'Connected',
+    offLabel: 'Disconnected',
     group: 'bot',
     virtual: true,
   },
@@ -857,17 +859,6 @@ const BOT_MESSAGE_LEVEL_OPTIONS = [
   { value: 'verbose', label: 'Verbose' },
   { value: 'debug', label: 'Debug' },
 ];
-
-/**
- * Resolve available connection options for the settings connect/disconnect control.
- * Dependencies: reads BOT_CONNECTION_OPTIONS and the active channel join state.
- * Code customers: settings `bot-connection` control renderer.
- * Used variables/origin: filters the connection model so users only see the next valid connect/disconnect action.
- */
-function getBotConnectionOptions(channelInfo) {
-  const connected = !!channelInfo?.join_active;
-  return BOT_CONNECTION_OPTIONS.filter(option => (connected ? option.value === 'disconnect' : option.value === 'connect'));
-}
 
 /**
  * Persist bot message verbosity for the active channel.
@@ -3174,19 +3165,58 @@ function createBotOptionsDropdown({
  * Used variables/origin: derives join/message state from `getChannelInfo(channelName)` and uses setting/default values from row payload.
  */
 function createBotSettingControl({ controlType, value, meta }) {
-  const wrapper = document.createElement('div');
-  wrapper.className = 'setting-select';
   const channelInfo = getChannelInfo(channelName);
   const isConnectionControl = controlType === 'bot-connection';
-  const options = isConnectionControl
-    ? getBotConnectionOptions(channelInfo)
-    : BOT_MESSAGE_LEVEL_OPTIONS;
-  let currentSelection = isConnectionControl
-    ? (options[0]?.value || 'connect')
-    : (typeof value === 'string' ? value : 'normal');
+  if (isConnectionControl) {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'setting-toggle';
+    const switchLabel = document.createElement('label');
+    switchLabel.className = 'toggle-switch';
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.checked = !!channelInfo?.join_active;
+    input.setAttribute('aria-label', meta.label || 'Bot connection');
+    if (meta.disabled) {
+      input.disabled = true;
+    }
+    const slider = document.createElement('span');
+    slider.className = 'toggle-slider';
+    switchLabel.appendChild(input);
+    switchLabel.appendChild(slider);
+    const state = document.createElement('span');
+    state.className = 'toggle-state';
+    const onLabel = meta.onLabel || 'Connected';
+    const offLabel = meta.offLabel || 'Disconnected';
+    const refreshState = () => {
+      state.textContent = input.checked ? onLabel : offLabel;
+    };
+    refreshState();
+    wrapper.appendChild(switchLabel);
+    wrapper.appendChild(state);
+    if (!meta.disabled) {
+      input.addEventListener('change', async () => {
+        const next = input.checked ? 'connect' : 'disconnect';
+        wrapper.classList.add('loading');
+        input.disabled = true;
+        const ok = await applyBotConnectionSelection(next, { refreshSettingsView: false });
+        if (!ok) {
+          input.checked = !input.checked;
+        } else {
+          await fetchSettings();
+        }
+        refreshState();
+        input.disabled = false;
+        wrapper.classList.remove('loading');
+      });
+    }
+    return wrapper;
+  }
 
+  const wrapper = document.createElement('div');
+  wrapper.className = 'setting-select';
+  let currentSelection = typeof value === 'string' ? value : 'normal';
   const select = createBotOptionsDropdown({
-    options,
+    options: BOT_MESSAGE_LEVEL_OPTIONS,
     currentValue: currentSelection,
     disabled: !!meta.disabled,
     disabledTitle: meta.disabledReason || '',
@@ -3197,9 +3227,7 @@ function createBotSettingControl({ controlType, value, meta }) {
       }
       wrapper.classList.add('loading');
       element.disabled = true;
-      const ok = isConnectionControl
-        ? await applyBotConnectionSelection(next, { refreshSettingsView: false })
-        : await applyBotMessageLevelSelection(next, { refreshSettingsView: false });
+      const ok = await applyBotMessageLevelSelection(next, { refreshSettingsView: false });
       if (ok) {
         currentSelection = next;
         element.value = currentSelection;
