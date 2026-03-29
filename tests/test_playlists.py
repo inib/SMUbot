@@ -452,9 +452,11 @@ class PlaylistApiTests(unittest.TestCase):
             keywords = sorted(kw.keyword for kw in favorites.keywords)
             self.assertEqual(keywords, ["default", "favorite"])
             items = db.query(backend_app.PlaylistItem).filter_by(playlist_id=favorites.id).all()
-            self.assertEqual(len(items), 1)
-            self.assertEqual(items[0].video_id, "9Pzj6U5c2cs")
-            self.assertEqual(items[0].position, 1)
+            self.assertGreaterEqual(len(items), 3)
+            video_ids = {item.video_id for item in items}
+            self.assertIn("uWQQbQ9jqU4", video_ids)
+            self.assertIn("TvZskcqdYcE", video_ids)
+            self.assertIn("tKi9Z-f6qX4", video_ids)
         finally:
             db.close()
 
@@ -703,3 +705,129 @@ class PlaylistApiTests(unittest.TestCase):
                 headers=self._admin_headers(),
             )
         self.assertEqual(public_pick.status_code, 200, public_pick.text)
+
+    def test_auth_callback_creates_favorites_with_seed_tracks(self) -> None:
+        _wipe_db()
+        db = backend_app.SessionLocal()
+        try:
+            backend_app.set_settings(
+                db,
+                {
+                    "setup_complete": "1",
+                    "twitch_client_id": "client",
+                    "twitch_client_secret": "secret",
+                },
+            )
+        finally:
+            db.close()
+        backend_app.settings_store.invalidate()
+
+        with mock.patch("backend_app.requests.post") as mock_post, mock.patch("backend_app.requests.get") as mock_get, mock.patch("backend_app.ensure_eventsub_subscriptions"):
+            mock_post.return_value.json.return_value = {
+                "access_token": "access",
+                "refresh_token": "refresh",
+                "scope": ["channel:bot"],
+            }
+            mock_get.return_value.json.return_value = {
+                "data": [{"id": "tw123", "login": "oauthchan"}]
+            }
+            response = self.client.get(
+                "/auth/callback",
+                params={"code": "abc", "state": "oauthchan"},
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        db = backend_app.SessionLocal()
+        try:
+            channel = db.query(backend_app.ActiveChannel).filter_by(channel_name="oauthchan").one()
+            favorites = (
+                db.query(backend_app.Playlist)
+                .filter_by(channel_id=channel.id, title="Favorites", source="manual")
+                .one()
+            )
+            items = db.query(backend_app.PlaylistItem).filter_by(playlist_id=favorites.id).all()
+            self.assertEqual(len(items), 3)
+            self.assertEqual({item.video_id for item in items}, {"TvZskcqdYcE", "tKi9Z-f6qX4", "uWQQbQ9jqU4"})
+        finally:
+            db.close()
+
+    def test_auth_callback_repeat_does_not_duplicate_seed_tracks(self) -> None:
+        _wipe_db()
+        db = backend_app.SessionLocal()
+        try:
+            backend_app.set_settings(
+                db,
+                {
+                    "setup_complete": "1",
+                    "twitch_client_id": "client",
+                    "twitch_client_secret": "secret",
+                },
+            )
+        finally:
+            db.close()
+        backend_app.settings_store.invalidate()
+
+        with mock.patch("backend_app.requests.post") as mock_post, mock.patch("backend_app.requests.get") as mock_get, mock.patch("backend_app.ensure_eventsub_subscriptions"):
+            mock_post.return_value.json.return_value = {
+                "access_token": "access",
+                "refresh_token": "refresh",
+                "scope": ["channel:bot"],
+            }
+            mock_get.return_value.json.return_value = {
+                "data": [{"id": "tw123", "login": "oauthchan"}]
+            }
+            first = self.client.get("/auth/callback", params={"code": "abc", "state": "oauthchan"})
+            self.assertEqual(first.status_code, 200, first.text)
+            second = self.client.get("/auth/callback", params={"code": "def", "state": "oauthchan"})
+            self.assertEqual(second.status_code, 200, second.text)
+
+        db = backend_app.SessionLocal()
+        try:
+            channel = db.query(backend_app.ActiveChannel).filter_by(channel_name="oauthchan").one()
+            favorites = db.query(backend_app.Playlist).filter_by(channel_id=channel.id, title="Favorites").one()
+            items = db.query(backend_app.PlaylistItem).filter_by(playlist_id=favorites.id).all()
+            self.assertEqual(len(items), 3)
+            self.assertEqual({item.video_id for item in items}, {"TvZskcqdYcE", "tKi9Z-f6qX4", "uWQQbQ9jqU4"})
+        finally:
+            db.close()
+
+    def test_auth_session_auto_register_creates_favorites_without_duplicates(self) -> None:
+        _wipe_db()
+        db = backend_app.SessionLocal()
+        try:
+            user = backend_app.TwitchUser(
+                twitch_id="usr1",
+                username="viewer",
+                access_token="token",
+                refresh_token="",
+                scopes="channel:bot",
+            )
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+        finally:
+            db.close()
+
+        auth_data = {
+            "scopes": ["channel:bot"],
+            "login": "tokenchan",
+            "user_id": "tok123",
+            "expires_in": 3600,
+        }
+
+        with mock.patch.object(backend_app, "_resolve_user_from_token") as resolver:
+            resolver.return_value = (user, auth_data)
+            first = self.client.post("/auth/session", headers={"Authorization": "Bearer testtoken"})
+            self.assertEqual(first.status_code, 200, first.text)
+            second = self.client.post("/auth/session", headers={"Authorization": "Bearer testtoken"})
+            self.assertEqual(second.status_code, 200, second.text)
+
+        db = backend_app.SessionLocal()
+        try:
+            channel = db.query(backend_app.ActiveChannel).filter_by(channel_name="tokenchan").one()
+            favorites = db.query(backend_app.Playlist).filter_by(channel_id=channel.id, title="Favorites").one()
+            items = db.query(backend_app.PlaylistItem).filter_by(playlist_id=favorites.id).all()
+            self.assertEqual(len(items), 3)
+            self.assertEqual({item.video_id for item in items}, {"TvZskcqdYcE", "tKi9Z-f6qX4", "uWQQbQ9jqU4"})
+        finally:
+            db.close()

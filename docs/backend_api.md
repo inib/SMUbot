@@ -11,7 +11,7 @@ This document summarizes the REST endpoints exposed by `backend_app.py`.
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/auth/login` | Build a Twitch OAuth authorization URL for a channel, optionally preserving a `return_url`. |
-| GET | `/auth/callback` | Twitch OAuth callback that stores the access token and marks the user as the channel owner. |
+| GET | `/auth/callback` | Twitch OAuth callback that stores the access token, marks the user as the channel owner, and seeds Favorites for new channels. |
 | POST | `/auth/session` | Exchange a user OAuth token for a server-side session cookie. |
 | POST | `/auth/logout` | Clear the admin session cookie. |
 
@@ -44,13 +44,14 @@ This document summarizes the REST endpoints exposed by `backend_app.py`.
 - **Behavior**
   - Exchanges `code` for an access token and requires the `channel:bot` scope.
   - Fetches the authenticated Twitch user and upserts `TwitchUser` plus the matching `ActiveChannel`, setting `authorized=True` and `owner_id` to the user.
+  - When this flow creates a new channel record, it also creates a manual `Favorites` playlist and seeds these tracks (idempotently): `Night Drive` (FM-84), `Strobe` (deadmau5), and `LONG DISTANCE CALLING - Voices` (`https://www.youtube.com/watch?v=uWQQbQ9jqU4`).
   - Redirects to `return_url` when supplied and using an `http`/`https` scheme; otherwise returns `{ "success": true }`.
 
 ### `/auth/session`
 - **Authentication**: `Authorization: Bearer <user OAuth token>`.
 - **Behavior**
   - Validates the token against `https://id.twitch.tv/oauth2/validate` and refreshes the stored `TwitchUser` record.
-  - Auto-registers the channel as owned when the token carries the `channel:bot` scope.
+  - Auto-registers the channel as owned when the token carries the `channel:bot` scope; newly auto-created channels are initialized with the same seeded manual `Favorites` playlist.
   - Sets the `admin_oauth_token` cookie (HTTP-only, `SameSite=lax`) for subsequent admin access, honoring Twitch `expires_in` when present.
 - **Response**: `{ "login": "<twitch username>" }`.
 - **Errors**: 401 when the bearer token is missing or invalid.
@@ -93,7 +94,7 @@ This document summarizes the REST endpoints exposed by `backend_app.py`.
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/channels` | List all configured channels. |
-| POST | `/channels` | Add a new channel (requires admin token). |
+| POST | `/channels` | Add a new channel (requires admin token) and initialize seeded Favorites. |
 | PUT | `/channels/{channel}` | Update whether the bot should join a channel (admin). |
 | GET | `/channels/{channel}/settings` | Retrieve channel configuration. |
 | PUT | `/channels/{channel}/settings` | Update channel configuration (admin). |
@@ -102,6 +103,11 @@ The settings update endpoint accepts partial payloads and merges them with the
 existing record so omitted fields keep their persisted values. Frontend callers
 should prefer sending the full current state when possible or rely on the
 backend merge behavior to avoid unintentionally resetting values to defaults.
+
+`POST /channels` also ensures a manual `Favorites` playlist exists and seeds
+missing defaults idempotently (`Night Drive`, `Strobe`, and
+`LONG DISTANCE CALLING - Voices`), so repeated onboarding does not duplicate
+tracks.
 
 Channel settings include queue intake controls:
 
