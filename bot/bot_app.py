@@ -1013,12 +1013,15 @@ class SongBot(commands.Bot):
         through `push_console_event` for observability. Code customers: all bot
         command and event handlers. Used variables/origin: message content comes
         from `message_or_key` (literal text or `self.messages` key), while
-        `level` is declared at each call site.
+        `level` is declared at each call site. Visibility rule: `MUTE`
+        channels always suppress chat, otherwise messages are allowed when the
+        resolved message level is less than or equal to the configured channel
+        threshold (`resolved_level <= threshold`).
         """
 
         resolved_level = self._coerce_message_level(level)
         threshold = self._resolve_channel_message_threshold(channel_login)
-        allow_chat = threshold != BotMessageLevel.MUTE and resolved_level >= threshold
+        allow_chat = threshold != BotMessageLevel.MUTE and resolved_level <= threshold
         message_text = self.messages.get(message_or_key, '') if message_key else message_or_key
         if not message_text:
             return
