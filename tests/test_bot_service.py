@@ -433,6 +433,7 @@ class BotServiceTests(unittest.IsolatedAsyncioTestCase):
         song_bot.handle_random_request.assert_not_awaited()
 
     async def test_send_bot_message_policy_matrix(self) -> None:
+        """Verify per-channel thresholds include lower-severity messages."""
         song_bot = bot_app.SongBot.__new__(bot_app.SongBot)
         song_bot.messages = bot_app.DEFAULT_MESSAGES.copy()
         song_bot.channel_map = {
@@ -445,23 +446,95 @@ class BotServiceTests(unittest.IsolatedAsyncioTestCase):
         song_bot._send_message = AsyncMock()
 
         with patch.object(bot_app, "push_console_event", AsyncMock()) as push_event:
-            await song_bot._send_bot_message("mutech", "hidden", level=bot_app.BotMessageLevel.DEBUG)
-            await song_bot._send_bot_message("normalch", "hidden", level=bot_app.BotMessageLevel.MUTE)
-            await song_bot._send_bot_message("verbosech", "hidden", level=bot_app.BotMessageLevel.NORMAL)
-            await song_bot._send_bot_message("debugch", "hidden", level=bot_app.BotMessageLevel.VERBOSE)
+            # Mute sends none.
+            await song_bot._send_bot_message("mutech", "mute-normal", level=bot_app.BotMessageLevel.NORMAL)
+            await song_bot._send_bot_message("mutech", "mute-verbose", level=bot_app.BotMessageLevel.VERBOSE)
 
-            await song_bot._send_bot_message("normalch", "shown", level=bot_app.BotMessageLevel.NORMAL)
-            await song_bot._send_bot_message("verbosech", "shown", level=bot_app.BotMessageLevel.VERBOSE)
-            await song_bot._send_bot_message("debugch", "shown", level=bot_app.BotMessageLevel.DEBUG)
+            # Normal sends only normal.
+            await song_bot._send_bot_message("normalch", "normal-normal", level=bot_app.BotMessageLevel.NORMAL)
+            await song_bot._send_bot_message("normalch", "normal-verbose", level=bot_app.BotMessageLevel.VERBOSE)
+            await song_bot._send_bot_message("normalch", "normal-debug", level=bot_app.BotMessageLevel.DEBUG)
+
+            # Verbose sends normal + verbose.
+            await song_bot._send_bot_message("verbosech", "verbose-normal", level=bot_app.BotMessageLevel.NORMAL)
+            await song_bot._send_bot_message("verbosech", "verbose-verbose", level=bot_app.BotMessageLevel.VERBOSE)
+            await song_bot._send_bot_message("verbosech", "verbose-debug", level=bot_app.BotMessageLevel.DEBUG)
+
+            # Debug sends normal + verbose + debug.
+            await song_bot._send_bot_message("debugch", "debug-normal", level=bot_app.BotMessageLevel.NORMAL)
+            await song_bot._send_bot_message("debugch", "debug-verbose", level=bot_app.BotMessageLevel.VERBOSE)
+            await song_bot._send_bot_message("debugch", "debug-debug", level=bot_app.BotMessageLevel.DEBUG)
 
         sent_calls = [call.args[1] for call in song_bot._send_message.await_args_list]
-        self.assertEqual(sent_calls, ["shown", "shown", "shown"])
+        self.assertEqual(
+            sent_calls,
+            [
+                "normal-normal",
+                "verbose-normal",
+                "verbose-verbose",
+                "debug-normal",
+                "debug-verbose",
+                "debug-debug",
+            ],
+        )
         suppressed_logs = [
             call
             for call in push_event.await_args_list
             if call.kwargs.get("event") == "message_suppressed"
         ]
-        self.assertEqual(len(suppressed_logs), 4)
+        self.assertEqual(len(suppressed_logs), 5)
+
+    async def test_request_added_message_visible_at_verbose_and_debug(self) -> None:
+        """Regression: command responses remain visible for verbose/debug channels."""
+        song_bot = bot_app.SongBot.__new__(bot_app.SongBot)
+        song_bot.messages = bot_app.DEFAULT_MESSAGES.copy()
+        song_bot.message_catalog = bot_app.DEFAULT_MESSAGE_CATALOG.copy()
+        song_bot.channel_map = {
+            "verbosech": {"channel_name": "VerboseCh", "bot_message_level": "verbose"},
+            "debugch": {"channel_name": "DebugCh", "bot_message_level": "debug"},
+        }
+        song_bot._channel_login = bot_app.SongBot._channel_login.__get__(song_bot, bot_app.SongBot)
+        song_bot._send_message = AsyncMock()
+
+        with patch.object(bot_app, "push_console_event", AsyncMock()):
+            await song_bot._send_catalog_message(
+                "verbosech",
+                "request_added",
+                template_vars={"artist": "Artist", "title": "Title"},
+            )
+            await song_bot._send_catalog_message(
+                "debugch",
+                "request_added",
+                template_vars={"artist": "Artist", "title": "Title"},
+            )
+
+        sent_calls = [call.args[1] for call in song_bot._send_message.await_args_list]
+        self.assertEqual(sent_calls, ["Added: Artist - Title", "Added: Artist - Title"])
+
+    def test_default_message_catalog_levels_match_intended_groups(self) -> None:
+        """Ensure command/background/diagnostic messages retain expected severities."""
+        catalog = bot_app.DEFAULT_MESSAGE_CATALOG
+        command_ids = [
+            "request_added",
+            "random_request_added",
+            "playlist_request_added",
+            "remove_success",
+            "archive_success",
+        ]
+        verbose_background_ids = [
+            "bot_joined",
+            "played_next",
+            "award_follow",
+            "queue_position_changed",
+        ]
+        diagnostic_ids = ["token_refreshed", "action_failed_debug"]
+
+        for message_id in command_ids:
+            self.assertEqual(catalog[message_id].level, bot_app.BotMessageLevel.NORMAL)
+        for message_id in verbose_background_ids:
+            self.assertEqual(catalog[message_id].level, bot_app.BotMessageLevel.VERBOSE)
+        for message_id in diagnostic_ids:
+            self.assertEqual(catalog[message_id].level, bot_app.BotMessageLevel.DEBUG)
 
 if __name__ == "__main__":
     unittest.main()
