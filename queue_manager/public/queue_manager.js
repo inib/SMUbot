@@ -848,27 +848,39 @@ const SETTINGS_CONFIG = {
 
 const QUICK_CONTROL_KEYS = ['queue_closed', 'prio_only', 'allow_bumps', 'full_auto_priority_mode'];
 
-const BOT_CONNECTION_OPTIONS = [
-  { value: 'connect', label: 'Connect bot to chat', joinActive: 1 },
-  { value: 'disconnect', label: 'Disconnect bot from chat', joinActive: 0 },
-];
+const BOT_CONTROL_OPTION_MODEL = {
+  connection: [
+    { value: 'connect', label: 'Connect bot to chat', joinActive: 1 },
+    { value: 'disconnect', label: 'Disconnect bot from chat', joinActive: 0 },
+  ],
+  verbosity: [
+    { value: 'mute', label: 'Mute' },
+    { value: 'normal', label: 'Normal' },
+    { value: 'verbose', label: 'Verbose' },
+    { value: 'debug', label: 'Debug' },
+  ],
+};
 
-const BOT_MESSAGE_LEVEL_OPTIONS = [
-  { value: 'mute', label: 'Mute' },
-  { value: 'normal', label: 'Normal' },
-  { value: 'verbose', label: 'Verbose' },
-  { value: 'debug', label: 'Debug' },
-];
+/**
+ * Resolve bot-control option sets for a specific control surface.
+ * Dependencies: reads BOT_CONTROL_OPTION_MODEL constants only.
+ * Code customers: applyBotMessageLevelSelection(), applyBotConnectionSelection(), createBotSettingControl(), and header verbosity rendering.
+ * Used variables/origin: returns a cloned options array for `connection` or `verbosity` from static in-file model data.
+ */
+function getBotControlOptions(type) {
+  const options = BOT_CONTROL_OPTION_MODEL[type];
+  return Array.isArray(options) ? options.slice() : [];
+}
 
 /**
  * Persist bot message verbosity for the active channel.
- * Dependencies: requires `channelName`, API origin, and BOT_MESSAGE_LEVEL_OPTIONS for validation.
- * Code customers: header bot verbosity control and settings `bot_message_level` row.
+ * Dependencies: requires `channelName`, API origin, and getBotControlOptions('verbosity') for validation.
+ * Code customers: header verbosity-only select and settings `bot_message_level` row.
  * Used variables/origin: writes `{ bot_message_level }` to `PUT /channels/{channel}/settings`.
  */
 async function applyBotMessageLevelSelection(selectionValue, { refreshSettingsView = true } = {}) {
   if (!channelName) { return false; }
-  const allowedLevels = new Set(BOT_MESSAGE_LEVEL_OPTIONS.map(option => option.value));
+  const allowedLevels = new Set(getBotControlOptions('verbosity').map(option => option.value));
   if (!allowedLevels.has(selectionValue)) { return false; }
   const encodedChannel = encodeURIComponent(channelName);
   try {
@@ -895,13 +907,13 @@ async function applyBotMessageLevelSelection(selectionValue, { refreshSettingsVi
 
 /**
  * Persist bot connect/disconnect state for the active channel.
- * Dependencies: requires `channelName`, API origin, and BOT_CONNECTION_OPTIONS for join-state mapping.
+ * Dependencies: requires `channelName`, API origin, and getBotControlOptions('connection') for join-state mapping.
  * Code customers: settings `bot-connection` row.
  * Used variables/origin: maps `connect`/`disconnect` to `PUT /channels/{channel}?join_active=...`.
  */
 async function applyBotConnectionSelection(selectionValue, { refreshSettingsView = true } = {}) {
   if (!channelName) { return false; }
-  const option = BOT_CONNECTION_OPTIONS.find(entry => entry.value === selectionValue);
+  const option = getBotControlOptions('connection').find(entry => entry.value === selectionValue);
   if (!option) { return false; }
   const encodedChannel = encodeURIComponent(channelName);
   try {
@@ -3121,12 +3133,12 @@ function buildSettingRow(key, value, meta) {
 }
 
 /**
- * Build a select element from explicit option items for bot settings controls.
- * Dependencies: receives a pre-filtered `options` array from caller-specific helpers.
- * Code customers: settings bot connection and bot message-level controls.
+ * Build a select element from explicit option items for bot verbosity controls.
+ * Dependencies: receives pre-filtered `options` from getBotControlOptions() and caller-provided selection handlers.
+ * Code customers: header verbosity selector and settings bot message-level row.
  * Used variables/origin: uses caller-provided options/current value and optional disabled title text.
  */
-function createBotOptionsDropdown({
+function createBotControlDropdown({
   options,
   currentValue,
   onSelection,
@@ -3159,10 +3171,10 @@ function createBotOptionsDropdown({
 }
 
 /**
- * Build a settings-row bot control for either connection state or message level.
- * Dependencies: uses createBotOptionsDropdown(), applyBotConnectionSelection(), and applyBotMessageLevelSelection().
+ * Build settings-row bot controls (connection toggle or verbosity select).
+ * Dependencies: uses createBotControlDropdown(), getBotControlOptions(), applyBotConnectionSelection(), and applyBotMessageLevelSelection().
  * Code customers: createSettingControl() for `bot-connection` and `bot-message-level` row types.
- * Used variables/origin: derives join/message state from `getChannelInfo(channelName)` and uses setting/default values from row payload.
+ * Used variables/origin: derives join state from `getChannelInfo(channelName)` and reads per-row setting defaults from settings payload.
  */
 function createBotSettingControl({ controlType, value, meta }) {
   const channelInfo = getChannelInfo(channelName);
@@ -3215,8 +3227,8 @@ function createBotSettingControl({ controlType, value, meta }) {
   const wrapper = document.createElement('div');
   wrapper.className = 'setting-select';
   let currentSelection = typeof value === 'string' ? value : 'normal';
-  const select = createBotOptionsDropdown({
-    options: BOT_MESSAGE_LEVEL_OPTIONS,
+  const select = createBotControlDropdown({
+    options: getBotControlOptions('verbosity'),
     currentValue: currentSelection,
     disabled: !!meta.disabled,
     disabledTitle: meta.disabledReason || '',
@@ -4064,8 +4076,8 @@ async function updateRegButton() {
     if (!channelName || !channelInfo || !channelInfo.authorized) { return; }
     let currentValue = channelInfo.bot_message_level || 'normal';
     const disabledTitle = 'Connect bot in Settings to change verbosity.';
-    const select = createBotOptionsDropdown({
-      options: BOT_MESSAGE_LEVEL_OPTIONS,
+    const select = createBotControlDropdown({
+      options: getBotControlOptions('verbosity'),
       currentValue,
       disabled: !channelInfo.join_active,
       disabledTitle: !channelInfo.join_active ? disabledTitle : '',
