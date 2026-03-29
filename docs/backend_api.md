@@ -62,9 +62,19 @@ This document summarizes the REST endpoints exposed by `backend_app.py`.
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/bot/config` | Retrieve the stored bot OAuth configuration (admin). |
+| GET | `/bot/messages/catalog` | Return stable bot message levels/catalog metadata for admin UI rendering (admin). |
 | PUT | `/bot/config` | Update bot settings such as scopes or enable flag (admin). |
 | POST | `/bot/config/oauth` | Start the OAuth authorization flow for the bot account (admin). |
 | GET | `/bot/config/oauth/callback` | Callback used by Twitch to finish the bot OAuth flow. |
+
+### `/bot/messages/catalog`
+- **Authentication**: Requires admin authorization (`X-Admin-Token`, bearer token, or admin session cookie) via `require_token`.
+- **Behavior**
+  - Returns a stable contract with two top-level arrays: `levels` and `messages`.
+  - `levels` is ordered by verbosity (`mute`, `normal`, `verbose`, `debug`) and includes short descriptions for each selector option.
+  - `messages` includes metadata rows with `{ "id", "level", "group", "template_key", "description", "customizable" }`.
+  - `customizable` is currently `true` for all default entries and is included so UI clients can evolve to per-message override controls without a breaking API change.
+- **Response**: `{ "levels": [BotMessageLevelDetailOut], "messages": [BotMessageCatalogEntryOut] }`.
 
 ### `/bot/config/oauth/callback`
 - **Behavior**

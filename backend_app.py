@@ -109,6 +109,58 @@ EVENTSUB_EVENT_MAP: dict[str, str] = {
     "channel.subscription.gift": "gift_sub",
 }
 
+BOT_MESSAGE_LEVEL_DETAILS: list[dict[str, str]] = [
+    {
+        "level": "mute",
+        "description": "Mute — suppress all bot chat messages for this channel.",
+    },
+    {
+        "level": "normal",
+        "description": "Normal — core command and error responses.",
+    },
+    {
+        "level": "verbose",
+        "description": "Verbose — Normal plus lifecycle/reward/queue activity updates.",
+    },
+    {
+        "level": "debug",
+        "description": "Debug — Verbose plus diagnostics intended for troubleshooting.",
+    },
+]
+
+BOT_MESSAGE_CATALOG: list[dict[str, Any]] = [
+    {"id": "channel_not_registered", "level": "normal", "group": "commands", "template_key": "channel_not_registered", "description": "Command target channel is not registered.", "customizable": True},
+    {"id": "request_added", "level": "normal", "group": "commands", "template_key": "request_added", "description": "User song request accepted.", "customizable": True},
+    {"id": "random_request_added", "level": "normal", "group": "commands", "template_key": "random_request_added", "description": "Random playlist request accepted.", "customizable": True},
+    {"id": "random_not_found", "level": "normal", "group": "commands", "template_key": "random_not_found", "description": "Random playlist keyword did not match any playlist.", "customizable": True},
+    {"id": "playlist_request_added", "level": "normal", "group": "commands", "template_key": "playlist_request_added", "description": "Playlist song request accepted.", "customizable": True},
+    {"id": "playlist_not_found", "level": "normal", "group": "commands", "template_key": "playlist_not_found", "description": "Playlist command referenced a missing playlist.", "customizable": True},
+    {"id": "playlist_song_missing", "level": "normal", "group": "commands", "template_key": "playlist_song_missing", "description": "Playlist command referenced an out-of-range song index.", "customizable": True},
+    {"id": "playlist_usage", "level": "normal", "group": "commands", "template_key": "playlist_usage", "description": "Playlist command usage guidance.", "customizable": True},
+    {"id": "prioritize_limit", "level": "normal", "group": "commands", "template_key": "prioritize_limit", "description": "User reached prioritize limit.", "customizable": True},
+    {"id": "prioritize_no_target", "level": "normal", "group": "commands", "template_key": "prioritize_no_target", "description": "No eligible request to prioritize.", "customizable": True},
+    {"id": "prioritize_success", "level": "normal", "group": "commands", "template_key": "prioritize_success", "description": "Request prioritized successfully.", "customizable": True},
+    {"id": "points", "level": "normal", "group": "commands", "template_key": "points", "description": "Points command response.", "customizable": True},
+    {"id": "remove_no_pending", "level": "normal", "group": "commands", "template_key": "remove_no_pending", "description": "Remove command found no pending requests.", "customizable": True},
+    {"id": "remove_success", "level": "normal", "group": "commands", "template_key": "remove_success", "description": "Remove command deleted latest request.", "customizable": True},
+    {"id": "archive_success", "level": "normal", "group": "commands", "template_key": "archive_success", "description": "Queue archive command succeeded.", "customizable": True},
+    {"id": "archive_denied", "level": "normal", "group": "commands", "template_key": "archive_denied", "description": "Archive command denied due to missing permissions.", "customizable": True},
+    {"id": "failed", "level": "normal", "group": "errors", "template_key": "failed", "description": "Command failed with a user-facing error.", "customizable": True},
+    {"id": "bot_joined", "level": "verbose", "group": "lifecycle", "template_key": "bot_joined", "description": "Bot joined channel chat.", "customizable": True},
+    {"id": "bot_left", "level": "verbose", "group": "lifecycle", "template_key": "bot_left", "description": "Bot left channel chat.", "customizable": True},
+    {"id": "played_next", "level": "verbose", "group": "queue", "template_key": "played_next", "description": "Playback advanced and next prioritized song announced.", "customizable": True},
+    {"id": "played_last", "level": "verbose", "group": "queue", "template_key": "played_last", "description": "Playback advanced and no prioritized songs remain.", "customizable": True},
+    {"id": "bump_free", "level": "verbose", "group": "rewards", "template_key": "bump_free", "description": "Automatic free bump was granted.", "customizable": True},
+    {"id": "award_follow", "level": "verbose", "group": "rewards", "template_key": "award_follow", "description": "Follow reward points announcement.", "customizable": True},
+    {"id": "award_raid", "level": "verbose", "group": "rewards", "template_key": "award_raid", "description": "Raid reward points announcement.", "customizable": True},
+    {"id": "award_gift_sub", "level": "verbose", "group": "rewards", "template_key": "award_gift_sub", "description": "Gifted subscription reward points announcement.", "customizable": True},
+    {"id": "award_bits", "level": "verbose", "group": "rewards", "template_key": "award_bits", "description": "Bits reward points announcement.", "customizable": True},
+    {"id": "vip_points_awarded", "level": "verbose", "group": "rewards", "template_key": "vip_points_awarded", "description": "VIP reward points announcement.", "customizable": True},
+    {"id": "queue_position_changed", "level": "verbose", "group": "queue", "template_key": "queue_position_changed", "description": "Queue item moved to a new position.", "customizable": True},
+    {"id": "token_refreshed", "level": "debug", "group": "lifecycle", "template_key": "token_refreshed", "description": "Token refresh succeeded.", "customizable": True},
+    {"id": "action_failed_debug", "level": "debug", "group": "errors", "template_key": "action_failed_debug", "description": "Internal action failure diagnostic.", "customizable": True},
+]
+
 _bot_log_listeners: set[asyncio.Queue[str]] = set()
 _bot_oauth_states: dict[str, Dict[str, Any]] = {}
 
@@ -1321,6 +1373,25 @@ class BotConfigUpdate(BaseModel):
     scopes: Optional[List[str]] = None
     display_name: Optional[str] = None
     login: Optional[str] = None
+
+
+class BotMessageLevelDetailOut(BaseModel):
+    level: Literal["mute", "normal", "verbose", "debug"]
+    description: str
+
+
+class BotMessageCatalogEntryOut(BaseModel):
+    id: str
+    level: Literal["mute", "normal", "verbose", "debug"]
+    group: Optional[str] = None
+    template_key: str
+    description: str
+    customizable: bool = True
+
+
+class BotMessageCatalogOut(BaseModel):
+    levels: List[BotMessageLevelDetailOut]
+    messages: List[BotMessageCatalogEntryOut]
 
 
 class BotTokenUpdateIn(BaseModel):
@@ -2814,6 +2885,27 @@ def bot_config(
     cfg = _get_bot_config(db)
     include_tokens = x_admin_token == ADMIN_TOKEN
     return _serialize_bot_config(cfg, include_tokens=include_tokens)
+
+
+@app.get(
+    "/bot/messages/catalog",
+    response_model=BotMessageCatalogOut,
+    dependencies=[Depends(require_token)],
+)
+def bot_message_catalog() -> BotMessageCatalogOut:
+    """Return stable bot message metadata used by admin channel settings UI.
+
+    Dependencies: Secured by `require_token`; data source is module-level
+    constants maintained alongside backend API contracts.
+    Code customers: `admin/public/admin.js` bot message panel rendering.
+    Used variables/origin: `BOT_MESSAGE_LEVEL_DETAILS` and
+    `BOT_MESSAGE_CATALOG` are transformed into typed response models.
+    """
+
+    return BotMessageCatalogOut(
+        levels=[BotMessageLevelDetailOut(**level_row) for level_row in BOT_MESSAGE_LEVEL_DETAILS],
+        messages=[BotMessageCatalogEntryOut(**message_row) for message_row in BOT_MESSAGE_CATALOG],
+    )
 
 
 @app.put(

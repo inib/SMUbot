@@ -106,44 +106,7 @@ const state = {
   channelUiState: {},
 };
 const BOT_MESSAGE_LEVELS = ['mute', 'normal', 'verbose', 'debug'];
-const BOT_MESSAGE_LEVEL_DESCRIPTIONS = {
-  mute: 'Mute — suppress all bot chat messages for this channel.',
-  normal: 'Normal — core command and error responses.',
-  verbose: 'Verbose — Normal plus lifecycle/reward/queue activity updates.',
-  debug: 'Debug — Verbose plus diagnostics intended for troubleshooting.',
-};
-const BOT_MESSAGE_CATALOG_FALLBACK = [
-  { id: 'channel_not_registered', level: 'normal', category: 'commands', description: 'Command target channel is not registered.' },
-  { id: 'request_added', level: 'normal', category: 'commands', description: 'User song request accepted.' },
-  { id: 'random_request_added', level: 'normal', category: 'commands', description: 'Random playlist request accepted.' },
-  { id: 'random_not_found', level: 'normal', category: 'commands', description: 'Random playlist keyword did not match any playlist.' },
-  { id: 'playlist_request_added', level: 'normal', category: 'commands', description: 'Playlist song request accepted.' },
-  { id: 'playlist_not_found', level: 'normal', category: 'commands', description: 'Playlist command referenced a missing playlist.' },
-  { id: 'playlist_song_missing', level: 'normal', category: 'commands', description: 'Playlist command referenced an out-of-range song index.' },
-  { id: 'playlist_usage', level: 'normal', category: 'commands', description: 'Playlist command usage guidance.' },
-  { id: 'prioritize_limit', level: 'normal', category: 'commands', description: 'User reached prioritize limit.' },
-  { id: 'prioritize_no_target', level: 'normal', category: 'commands', description: 'No eligible request to prioritize.' },
-  { id: 'prioritize_success', level: 'normal', category: 'commands', description: 'Request prioritized successfully.' },
-  { id: 'points', level: 'normal', category: 'commands', description: 'Points command response.' },
-  { id: 'remove_no_pending', level: 'normal', category: 'commands', description: 'Remove command found no pending requests.' },
-  { id: 'remove_success', level: 'normal', category: 'commands', description: 'Remove command deleted latest request.' },
-  { id: 'archive_success', level: 'normal', category: 'commands', description: 'Queue archive command succeeded.' },
-  { id: 'archive_denied', level: 'normal', category: 'commands', description: 'Archive command denied due to missing permissions.' },
-  { id: 'failed', level: 'normal', category: 'errors', description: 'Command failed with a user-facing error.' },
-  { id: 'bot_joined', level: 'verbose', category: 'lifecycle', description: 'Bot joined channel chat.' },
-  { id: 'bot_left', level: 'verbose', category: 'lifecycle', description: 'Bot left channel chat.' },
-  { id: 'played_next', level: 'verbose', category: 'queue', description: 'Playback advanced and next prioritized song announced.' },
-  { id: 'played_last', level: 'verbose', category: 'queue', description: 'Playback advanced and no prioritized songs remain.' },
-  { id: 'bump_free', level: 'verbose', category: 'rewards', description: 'Automatic free bump was granted.' },
-  { id: 'award_follow', level: 'verbose', category: 'rewards', description: 'Follow reward points announcement.' },
-  { id: 'award_raid', level: 'verbose', category: 'rewards', description: 'Raid reward points announcement.' },
-  { id: 'award_gift_sub', level: 'verbose', category: 'rewards', description: 'Gifted subscription reward points announcement.' },
-  { id: 'award_bits', level: 'verbose', category: 'rewards', description: 'Bits reward points announcement.' },
-  { id: 'vip_points_awarded', level: 'verbose', category: 'rewards', description: 'VIP reward points announcement.' },
-  { id: 'queue_position_changed', level: 'verbose', category: 'queue', description: 'Queue item moved to a new position.' },
-  { id: 'token_refreshed', level: 'debug', category: 'lifecycle', description: 'Token refresh succeeded.' },
-  { id: 'action_failed_debug', level: 'debug', category: 'errors', description: 'Internal action failure diagnostic.' },
-];
+let botMessageLevelDescriptions = {};
 let botMessageCatalogCache = null;
 const channelListEl = document.getElementById('channel-list');
 const treeEl = document.getElementById('channel-tree');
@@ -592,28 +555,26 @@ function renderSettings(container, settings) {
 
 /**
  * Retrieve bot message catalog metadata for the channel settings panel.
- * Dependencies: backend optional endpoint `/bot/messages/catalog`; fallback
- * uses shared catalog entries mirrored from bot/bot_app.py.
+ * Dependencies: backend endpoint `/bot/messages/catalog` and fetchJson helper.
  * Code customers: renderBotMessagesPanel matrix/list UI.
  * Variables used/origin: `API` for endpoint base and module-level
- * `botMessageCatalogCache` memoization for repeat calls.
+ * `botMessageCatalogCache` + `botMessageLevelDescriptions` memoization.
  */
 async function loadBotMessageCatalog() {
-  if (Array.isArray(botMessageCatalogCache)) {
+  if (botMessageCatalogCache && Array.isArray(botMessageCatalogCache.messages)) {
     return botMessageCatalogCache;
   }
-  try {
-    const payload = await fetchJson('/bot/messages/catalog');
-    if (Array.isArray(payload)) {
-      botMessageCatalogCache = payload;
-    } else if (Array.isArray(payload?.items)) {
-      botMessageCatalogCache = payload.items;
-    } else {
-      botMessageCatalogCache = BOT_MESSAGE_CATALOG_FALLBACK;
+  const payload = await fetchJson('/bot/messages/catalog');
+  const levels = Array.isArray(payload?.levels) ? payload.levels : [];
+  const messages = Array.isArray(payload?.messages) ? payload.messages : [];
+  botMessageLevelDescriptions = levels.reduce((acc, levelEntry) => {
+    const key = typeof levelEntry?.level === 'string' ? levelEntry.level : '';
+    if (key && typeof levelEntry?.description === 'string') {
+      acc[key] = levelEntry.description;
     }
-  } catch (err) {
-    botMessageCatalogCache = BOT_MESSAGE_CATALOG_FALLBACK;
-  }
+    return acc;
+  }, {});
+  botMessageCatalogCache = { levels, messages };
   return botMessageCatalogCache;
 }
 
@@ -694,14 +655,14 @@ async function renderBotMessagesPanel(container, channelName, settings) {
   });
   const selectorHelp = document.createElement('div');
   selectorHelp.className = 'form-hint';
-  selectorHelp.textContent = BOT_MESSAGE_LEVEL_DESCRIPTIONS[panelState.selectedLevel] || '';
+  selectorHelp.textContent = botMessageLevelDescriptions[panelState.selectedLevel] || '';
   selector.addEventListener('change', async () => {
     const nextLevel = selector.value;
     selector.disabled = true;
     try {
       const updated = await saveChannelBotMessageLevel(channelName, nextLevel);
       panelState.selectedLevel = updated?.bot_message_level || nextLevel;
-      selectorHelp.textContent = BOT_MESSAGE_LEVEL_DESCRIPTIONS[panelState.selectedLevel] || '';
+      selectorHelp.textContent = botMessageLevelDescriptions[panelState.selectedLevel] || '';
       await renderBotMessagesPanel(container, channelName, updated);
     } catch (err) {
       console.error('failed to update bot message level', channelName, err);
@@ -716,8 +677,17 @@ async function renderBotMessagesPanel(container, channelName, settings) {
   controlWrap.appendChild(selectorHelp);
   container.appendChild(controlWrap);
 
-  const catalog = await loadBotMessageCatalog();
-  const rows = Array.isArray(catalog) ? catalog.slice() : [];
+  let catalog = null;
+  try {
+    catalog = await loadBotMessageCatalog();
+  } catch (err) {
+    const empty = document.createElement('div');
+    empty.className = 'empty';
+    empty.textContent = err instanceof Error ? err.message : 'Bot message catalog metadata unavailable.';
+    container.appendChild(empty);
+    return;
+  }
+  const rows = Array.isArray(catalog?.messages) ? catalog.messages.slice() : [];
   rows.sort((a, b) => String(a.id || '').localeCompare(String(b.id || '')));
   if (!rows.length) {
     const empty = document.createElement('div');
@@ -743,9 +713,10 @@ async function renderBotMessagesPanel(container, channelName, settings) {
 
     const meta = document.createElement('div');
     meta.className = 'bot-message-meta';
-    const category = entry.category ? `Category: ${entry.category}` : 'Category: uncategorized';
+    const category = entry.group ? `Category: ${entry.group}` : 'Category: uncategorized';
     const included = messageIncludedInLevel(level, panelState.selectedLevel);
-    meta.textContent = `${category} • ${included ? 'Included' : 'Excluded'} at current level`;
+    const customizableText = entry.customizable === false ? 'Fixed template' : 'Customizable template';
+    meta.textContent = `${category} • ${included ? 'Included' : 'Excluded'} at current level • ${customizableText}`;
     card.appendChild(meta);
 
     if (entry.description) {
@@ -753,6 +724,12 @@ async function renderBotMessagesPanel(container, channelName, settings) {
       desc.className = 'bot-message-desc';
       desc.textContent = entry.description;
       card.appendChild(desc);
+    }
+    if (entry.template_key && entry.template_key !== entry.id) {
+      const template = document.createElement('div');
+      template.className = 'bot-message-desc';
+      template.textContent = `Template key: ${entry.template_key}`;
+      card.appendChild(template);
     }
     grid.appendChild(card);
   });
