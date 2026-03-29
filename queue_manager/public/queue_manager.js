@@ -3100,19 +3100,28 @@ function buildSettingRow(key, value, meta) {
  * Build a reusable bot-control dropdown element from the unified option model.
  * Dependencies: uses BOT_CONTROL_OPTION_MODEL and getBotControlOptions() filtering to render menu choices.
  * Code customers: header action slot and settings row for `bot_message_level`.
- * Used variables/origin: reads channel join state from `channelInfo` and current setting value from `currentValue`.
+ * Used variables/origin: reads channel join state from `channelInfo`, current setting value from `currentValue`, and optional placeholder text from `placeholderLabel`.
  */
 function createBotControlDropdown({
   channelInfo,
   currentValue,
   includeConnectionActions = true,
   includeMessageLevels = true,
+  placeholderLabel = '',
   onSelection,
   disabled = false,
 }) {
   const select = document.createElement('select');
   select.className = 'bot-control-select';
   const options = getBotControlOptions(channelInfo, { includeConnectionActions, includeMessageLevels });
+  const hasPlaceholder = typeof placeholderLabel === 'string' && placeholderLabel.trim().length > 0;
+  if (hasPlaceholder) {
+    const placeholderOption = document.createElement('option');
+    placeholderOption.value = '';
+    placeholderOption.textContent = placeholderLabel;
+    placeholderOption.disabled = true;
+    select.appendChild(placeholderOption);
+  }
   options.forEach(option => {
     const opt = document.createElement('option');
     opt.value = option.value;
@@ -3122,9 +3131,10 @@ function createBotControlDropdown({
 
   const selectedValue = options.some(option => option.value === currentValue)
     ? currentValue
-    : (options[0]?.value || '');
-  if (selectedValue) {
-    select.value = selectedValue;
+    : '';
+  select.value = selectedValue;
+  if (!selectedValue && !hasPlaceholder && options[0]?.value) {
+    select.value = options[0].value;
   }
   select.disabled = disabled || !options.length;
   if (typeof onSelection === 'function' && !select.disabled) {
@@ -3988,8 +3998,12 @@ async function updateRegButton() {
       currentValue,
       includeConnectionActions: true,
       includeMessageLevels: true,
+      placeholderLabel: 'Select action…',
       onSelection: async (_event, element) => {
         const previous = currentValue;
+        if (!element.value) {
+          return;
+        }
         element.disabled = true;
         const ok = await applyBotControlSelection(element.value);
         if (!ok) {
