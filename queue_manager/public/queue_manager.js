@@ -824,13 +824,13 @@ const SETTINGS_CONFIG = {
   bot_message_level: {
     type: 'bot-message-level',
     label: 'Bot message level',
-    description: 'Choose chat output verbosity. Uses the same dropdown behavior as the header bot control.',
+    description: 'Choose chat output verbosity for bot responses in this channel.',
     group: 'bot',
   },
   [BOT_CONNECTION_SETTING_KEY]: {
     type: 'bot-connection',
     label: 'Bot connection',
-    description: 'Connect or disconnect the chat bot for this channel using the same join/part flow as the header control.',
+    description: 'Connect or disconnect the chat bot for this channel.',
     group: 'bot',
     virtual: true,
   },
@@ -846,65 +846,49 @@ const SETTINGS_CONFIG = {
 
 const QUICK_CONTROL_KEYS = ['queue_closed', 'prio_only', 'allow_bumps', 'full_auto_priority_mode'];
 
-const BOT_CONTROL_OPTION_MODEL = [
-  { value: 'connect', label: 'Connect bot to chat', action: 'channel-status', joinActive: 1, requiresConnection: false },
-  { value: 'disconnect', label: 'Disconnect bot from chat', action: 'channel-status', joinActive: 0, requiresConnection: true },
-  { value: 'mute', label: 'Messages: Mute', action: 'message-level', messageLevel: 'mute', requiresConnection: true },
-  { value: 'normal', label: 'Messages: Normal', action: 'message-level', messageLevel: 'normal', requiresConnection: true },
-  { value: 'verbose', label: 'Messages: Verbose', action: 'message-level', messageLevel: 'verbose', requiresConnection: true },
-  { value: 'debug', label: 'Messages: Debug', action: 'message-level', messageLevel: 'debug', requiresConnection: true },
+const BOT_CONNECTION_OPTIONS = [
+  { value: 'connect', label: 'Connect bot to chat', joinActive: 1 },
+  { value: 'disconnect', label: 'Disconnect bot from chat', joinActive: 0 },
+];
+
+const BOT_MESSAGE_LEVEL_OPTIONS = [
+  { value: 'mute', label: 'Mute' },
+  { value: 'normal', label: 'Normal' },
+  { value: 'verbose', label: 'Verbose' },
+  { value: 'debug', label: 'Debug' },
 ];
 
 /**
- * Resolve dropdown options from the shared bot-control model based on connection state.
- * Dependencies: reads BOT_CONTROL_OPTION_MODEL and optional channel info from `/channels` cache.
- * Code customers: header bot dropdown and settings `bot_message_level` renderer.
- * Used variables/origin: consumes `channelInfo.join_active` and rendering flags to include status actions and/or message levels.
+ * Resolve available connection options for the settings connect/disconnect control.
+ * Dependencies: reads BOT_CONNECTION_OPTIONS and the active channel join state.
+ * Code customers: settings `bot-connection` control renderer.
+ * Used variables/origin: filters the connection model so users only see the next valid connect/disconnect action.
  */
-function getBotControlOptions(channelInfo, { includeConnectionActions = true, includeMessageLevels = true } = {}) {
+function getBotConnectionOptions(channelInfo) {
   const connected = !!channelInfo?.join_active;
-  if (includeConnectionActions && includeMessageLevels) {
-    if (!connected) {
-      return BOT_CONTROL_OPTION_MODEL.filter(option => option.value === 'connect');
-    }
-    return BOT_CONTROL_OPTION_MODEL.filter(option => option.value !== 'connect');
-  }
-  return BOT_CONTROL_OPTION_MODEL.filter(option => (
-    (includeConnectionActions && option.action === 'channel-status')
-    || (includeMessageLevels && option.action === 'message-level')
-  ));
+  return BOT_CONNECTION_OPTIONS.filter(option => (connected ? option.value === 'disconnect' : option.value === 'connect'));
 }
 
 /**
- * Persist a bot-control dropdown selection to the API by routing to the matching endpoint.
- * Dependencies: requires `channelName`, API origin, and the shared BOT_CONTROL_OPTION_MODEL metadata.
- * Code customers: header dropdown and settings-level selector save handlers.
- * Used variables/origin: maps `connect`/`disconnect` to `PUT /channels/{channel}?join_active=...` and levels to `PUT /channels/{channel}/settings`.
+ * Persist bot message verbosity for the active channel.
+ * Dependencies: requires `channelName`, API origin, and BOT_MESSAGE_LEVEL_OPTIONS for validation.
+ * Code customers: header bot verbosity control and settings `bot_message_level` row.
+ * Used variables/origin: writes `{ bot_message_level }` to `PUT /channels/{channel}/settings`.
  */
-async function applyBotControlSelection(selectionValue, { refreshSettingsView = true } = {}) {
+async function applyBotMessageLevelSelection(selectionValue, { refreshSettingsView = true } = {}) {
   if (!channelName) { return false; }
-  const option = BOT_CONTROL_OPTION_MODEL.find(entry => entry.value === selectionValue);
-  if (!option) { return false; }
+  const allowedLevels = new Set(BOT_MESSAGE_LEVEL_OPTIONS.map(option => option.value));
+  if (!allowedLevels.has(selectionValue)) { return false; }
   const encodedChannel = encodeURIComponent(channelName);
   try {
-    if (option.action === 'channel-status') {
-      const resp = await fetch(`${API}/channels/${encodedChannel}?join_active=${option.joinActive}`, {
-        method: 'PUT',
-        credentials: 'include'
-      });
-      if (!resp.ok) {
-        throw new Error(`channel status update failed (${resp.status})`);
-      }
-    } else {
-      const resp = await fetch(`${API}/channels/${encodedChannel}/settings`, {
-        method: 'PUT',
-        body: JSON.stringify({ bot_message_level: option.messageLevel }),
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include'
-      });
-      if (!resp.ok) {
-        throw new Error(`bot message level update failed (${resp.status})`);
-      }
+    const resp = await fetch(`${API}/channels/${encodedChannel}/settings`, {
+      method: 'PUT',
+      body: JSON.stringify({ bot_message_level: selectionValue }),
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include'
+    });
+    if (!resp.ok) {
+      throw new Error(`bot message level update failed (${resp.status})`);
     }
     await updateRegButton();
     if (refreshSettingsView) {
@@ -912,8 +896,39 @@ async function applyBotControlSelection(selectionValue, { refreshSettingsView = 
     }
     return true;
   } catch (err) {
-    console.error('Failed to apply bot control selection', selectionValue, err);
-    alert('Unable to apply this bot control option. Please try again.');
+    console.error('Failed to apply bot message level selection', selectionValue, err);
+    alert('Unable to update bot verbosity. Please try again.');
+    return false;
+  }
+}
+
+/**
+ * Persist bot connect/disconnect state for the active channel.
+ * Dependencies: requires `channelName`, API origin, and BOT_CONNECTION_OPTIONS for join-state mapping.
+ * Code customers: settings `bot-connection` row.
+ * Used variables/origin: maps `connect`/`disconnect` to `PUT /channels/{channel}?join_active=...`.
+ */
+async function applyBotConnectionSelection(selectionValue, { refreshSettingsView = true } = {}) {
+  if (!channelName) { return false; }
+  const option = BOT_CONNECTION_OPTIONS.find(entry => entry.value === selectionValue);
+  if (!option) { return false; }
+  const encodedChannel = encodeURIComponent(channelName);
+  try {
+    const resp = await fetch(`${API}/channels/${encodedChannel}?join_active=${option.joinActive}`, {
+      method: 'PUT',
+      credentials: 'include'
+    });
+    if (!resp.ok) {
+      throw new Error(`channel status update failed (${resp.status})`);
+    }
+    await updateRegButton();
+    if (refreshSettingsView) {
+      await fetchSettings();
+    }
+    return true;
+  } catch (err) {
+    console.error('Failed to apply bot connection selection', selectionValue, err);
+    alert('Unable to update bot connection state. Please try again.');
     return false;
   }
 }
@@ -3115,31 +3130,20 @@ function buildSettingRow(key, value, meta) {
 }
 
 /**
- * Build a reusable bot-control dropdown element from the unified option model.
- * Dependencies: uses BOT_CONTROL_OPTION_MODEL and getBotControlOptions() filtering to render menu choices.
- * Code customers: header action slot and settings row for `bot_message_level`.
- * Used variables/origin: reads channel join state from `channelInfo`, current setting value from `currentValue`, and optional placeholder text from `placeholderLabel`.
+ * Build a select element from explicit option items for bot settings controls.
+ * Dependencies: receives a pre-filtered `options` array from caller-specific helpers.
+ * Code customers: settings bot connection and bot message-level controls.
+ * Used variables/origin: uses caller-provided options/current value and optional disabled title text.
  */
-function createBotControlDropdown({
-  channelInfo,
+function createBotOptionsDropdown({
+  options,
   currentValue,
-  includeConnectionActions = true,
-  includeMessageLevels = true,
-  placeholderLabel = '',
   onSelection,
   disabled = false,
+  disabledTitle = '',
 }) {
   const select = document.createElement('select');
   select.className = 'bot-control-select';
-  const options = getBotControlOptions(channelInfo, { includeConnectionActions, includeMessageLevels });
-  const hasPlaceholder = typeof placeholderLabel === 'string' && placeholderLabel.trim().length > 0;
-  if (hasPlaceholder) {
-    const placeholderOption = document.createElement('option');
-    placeholderOption.value = '';
-    placeholderOption.textContent = placeholderLabel;
-    placeholderOption.disabled = true;
-    select.appendChild(placeholderOption);
-  }
   options.forEach(option => {
     const opt = document.createElement('option');
     opt.value = option.value;
@@ -3147,14 +3151,16 @@ function createBotControlDropdown({
     select.appendChild(opt);
   });
 
-  const selectedValue = options.some(option => option.value === currentValue)
-    ? currentValue
-    : '';
-  select.value = selectedValue;
-  if (!selectedValue && !hasPlaceholder && options[0]?.value) {
+  if (options.some(option => option.value === currentValue)) {
+    select.value = currentValue;
+  } else if (options[0]?.value) {
     select.value = options[0].value;
   }
+
   select.disabled = disabled || !options.length;
+  if (select.disabled && disabledTitle) {
+    select.title = disabledTitle;
+  }
   if (typeof onSelection === 'function' && !select.disabled) {
     select.addEventListener('change', event => onSelection(event, select));
   }
@@ -3162,8 +3168,8 @@ function createBotControlDropdown({
 }
 
 /**
- * Build a settings-row bot control backed by the shared dropdown model.
- * Dependencies: uses createBotControlDropdown() and applyBotControlSelection() to keep API behavior aligned with the header control.
+ * Build a settings-row bot control for either connection state or message level.
+ * Dependencies: uses createBotOptionsDropdown(), applyBotConnectionSelection(), and applyBotMessageLevelSelection().
  * Code customers: createSettingControl() for `bot-connection` and `bot-message-level` row types.
  * Used variables/origin: derives join/message state from `getChannelInfo(channelName)` and uses setting/default values from row payload.
  */
@@ -3172,17 +3178,18 @@ function createBotSettingControl({ controlType, value, meta }) {
   wrapper.className = 'setting-select';
   const channelInfo = getChannelInfo(channelName);
   const isConnectionControl = controlType === 'bot-connection';
+  const options = isConnectionControl
+    ? getBotConnectionOptions(channelInfo)
+    : BOT_MESSAGE_LEVEL_OPTIONS;
   let currentSelection = isConnectionControl
-    ? (channelInfo?.join_active ? 'disconnect' : 'connect')
+    ? (options[0]?.value || 'connect')
     : (typeof value === 'string' ? value : 'normal');
 
-  const select = createBotControlDropdown({
-    channelInfo,
+  const select = createBotOptionsDropdown({
+    options,
     currentValue: currentSelection,
-    includeConnectionActions: isConnectionControl,
-    includeMessageLevels: !isConnectionControl,
-    placeholderLabel: '',
     disabled: !!meta.disabled,
+    disabledTitle: meta.disabledReason || '',
     onSelection: async (_event, element) => {
       const next = element.value;
       if (next === currentSelection) {
@@ -3190,11 +3197,11 @@ function createBotSettingControl({ controlType, value, meta }) {
       }
       wrapper.classList.add('loading');
       element.disabled = true;
-      const ok = await applyBotControlSelection(next, { refreshSettingsView: false });
+      const ok = isConnectionControl
+        ? await applyBotConnectionSelection(next, { refreshSettingsView: false })
+        : await applyBotMessageLevelSelection(next, { refreshSettingsView: false });
       if (ok) {
-        currentSelection = isConnectionControl
-          ? (next === 'connect' ? 'disconnect' : 'connect')
-          : next;
+        currentSelection = next;
         element.value = currentSelection;
         await fetchSettings();
       } else {
@@ -4027,30 +4034,31 @@ async function updateRegButton() {
     if (!controlHost) { return; }
     controlHost.innerHTML = '';
     if (!channelName || !channelInfo || !channelInfo.authorized) { return; }
-    let currentValue = channelInfo.join_active
-      ? (channelInfo.bot_message_level || 'normal')
-      : 'connect';
-    const select = createBotControlDropdown({
-      channelInfo,
+    let currentValue = channelInfo.bot_message_level || 'normal';
+    const disabledTitle = 'Connect bot in Settings to change verbosity.';
+    const select = createBotOptionsDropdown({
+      options: BOT_MESSAGE_LEVEL_OPTIONS,
       currentValue,
-      includeConnectionActions: true,
-      includeMessageLevels: true,
-      placeholderLabel: 'Select action…',
+      disabled: !channelInfo.join_active,
+      disabledTitle: !channelInfo.join_active ? disabledTitle : '',
       onSelection: async (_event, element) => {
         const previous = currentValue;
-        if (!element.value) {
-          return;
-        }
         element.disabled = true;
-        const ok = await applyBotControlSelection(element.value);
+        const ok = await applyBotMessageLevelSelection(element.value);
         if (!ok) {
           element.value = previous;
         } else {
           currentValue = element.value;
         }
-        element.disabled = false;
+        element.disabled = !channelInfo.join_active;
       },
     });
+    if (!channelInfo.join_active) {
+      select.title = disabledTitle;
+      controlHost.title = disabledTitle;
+    } else {
+      controlHost.title = '';
+    }
     controlHost.appendChild(select);
   };
   if (!userLogin || !btn) {

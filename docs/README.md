@@ -183,21 +183,17 @@ them via `/me/channels`.
   listing, and badges update automatically as pages load or refresh.
 
 ## Queue Manager unified bot control dropdown
-- The Queue Manager header now shows a single bot-control dropdown beside the
+- The Queue Manager header shows a **verbosity-only** dropdown beside the
   channel and bot badges whenever the selected channel is authorized.
-- Dropdown options are state-aware:
-  - **Disconnected (`join_active = 0`)**: a disabled `Select action…`
-    placeholder plus `connect` are shown so reconnect is always a user-triggered
-    selection change.
-  - **Connected (`join_active = 1`)**: `disconnect` plus message levels
-    `mute`, `normal`, `verbose`, and `debug` are shown.
-- Reconnect behavior is explicit: after a disconnect, the control resets to the
-  placeholder and the next `connect` pick immediately calls the channel-status
-  endpoint (instead of leaving `connect` preselected and non-invokable).
-- API mapping is explicit:
-  - `connect`/`disconnect` -> `PUT /channels/{channel}?join_active=1|0`
-  - `mute|normal|verbose|debug` -> `PUT /channels/{channel}/settings` with
-    `{ "bot_message_level": "<level>" }`
+- Header options are limited to message levels:
+  `mute`, `normal`, `verbose`, and `debug`.
+- The header verbosity dropdown is disabled while the bot is disconnected
+  (`join_active = 0`) and shows guidance to connect the bot in **Settings**
+  before changing verbosity.
+- Header level changes only call:
+  `PUT /channels/{channel}/settings` with
+  `{ "bot_message_level": "<level>" }`.
+- Connect/disconnect actions were moved to the **Settings** tab.
 - The Settings tab reuses the same dropdown renderer for
   bot controls so behavior stays aligned with the header control while each
   surface remains independently usable.
