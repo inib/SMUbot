@@ -425,6 +425,27 @@ async function fetchJson(path) {
   return res.json();
 }
 
+/**
+ * Fetch JSON from an admin-protected endpoint with both token and cookie auth.
+ * Dependencies: adminHeaders helper and browser Fetch API credentials support.
+ * Code customers: admin-only panel calls that should accept either explicit
+ * `X-Admin-Token` or existing admin session cookie fallback.
+ * Variables used/origin: `API` URL prefix and `state.adminToken` via
+ * `adminHeaders(...)`.
+ */
+async function fetchAdminJson(path) {
+  const response = await fetch(`${API}${path}`, {
+    headers: adminHeaders(),
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const error = new Error(`request failed: ${response.status}`);
+    error.status = response.status;
+    throw error;
+  }
+  return response.json();
+}
+
 async function fetchChannelOAuth(name) {
   try {
     return await fetchJson(`/channels/${encodeURIComponent(name)}/oauth`);
@@ -555,7 +576,7 @@ function renderSettings(container, settings) {
 
 /**
  * Retrieve bot message catalog metadata for the channel settings panel.
- * Dependencies: backend endpoint `/bot/messages/catalog` and fetchJson helper.
+ * Dependencies: backend endpoint `/bot/messages/catalog` and fetchAdminJson helper.
  * Code customers: renderBotMessagesPanel matrix/list UI.
  * Variables used/origin: `API` for endpoint base and module-level
  * `botMessageCatalogCache` + `botMessageLevelDescriptions` memoization.
@@ -564,7 +585,7 @@ async function loadBotMessageCatalog() {
   if (botMessageCatalogCache && Array.isArray(botMessageCatalogCache.messages)) {
     return botMessageCatalogCache;
   }
-  const payload = await fetchJson('/bot/messages/catalog');
+  const payload = await fetchAdminJson('/bot/messages/catalog');
   const levels = Array.isArray(payload?.levels) ? payload.levels : [];
   const messages = Array.isArray(payload?.messages) ? payload.messages : [];
   botMessageLevelDescriptions = levels.reduce((acc, levelEntry) => {
@@ -683,7 +704,14 @@ async function renderBotMessagesPanel(container, channelName, settings) {
   } catch (err) {
     const empty = document.createElement('div');
     empty.className = 'empty';
-    empty.textContent = err instanceof Error ? err.message : 'Bot message catalog metadata unavailable.';
+    if (err && typeof err.status === 'number' && err.status === 401) {
+      const hasAdminToken = Boolean(state.adminToken && state.adminToken.trim());
+      empty.textContent = hasAdminToken
+        ? 'Bot message catalog unavailable: admin authentication failed. Verify the X-Admin-Token value or sign in again to refresh your admin session cookie.'
+        : 'Bot message catalog unavailable: no admin authentication found. Enter an admin token or sign in to establish an admin session cookie.';
+    } else {
+      empty.textContent = err instanceof Error ? err.message : 'Bot message catalog metadata unavailable.';
+    }
     container.appendChild(empty);
     return;
   }
