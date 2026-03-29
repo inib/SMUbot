@@ -121,6 +121,12 @@ unlocks the API for the bot, queue manager, and public web frontend.
 
 ## Web Interface
 The web container hosts files in `web/public/`, including a simple `index.html`, `app.js`, and `style.css` for viewing the queue.
+- Public playlist cards now render with per-playlist **Show songs / Hide songs**
+  controls so song rows are collapsible.
+- Playlist song rows default to collapsed, and each card remembers its expanded
+  state during in-page rerenders using an in-memory map keyed by playlist slug.
+- Toggle buttons are wired for accessibility with `aria-expanded` plus
+  `aria-controls` targeting each `.public-playlist__items` container.
 
 ## Authentication & Channel Access
 Songbot relies on two distinct OAuth flows that map to the two management panels:

@@ -565,6 +565,28 @@ body[data-mode="queue"] .playlists-card {
   color: var(--text);
 }
 
+.public-playlist__toggle {
+  padding: 0.35rem 0.7rem;
+  border-radius: 8px;
+  border: 1px solid #2b3244;
+  background: rgba(148, 163, 184, 0.14);
+  color: var(--text);
+  font-weight: 600;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.2s ease, border-color 0.2s ease;
+}
+
+.public-playlist__toggle:hover {
+  background: rgba(148, 163, 184, 0.24);
+}
+
+.public-playlist__toggle[aria-expanded="true"] {
+  border-color: rgba(139, 92, 246, 0.5);
+  background: rgba(139, 92, 246, 0.18);
+  color: var(--accent);
+}
+
 .public-playlist__items {
   display: flex;
   flex-direction: column;
