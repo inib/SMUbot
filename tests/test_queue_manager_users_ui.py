@@ -35,6 +35,23 @@ class QueueManagerUsersUiTests(unittest.TestCase):
         self.assertIn('.user-role-badge', css)
         self.assertIn('.users-legend', css)
 
+    def test_resolve_user_badge_has_no_duplicate_badge_declaration(self) -> None:
+        """resolveUserBadge should not re-declare `badge` (regression for duplicate const parsing failures)."""
+
+        script = Path("queue_manager/public/queue_manager.js").read_text(encoding="utf-8")
+        function_start = script.find("function resolveUserBadge(user) {")
+        self.assertNotEqual(function_start, -1, "resolveUserBadge definition should exist")
+
+        function_end = script.find("\n}\n\n/**", function_start)
+        self.assertNotEqual(function_end, -1, "resolveUserBadge closing block should be discoverable")
+
+        function_block = script[function_start:function_end]
+        self.assertLessEqual(
+            function_block.count("const badge ="),
+            1,
+            "resolveUserBadge should not contain duplicate `const badge` declarations",
+        )
+
     def test_header_bot_dropdown_hook_exists(self) -> None:
         """Queue Manager header should expose the shared bot-control dropdown mount."""
 
