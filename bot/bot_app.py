@@ -1,6 +1,7 @@
 from __future__ import annotations
 import os, re, asyncio, json, yaml, logging
 from typing import Optional, Dict, List, Tuple, Callable, Awaitable, Set
+from enum import IntEnum
 from dataclasses import dataclass
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -311,6 +312,23 @@ class BotSettings:
     scopes: List[str]
     enabled: bool
     error: Optional[str] = None
+
+
+class BotMessageLevel(IntEnum):
+    """Enumerates chat visibility tiers used by channel-level message filtering.
+
+    Dependencies: the enum values are persisted in backend channel settings via
+    `bot_message_level` (string form) and evaluated by `SongBot._send_bot_message`.
+    Code customers: command handlers, queue event announcers, and channel
+    join/part notifications that annotate each outgoing message category.
+    Used variables/origin: members are fixed constants where smaller values are
+    less visible (`MUTE`) and higher values are more verbose (`DEBUG`).
+    """
+
+    MUTE = 0
+    NORMAL = 1
+    VERBOSE = 2
+    DEBUG = 3
 
 
 def _format_token(token: str) -> str:
@@ -781,7 +799,12 @@ class SongBot(commands.Bot):
             return
         info = self._channel_info(login)
         channel_label = info.get('channel_name') if info else login
-        await self._send_message(login, message, metadata={'channel': channel_label, 'event': 'bot_join'})
+        await self._send_bot_message(
+            login,
+            message,
+            level=BotMessageLevel.VERBOSE,
+            metadata={'channel': channel_label, 'event': 'bot_join'},
+        )
 
     async def _announce_left(self, login: str) -> None:
         message = self.messages.get('bot_left')
@@ -789,7 +812,114 @@ class SongBot(commands.Bot):
             return
         info = self._channel_info(login)
         channel_label = info.get('channel_name') if info else login
-        await self._send_message(login, message, metadata={'channel': channel_label, 'event': 'bot_part'})
+        await self._send_bot_message(
+            login,
+            message,
+            level=BotMessageLevel.VERBOSE,
+            metadata={'channel': channel_label, 'event': 'bot_part'},
+        )
+
+    def _coerce_message_level(self, raw_level: object) -> BotMessageLevel:
+        """Normalize backend/channel message-level inputs to enum values.
+
+        Dependencies: backend channel payloads may provide `bot_message_level`
+        as strings, integers, or missing values. Code customers: message policy
+        resolver and unit tests asserting level normalization. Used
+        variables/origin: `raw_level` comes from `channel_map` rows or callers.
+        """
+
+        if isinstance(raw_level, BotMessageLevel):
+            return raw_level
+        if isinstance(raw_level, str):
+            value = raw_level.strip().lower()
+            by_name = {
+                'mute': BotMessageLevel.MUTE,
+                'normal': BotMessageLevel.NORMAL,
+                'verbose': BotMessageLevel.VERBOSE,
+                'debug': BotMessageLevel.DEBUG,
+            }
+            if value in by_name:
+                return by_name[value]
+            if value.isdigit():
+                raw_level = int(value)
+        if isinstance(raw_level, (int, float)):
+            by_value = {
+                0: BotMessageLevel.MUTE,
+                1: BotMessageLevel.NORMAL,
+                2: BotMessageLevel.VERBOSE,
+                3: BotMessageLevel.DEBUG,
+            }
+            return by_value.get(int(raw_level), BotMessageLevel.NORMAL)
+        return BotMessageLevel.NORMAL
+
+    def _resolve_channel_message_threshold(self, channel_login: str) -> BotMessageLevel:
+        """Resolve per-channel chat threshold from cached channel settings.
+
+        Dependencies: reads `self.channel_map` entries synchronized from backend
+        `/channels` responses. Code customers: `_send_bot_message` visibility
+        gate for all outbound chat. Used variables/origin: `channel_login`
+        derives from Twitch channel logins and maps to lowercase dict keys.
+        """
+
+        channel_info = (getattr(self, 'channel_map', {}) or {}).get(self._channel_login(channel_login), {})
+        raw_level = None
+        if isinstance(channel_info, dict):
+            raw_level = channel_info.get('bot_message_level')
+            settings = channel_info.get('settings')
+            if raw_level is None and isinstance(settings, dict):
+                raw_level = settings.get('bot_message_level')
+        return self._coerce_message_level(raw_level)
+
+    async def _send_bot_message(
+        self,
+        channel_login: str,
+        message_or_key: str,
+        *,
+        level: BotMessageLevel = BotMessageLevel.NORMAL,
+        metadata: Optional[Dict[str, object]] = None,
+        reply_to: Optional[str] = None,
+        fallback_partial: Optional[object] = None,
+        message_key: bool = False,
+    ) -> None:
+        """Send a chat message only when it passes channel visibility policy.
+
+        Dependencies: uses `self.channel_map` message threshold settings and
+        delegates delivery to `_send_message`; always emits backend console logs
+        through `push_console_event` for observability. Code customers: all bot
+        command and event handlers. Used variables/origin: message content comes
+        from `message_or_key` (literal text or `self.messages` key), while
+        `level` is declared at each call site.
+        """
+
+        resolved_level = self._coerce_message_level(level)
+        threshold = self._resolve_channel_message_threshold(channel_login)
+        allow_chat = threshold != BotMessageLevel.MUTE and resolved_level >= threshold
+        message_text = self.messages.get(message_or_key, '') if message_key else message_or_key
+        if not message_text:
+            return
+        policy_meta = {
+            **(metadata or {}),
+            'channel_login': channel_login,
+            'message_level': int(resolved_level),
+            'message_level_name': resolved_level.name.lower(),
+            'channel_threshold': int(threshold),
+            'channel_threshold_name': threshold.name.lower(),
+        }
+        if not allow_chat:
+            await push_console_event(
+                'info',
+                f'Suppressed chat message for {channel_login}',
+                event='message_suppressed',
+                metadata={**policy_meta, 'suppressed_text': message_text},
+            )
+            return
+        await self._send_message(
+            channel_login,
+            message_text,
+            metadata=policy_meta,
+            reply_to=reply_to,
+            fallback_partial=fallback_partial,
+        )
 
     async def _send_message(
         self,
@@ -879,9 +1009,10 @@ class SongBot(commands.Bot):
         login = self._channel_login(msg.broadcaster.name)
         row = self.channel_map.get(login)
         if not row:
-            await self._send_message(
+            await self._send_bot_message(
                 login,
                 self.messages['channel_not_registered'],
+                level=BotMessageLevel.NORMAL,
                 metadata={'channel': msg.broadcaster.name, 'command': 'request'},
                 reply_to=msg.id,
                 fallback_partial=msg.broadcaster,
@@ -921,12 +1052,13 @@ class SongBot(commands.Bot):
                 is_subscriber=bool(msg.chatter.subscriber),
                 is_mod=bool(msg.chatter.moderator or msg.chatter.broadcaster),
             )
-            await self._send_message(
+            await self._send_bot_message(
                 login,
                 self.messages['request_added'].format(
                     artist=song.get('artist', ''),
                     title=song.get('title', ''),
                 ),
+                level=BotMessageLevel.NORMAL,
                 metadata={'channel': channel, 'command': 'request'},
                 reply_to=msg.id,
                 fallback_partial=msg.broadcaster,
@@ -937,9 +1069,10 @@ class SongBot(commands.Bot):
                 f'Failed to add request for {msg.chatter.name}: {exc}',
                 metadata={'channel': channel, 'command': 'request'},
             )
-            await self._send_message(
+            await self._send_bot_message(
                 login,
                 self.messages['failed'].format(error=exc),
+                level=BotMessageLevel.NORMAL,
                 metadata={'channel': channel, 'command': 'request'},
                 reply_to=msg.id,
                 fallback_partial=msg.broadcaster,
@@ -949,9 +1082,10 @@ class SongBot(commands.Bot):
         login = self._channel_login(msg.broadcaster.name)
         row = self.channel_map.get(login)
         if not row:
-            await self._send_message(
+            await self._send_bot_message(
                 login,
                 self.messages['channel_not_registered'],
+                level=BotMessageLevel.NORMAL,
                 metadata={'channel': msg.broadcaster.name, 'command': 'random_request'},
                 reply_to=msg.id,
                 fallback_partial=msg.broadcaster,
@@ -971,9 +1105,10 @@ class SongBot(commands.Bot):
         except BackendError as exc:
             if exc.status == 404:
                 template = self.messages.get('random_not_found', 'No playlist found for "{keyword}"')
-                await self._send_message(
+                await self._send_bot_message(
                     login,
                     template.format(keyword=keyword or 'default'),
+                    level=BotMessageLevel.NORMAL,
                     metadata={'channel': channel, 'command': 'random_request'},
                     reply_to=msg.id,
                     fallback_partial=msg.broadcaster,
@@ -984,9 +1119,10 @@ class SongBot(commands.Bot):
                 f'Failed random request for {msg.chatter.name}: {exc.detail}',
                 metadata={'channel': channel, 'command': 'random_request', 'status': exc.status, 'keyword': keyword},
             )
-            await self._send_message(
+            await self._send_bot_message(
                 login,
                 self.messages['failed'].format(error=exc.detail),
+                level=BotMessageLevel.NORMAL,
                 metadata={'channel': channel, 'command': 'random_request'},
                 reply_to=msg.id,
                 fallback_partial=msg.broadcaster,
@@ -998,9 +1134,10 @@ class SongBot(commands.Bot):
                 f'Failed random request for {msg.chatter.name}: {exc}',
                 metadata={'channel': channel, 'command': 'random_request'},
             )
-            await self._send_message(
+            await self._send_bot_message(
                 login,
                 self.messages['failed'].format(error=exc),
+                level=BotMessageLevel.NORMAL,
                 metadata={'channel': channel, 'command': 'random_request'},
                 reply_to=msg.id,
                 fallback_partial=msg.broadcaster,
@@ -1023,9 +1160,10 @@ class SongBot(commands.Bot):
                 )
             except KeyError:
                 message_text = template
-            await self._send_message(
+            await self._send_bot_message(
                 login,
                 message_text,
+                level=BotMessageLevel.NORMAL,
                 metadata={'channel': channel, 'command': 'random_request', 'keyword': resolved_keyword or keyword},
                 reply_to=msg.id,
                 fallback_partial=msg.broadcaster,
@@ -1035,9 +1173,10 @@ class SongBot(commands.Bot):
         login = self._channel_login(msg.broadcaster.name)
         row = self.channel_map.get(login)
         if not row:
-            await self._send_message(
+            await self._send_bot_message(
                 login,
                 self.messages['channel_not_registered'],
+                level=BotMessageLevel.NORMAL,
                 metadata={'channel': msg.broadcaster.name, 'command': 'playlist_request'},
                 reply_to=msg.id,
                 fallback_partial=msg.broadcaster,
@@ -1046,9 +1185,10 @@ class SongBot(commands.Bot):
         channel = row['channel_name']
         arg = (arg or '').strip()
         if not arg:
-            await self._send_message(
+            await self._send_bot_message(
                 login,
                 self.messages.get('playlist_usage', 'Usage: !playlist <name> <index>'),
+                level=BotMessageLevel.NORMAL,
                 metadata={'channel': channel, 'command': 'playlist_request'},
                 reply_to=msg.id,
                 fallback_partial=msg.broadcaster,
@@ -1056,9 +1196,10 @@ class SongBot(commands.Bot):
             return
         name_part, sep, index_part = arg.rpartition(' ')
         if not sep or not name_part.strip() or not index_part.strip():
-            await self._send_message(
+            await self._send_bot_message(
                 login,
                 self.messages.get('playlist_usage', 'Usage: !playlist <name> <index>'),
+                level=BotMessageLevel.NORMAL,
                 metadata={'channel': channel, 'command': 'playlist_request'},
                 reply_to=msg.id,
                 fallback_partial=msg.broadcaster,
@@ -1068,18 +1209,20 @@ class SongBot(commands.Bot):
         try:
             index = int(index_part)
         except ValueError:
-            await self._send_message(
+            await self._send_bot_message(
                 login,
                 self.messages.get('playlist_usage', 'Usage: !playlist <name> <index>'),
+                level=BotMessageLevel.NORMAL,
                 metadata={'channel': channel, 'command': 'playlist_request'},
                 reply_to=msg.id,
                 fallback_partial=msg.broadcaster,
             )
             return
         if index < 1:
-            await self._send_message(
+            await self._send_bot_message(
                 login,
                 self.messages.get('playlist_usage', 'Usage: !playlist <name> <index>'),
+                level=BotMessageLevel.NORMAL,
                 metadata={'channel': channel, 'command': 'playlist_request'},
                 reply_to=msg.id,
                 fallback_partial=msg.broadcaster,
@@ -1093,9 +1236,10 @@ class SongBot(commands.Bot):
                 f'Failed to list playlists for {channel}: {exc}',
                 metadata={'channel': channel, 'command': 'playlist_request'},
             )
-            await self._send_message(
+            await self._send_bot_message(
                 login,
                 self.messages['failed'].format(error=exc),
+                level=BotMessageLevel.NORMAL,
                 metadata={'channel': channel, 'command': 'playlist_request'},
                 reply_to=msg.id,
                 fallback_partial=msg.broadcaster,
@@ -1124,9 +1268,10 @@ class SongBot(commands.Bot):
                 break
         if not match:
             template = self.messages.get('playlist_not_found', 'Playlist "{playlist}" not found')
-            await self._send_message(
+            await self._send_bot_message(
                 login,
                 template.format(playlist=playlist_name),
+                level=BotMessageLevel.NORMAL,
                 metadata={'channel': channel, 'command': 'playlist_request'},
                 reply_to=msg.id,
                 fallback_partial=msg.broadcaster,
@@ -1146,9 +1291,10 @@ class SongBot(commands.Bot):
             detail = (exc.detail or '').lower()
             if exc.status == 404 and 'playlist' in detail:
                 template = self.messages.get('playlist_not_found', 'Playlist "{playlist}" not found')
-                await self._send_message(
+                await self._send_bot_message(
                     login,
                     template.format(playlist=playlist_title),
+                    level=BotMessageLevel.NORMAL,
                     metadata={'channel': channel, 'command': 'playlist_request'},
                     reply_to=msg.id,
                     fallback_partial=msg.broadcaster,
@@ -1156,9 +1302,10 @@ class SongBot(commands.Bot):
                 return
             if exc.status in (400, 404) and any(keyword in detail for keyword in ('index', 'item')):
                 template = self.messages.get('playlist_song_missing', 'Playlist "{playlist}" has no song #{index}')
-                await self._send_message(
+                await self._send_bot_message(
                     login,
                     template.format(playlist=playlist_title, index=index),
+                    level=BotMessageLevel.NORMAL,
                     metadata={'channel': channel, 'command': 'playlist_request'},
                     reply_to=msg.id,
                     fallback_partial=msg.broadcaster,
@@ -1175,9 +1322,10 @@ class SongBot(commands.Bot):
                     'index': index,
                 },
             )
-            await self._send_message(
+            await self._send_bot_message(
                 login,
                 self.messages['failed'].format(error=exc.detail),
+                level=BotMessageLevel.NORMAL,
                 metadata={'channel': channel, 'command': 'playlist_request'},
                 reply_to=msg.id,
                 fallback_partial=msg.broadcaster,
@@ -1189,9 +1337,10 @@ class SongBot(commands.Bot):
                 f'Failed playlist request for {msg.chatter.name}: {exc}',
                 metadata={'channel': channel, 'command': 'playlist_request'},
             )
-            await self._send_message(
+            await self._send_bot_message(
                 login,
                 self.messages['failed'].format(error=exc),
+                level=BotMessageLevel.NORMAL,
                 metadata={'channel': channel, 'command': 'playlist_request'},
                 reply_to=msg.id,
                 fallback_partial=msg.broadcaster,
@@ -1212,9 +1361,10 @@ class SongBot(commands.Bot):
                 )
             except KeyError:
                 message_text = template
-            await self._send_message(
+            await self._send_bot_message(
                 login,
                 message_text,
+                level=BotMessageLevel.NORMAL,
                 metadata={
                     'channel': channel,
                     'command': 'playlist_request',
@@ -1229,9 +1379,10 @@ class SongBot(commands.Bot):
         login = self._channel_login(msg.broadcaster.name)
         row = self.channel_map.get(login)
         if not row:
-            await self._send_message(
+            await self._send_bot_message(
                 login,
                 self.messages['channel_not_registered'],
+                level=BotMessageLevel.NORMAL,
                 metadata={'channel': msg.broadcaster.name, 'command': 'prioritize'},
                 reply_to=msg.id,
                 fallback_partial=msg.broadcaster,
@@ -1244,9 +1395,10 @@ class SongBot(commands.Bot):
         queue = await backend.get_queue(channel)
         my_prio = [q for q in queue if q['user_id'] == user_id and q['is_priority'] == 1]
         if len(my_prio) >= 3:
-            await self._send_message(
+            await self._send_bot_message(
                 login,
                 self.messages['prioritize_limit'],
+                level=BotMessageLevel.NORMAL,
                 metadata={'channel': channel, 'command': 'prioritize'},
                 reply_to=msg.id,
                 fallback_partial=msg.broadcaster,
@@ -1261,9 +1413,10 @@ class SongBot(commands.Bot):
             mine = [q for q in queue if q['user_id'] == user_id and q['played'] == 0 and q['is_priority'] == 0]
             target = mine[-1] if mine else None
         if not target:
-            await self._send_message(
+            await self._send_bot_message(
                 login,
                 self.messages['prioritize_no_target'],
+                level=BotMessageLevel.NORMAL,
                 metadata={'channel': channel, 'command': 'prioritize'},
                 reply_to=msg.id,
                 fallback_partial=msg.broadcaster,
@@ -1281,9 +1434,10 @@ class SongBot(commands.Bot):
                 is_mod=bool(msg.chatter.moderator or msg.chatter.broadcaster),
             )
             await backend.delete_request(channel, target['id'])
-            await self._send_message(
+            await self._send_bot_message(
                 login,
                 self.messages['prioritize_success'].format(request_id=target['id']),
+                level=BotMessageLevel.NORMAL,
                 metadata={'channel': channel, 'command': 'prioritize'},
                 reply_to=msg.id,
                 fallback_partial=msg.broadcaster,
@@ -1294,9 +1448,10 @@ class SongBot(commands.Bot):
                 f'Failed to prioritize for {msg.chatter.name}: {exc}',
                 metadata={'channel': channel, 'command': 'prioritize'},
             )
-            await self._send_message(
+            await self._send_bot_message(
                 login,
                 self.messages['failed'].format(error=exc),
+                level=BotMessageLevel.NORMAL,
                 metadata={'channel': channel, 'command': 'prioritize'},
                 reply_to=msg.id,
                 fallback_partial=msg.broadcaster,
@@ -1306,9 +1461,10 @@ class SongBot(commands.Bot):
         login = self._channel_login(msg.broadcaster.name)
         row = self.channel_map.get(login)
         if not row:
-            await self._send_message(
+            await self._send_bot_message(
                 login,
                 self.messages['channel_not_registered'],
+                level=BotMessageLevel.NORMAL,
                 metadata={'channel': msg.broadcaster.name, 'command': 'points'},
                 reply_to=msg.id,
                 fallback_partial=msg.broadcaster,
@@ -1318,13 +1474,14 @@ class SongBot(commands.Bot):
         display_name = getattr(msg.chatter, 'display_name', None) or msg.chatter.name
         user_id = await backend.find_or_create_user(channel, str(msg.chatter.id), display_name)
         u = await backend.get_user(channel, user_id)
-        await self._send_message(
+        await self._send_bot_message(
             login,
             self.messages['points'].format(
                 username=display_name,
                 points=u.get('prio_points', 0),
                 currency_plural=self.currency_plural,
             ),
+            level=BotMessageLevel.NORMAL,
             metadata={'channel': channel, 'command': 'points'},
             reply_to=msg.id,
             fallback_partial=msg.broadcaster,
@@ -1334,9 +1491,10 @@ class SongBot(commands.Bot):
         login = self._channel_login(msg.broadcaster.name)
         row = self.channel_map.get(login)
         if not row:
-            await self._send_message(
+            await self._send_bot_message(
                 login,
                 self.messages['channel_not_registered'],
+                level=BotMessageLevel.NORMAL,
                 metadata={'channel': msg.broadcaster.name, 'command': 'remove'},
                 reply_to=msg.id,
                 fallback_partial=msg.broadcaster,
@@ -1348,9 +1506,10 @@ class SongBot(commands.Bot):
         queue = await backend.get_queue(channel)
         mine = [q for q in queue if q['user_id'] == user_id and q['played'] == 0]
         if not mine:
-            await self._send_message(
+            await self._send_bot_message(
                 login,
                 self.messages['remove_no_pending'],
+                level=BotMessageLevel.NORMAL,
                 metadata={'channel': channel, 'command': 'remove'},
                 reply_to=msg.id,
                 fallback_partial=msg.broadcaster,
@@ -1359,9 +1518,10 @@ class SongBot(commands.Bot):
         latest = mine[-1]
         try:
             await backend.delete_request(channel, latest['id'])
-            await self._send_message(
+            await self._send_bot_message(
                 login,
                 self.messages['remove_success'].format(request_id=latest['id']),
+                level=BotMessageLevel.NORMAL,
                 metadata={'channel': channel, 'command': 'remove'},
                 reply_to=msg.id,
                 fallback_partial=msg.broadcaster,
@@ -1372,9 +1532,10 @@ class SongBot(commands.Bot):
                 f'Failed to remove request for {msg.chatter.name}: {exc}',
                 metadata={'channel': channel, 'command': 'remove'},
             )
-            await self._send_message(
+            await self._send_bot_message(
                 login,
                 self.messages['failed'].format(error=exc),
+                level=BotMessageLevel.NORMAL,
                 metadata={'channel': channel, 'command': 'remove'},
                 reply_to=msg.id,
                 fallback_partial=msg.broadcaster,
@@ -1382,9 +1543,10 @@ class SongBot(commands.Bot):
 
     async def handle_archive(self, msg) -> None:
         if not (msg.chatter.moderator or msg.chatter.broadcaster):
-            await self._send_message(
+            await self._send_bot_message(
                 self._channel_login(msg.broadcaster.name),
                 self.messages['archive_denied'],
+                level=BotMessageLevel.NORMAL,
                 metadata={'channel': msg.broadcaster.name, 'command': 'archive'},
                 reply_to=msg.id,
                 fallback_partial=msg.broadcaster,
@@ -1393,9 +1555,10 @@ class SongBot(commands.Bot):
         login = self._channel_login(msg.broadcaster.name)
         row = self.channel_map.get(login)
         if not row:
-            await self._send_message(
+            await self._send_bot_message(
                 login,
                 self.messages['channel_not_registered'],
+                level=BotMessageLevel.NORMAL,
                 metadata={'channel': msg.broadcaster.name, 'command': 'archive'},
                 reply_to=msg.id,
                 fallback_partial=msg.broadcaster,
@@ -1405,9 +1568,10 @@ class SongBot(commands.Bot):
         try:
             await backend.archive_stream(channel)
             await self.process_backend_update(channel)
-            await self._send_message(
+            await self._send_bot_message(
                 login,
                 self.messages['archive_success'],
+                level=BotMessageLevel.NORMAL,
                 metadata={'channel': channel, 'command': 'archive'},
                 reply_to=msg.id,
                 fallback_partial=msg.broadcaster,
@@ -1418,9 +1582,10 @@ class SongBot(commands.Bot):
                 f'Failed to archive queue for {msg.chatter.name}: {exc}',
                 metadata={'channel': channel, 'command': 'archive'},
             )
-            await self._send_message(
+            await self._send_bot_message(
                 login,
                 self.messages['failed'].format(error=exc),
+                level=BotMessageLevel.NORMAL,
                 metadata={'channel': channel, 'command': 'archive'},
                 reply_to=msg.id,
                 fallback_partial=msg.broadcaster,
@@ -1527,9 +1692,10 @@ class SongBot(commands.Bot):
                         user=user.get('username', '?'),
                         channel=channel,
                     )
-                await self._send_message(
+                await self._send_bot_message(
                     login,
                     msg,
+                    level=BotMessageLevel.VERBOSE,
                     metadata={'channel': channel, 'event': 'played'},
                 )
 
@@ -1550,13 +1716,14 @@ class SongBot(commands.Bot):
             if new_prio and not was_prio:
                 song = await backend.get_song(channel, req['song_id'])
                 user = await backend.get_user(channel, req['user_id'])
-                await self._send_message(
+                await self._send_bot_message(
                     login,
                     self.messages['bump_free'].format(
                         artist=song.get('artist', '?'),
                         title=song.get('title', '?'),
                         user=user.get('username', '?'),
                     ),
+                    level=BotMessageLevel.VERBOSE,
                     metadata={'channel': channel, 'event': 'bump'},
                 )
 
@@ -1588,7 +1755,7 @@ class SongBot(commands.Bot):
         )
         template = self.messages.get(f"award_{etype}")
         if template:
-            await self._send_message(
+            await self._send_bot_message(
                 login,
                 template.format(
                     username=user.get('username', ''),
@@ -1597,6 +1764,7 @@ class SongBot(commands.Bot):
                     currency_plural=self.currency_plural,
                     **extra,
                 ),
+                level=BotMessageLevel.VERBOSE,
                 metadata={'channel': channel, 'event': etype},
             )
 class BotService:
@@ -1887,9 +2055,10 @@ class BotService:
         ch_name = msg.channel.name.lower()
         ch_row = self.channel_map.get(ch_name)
         if not ch_row:
-            await self._send_message(
+            await self._send_bot_message(
                 msg.channel,
                 self.messages['channel_not_registered'],
+                level=BotMessageLevel.NORMAL,
                 metadata={'channel': msg.channel.name, 'command': 'request'},
             )
             return
@@ -1928,7 +2097,7 @@ class BotService:
                 is_subscriber=msg.author.is_subscriber,
                 is_mod=bool(msg.author.is_mod or msg.author.is_broadcaster),
             )
-            await self._send_message(
+            await self._send_bot_message(
                 msg.channel,
                 self.messages['request_added'].format(
                     artist=song.get('artist', ''),
@@ -1942,9 +2111,10 @@ class BotService:
                 f'Failed to add request for {msg.author.name}: {e}',
                 metadata={'channel': msg.channel.name, 'command': 'request'},
             )
-            await self._send_message(
+            await self._send_bot_message(
                 msg.channel,
                 self.messages['failed'].format(error=e),
+                level=BotMessageLevel.NORMAL,
                 metadata={'channel': msg.channel.name, 'command': 'request'},
             )
 
@@ -1953,9 +2123,10 @@ class BotService:
         ch_name = msg.channel.name.lower()
         ch_row = self.channel_map.get(ch_name)
         if not ch_row:
-            await self._send_message(
+            await self._send_bot_message(
                 msg.channel,
                 self.messages['channel_not_registered'],
+                level=BotMessageLevel.NORMAL,
                 metadata={'channel': msg.channel.name, 'command': 'prioritize'},
             )
             return
@@ -1965,9 +2136,10 @@ class BotService:
         queue = await backend.get_queue(channel)
         my_prio = [q for q in queue if q['user_id'] == user_id and q['is_priority'] == 1]
         if len(my_prio) >= 3:
-            await self._send_message(
+            await self._send_bot_message(
                 msg.channel,
                 self.messages['prioritize_limit'],
+                level=BotMessageLevel.NORMAL,
                 metadata={'channel': msg.channel.name, 'command': 'prioritize'},
             )
             return
@@ -1981,9 +2153,10 @@ class BotService:
             mine = [q for q in queue if q['user_id'] == user_id and q['played'] == 0 and q['is_priority'] == 0]
             target = mine[-1] if mine else None
         if not target:
-            await self._send_message(
+            await self._send_bot_message(
                 msg.channel,
                 self.messages['prioritize_no_target'],
+                level=BotMessageLevel.NORMAL,
                 metadata={'channel': msg.channel.name, 'command': 'prioritize'},
             )
             return
@@ -2000,9 +2173,10 @@ class BotService:
                 is_mod=bool(msg.author.is_mod or msg.author.is_broadcaster),
             )
             await backend.delete_request(channel, target['id'])
-            await self._send_message(
+            await self._send_bot_message(
                 msg.channel,
                 self.messages['prioritize_success'].format(request_id=target['id']),
+                level=BotMessageLevel.NORMAL,
                 metadata={'channel': msg.channel.name, 'command': 'prioritize'},
             )
         except Exception as e:
@@ -2011,9 +2185,10 @@ class BotService:
                 f'Failed to prioritize for {msg.author.name}: {e}',
                 metadata={'channel': msg.channel.name, 'command': 'prioritize'},
             )
-            await self._send_message(
+            await self._send_bot_message(
                 msg.channel,
                 self.messages['failed'].format(error=e),
+                level=BotMessageLevel.NORMAL,
                 metadata={'channel': msg.channel.name, 'command': 'prioritize'},
             )
 
@@ -2021,16 +2196,17 @@ class BotService:
         ch_name = msg.channel.name.lower()
         ch_row = self.channel_map.get(ch_name)
         if not ch_row:
-            await self._send_message(
+            await self._send_bot_message(
                 msg.channel,
                 self.messages['channel_not_registered'],
+                level=BotMessageLevel.NORMAL,
                 metadata={'channel': msg.channel.name, 'command': 'points'},
             )
             return
         channel = ch_row['channel_name']
         user_id = await backend.find_or_create_user(channel, str(msg.author.id), msg.author.name)
         u = await backend.get_user(channel, user_id)
-        await self._send_message(
+        await self._send_bot_message(
             msg.channel,
             self.messages['points'].format(
                 username=msg.author.name,
@@ -2044,9 +2220,10 @@ class BotService:
         ch_name = msg.channel.name.lower()
         ch_row = self.channel_map.get(ch_name)
         if not ch_row:
-            await self._send_message(
+            await self._send_bot_message(
                 msg.channel,
                 self.messages['channel_not_registered'],
+                level=BotMessageLevel.NORMAL,
                 metadata={'channel': msg.channel.name, 'command': 'remove'},
             )
             return
@@ -2055,18 +2232,20 @@ class BotService:
         queue = await backend.get_queue(channel)
         mine = [q for q in queue if q['user_id'] == user_id and q['played'] == 0]
         if not mine:
-            await self._send_message(
+            await self._send_bot_message(
                 msg.channel,
                 self.messages['remove_no_pending'],
+                level=BotMessageLevel.NORMAL,
                 metadata={'channel': msg.channel.name, 'command': 'remove'},
             )
             return
         latest = mine[-1]
         try:
             await backend.delete_request(channel, latest['id'])
-            await self._send_message(
+            await self._send_bot_message(
                 msg.channel,
                 self.messages['remove_success'].format(request_id=latest['id']),
+                level=BotMessageLevel.NORMAL,
                 metadata={'channel': msg.channel.name, 'command': 'remove'},
             )
         except Exception as e:
@@ -2075,26 +2254,29 @@ class BotService:
                 f'Failed to remove request for {msg.author.name}: {e}',
                 metadata={'channel': msg.channel.name, 'command': 'remove'},
             )
-            await self._send_message(
+            await self._send_bot_message(
                 msg.channel,
                 self.messages['failed'].format(error=e),
+                level=BotMessageLevel.NORMAL,
                 metadata={'channel': msg.channel.name, 'command': 'remove'},
             )
 
     async def handle_archive(self, msg):
         if not (msg.author.is_mod or msg.author.is_broadcaster):
-            await self._send_message(
+            await self._send_bot_message(
                 msg.channel,
                 self.messages['archive_denied'],
+                level=BotMessageLevel.NORMAL,
                 metadata={'channel': msg.channel.name, 'command': 'archive'},
             )
             return
         ch_name = msg.channel.name.lower()
         ch_row = self.channel_map.get(ch_name)
         if not ch_row:
-            await self._send_message(
+            await self._send_bot_message(
                 msg.channel,
                 self.messages['channel_not_registered'],
+                level=BotMessageLevel.NORMAL,
                 metadata={'channel': msg.channel.name, 'command': 'archive'},
             )
             return
@@ -2102,9 +2284,10 @@ class BotService:
         try:
             await backend.archive_stream(channel)
             await self.process_backend_update(channel)
-            await self._send_message(
+            await self._send_bot_message(
                 msg.channel,
                 self.messages['archive_success'],
+                level=BotMessageLevel.NORMAL,
                 metadata={'channel': msg.channel.name, 'command': 'archive'},
             )
         except Exception as e:
@@ -2113,9 +2296,10 @@ class BotService:
                 f'Failed to archive queue for {msg.author.name}: {e}',
                 metadata={'channel': msg.channel.name, 'command': 'archive'},
             )
-            await self._send_message(
+            await self._send_bot_message(
                 msg.channel,
                 self.messages['failed'].format(error=e),
+                level=BotMessageLevel.NORMAL,
                 metadata={'channel': msg.channel.name, 'command': 'archive'},
             )
 
@@ -2210,9 +2394,10 @@ class BotService:
                         user=user.get('username', '?'),
                         channel=ch_name,
                     )
-                await self._send_message(
+                await self._send_bot_message(
                     chan,
                     msg,
+                level=BotMessageLevel.NORMAL,
                     metadata={'channel': ch_name, 'event': 'played'},
                 )
 
@@ -2228,7 +2413,7 @@ class BotService:
             if new_prio and not was_prio:
                 song = await backend.get_song(ch_name, req['song_id'])
                 user = await backend.get_user(ch_name, req['user_id'])
-                await self._send_message(
+                await self._send_bot_message(
                     chan,
                     self.messages['bump_free'].format(
                         artist=song.get('artist', '?'),
@@ -2267,7 +2452,7 @@ class BotService:
         )
         template = self.messages.get(f"award_{etype}")
         if template:
-            await self._send_message(
+            await self._send_bot_message(
                 chan,
                 template.format(
                     username=user.get('username', ''),
