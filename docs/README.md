@@ -142,3 +142,11 @@ them via `/me/channels`.
   ```bash
   python bot/bot_app.py
   ```
+
+## Changelog
+### 2026-03-29
+- Removed duplicate channel-settings bootstrap technical debt by retiring
+  `_ensure_channel_settings_schema()` and keeping
+  `ensure_channel_settings_schema()` as the canonical startup migration helper.
+- Canonical startup schema backfills now cover both legacy queue-cap columns
+  and newer priority/bot-message settings in one path.

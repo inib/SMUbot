@@ -208,43 +208,67 @@ def ensure_channel_key_schema() -> None:
 
 
 def ensure_channel_settings_schema() -> None:
-    """Backfill new columns on `channel_settings` for legacy databases.
+    """Ensure `channel_settings` carries all legacy and current schema expectations.
 
-    Dependencies: Uses SQLAlchemy inspection against the global ``engine`` and
-    executes raw ALTER TABLE statements when fields are missing.
-    Code customers: Startup bootstrap that needs the latest settings columns
-    before serving traffic.
+    Dependencies: Uses SQLAlchemy inspection and raw SQL execution via the
+    module-level ``engine``.
+    Code customers: Startup bootstrap, settings APIs, queue enforcement, and
+    tests that rely on current settings columns and defaults.
     Used variables/origin: Operates on the ``channel_settings`` table and adds
-    the ``full_auto_priority_mode`` flag, priority pricing columns, and
-    ``bot_message_level`` with defaults when absent.
+    missing queue caps, ``full_auto_priority_mode``, pricing fields, and
+    ``bot_message_level`` while backfilling nullable legacy values.
     """
 
-    inspector = inspect(engine)
-    if "channel_settings" not in inspector.get_table_names():
-        return
-
-    columns = {col["name"] for col in inspector.get_columns("channel_settings")}
-    required_columns = {
-        "full_auto_priority_mode": "ALTER TABLE channel_settings ADD COLUMN full_auto_priority_mode INTEGER DEFAULT 0",
-        "prio_follow_enabled": "ALTER TABLE channel_settings ADD COLUMN prio_follow_enabled INTEGER NOT NULL DEFAULT 1",
-        "prio_raid_enabled": "ALTER TABLE channel_settings ADD COLUMN prio_raid_enabled INTEGER NOT NULL DEFAULT 1",
-        "prio_bits_per_point": "ALTER TABLE channel_settings ADD COLUMN prio_bits_per_point INTEGER NOT NULL DEFAULT 200",
-        "prio_gifts_per_point": "ALTER TABLE channel_settings ADD COLUMN prio_gifts_per_point INTEGER NOT NULL DEFAULT 5",
-        "prio_sub_tier1_points": "ALTER TABLE channel_settings ADD COLUMN prio_sub_tier1_points INTEGER NOT NULL DEFAULT 0",
-        "prio_sub_tier2_points": "ALTER TABLE channel_settings ADD COLUMN prio_sub_tier2_points INTEGER NOT NULL DEFAULT 0",
-        "prio_sub_tier3_points": "ALTER TABLE channel_settings ADD COLUMN prio_sub_tier3_points INTEGER NOT NULL DEFAULT 0",
-        "prio_reset_points_tier1": "ALTER TABLE channel_settings ADD COLUMN prio_reset_points_tier1 INTEGER NOT NULL DEFAULT 0",
-        "prio_reset_points_tier2": "ALTER TABLE channel_settings ADD COLUMN prio_reset_points_tier2 INTEGER NOT NULL DEFAULT 0",
-        "prio_reset_points_tier3": "ALTER TABLE channel_settings ADD COLUMN prio_reset_points_tier3 INTEGER NOT NULL DEFAULT 0",
-        "prio_reset_points_vip": "ALTER TABLE channel_settings ADD COLUMN prio_reset_points_vip INTEGER NOT NULL DEFAULT 0",
-        "prio_reset_points_mod": "ALTER TABLE channel_settings ADD COLUMN prio_reset_points_mod INTEGER NOT NULL DEFAULT 0",
-        "free_mod_priority_requests": "ALTER TABLE channel_settings ADD COLUMN free_mod_priority_requests INTEGER NOT NULL DEFAULT 0",
-        "bot_message_level": "ALTER TABLE channel_settings ADD COLUMN bot_message_level VARCHAR NOT NULL DEFAULT 'normal'",
-    }
     with engine.begin() as conn:
+        inspector = inspect(conn)
+        if "channel_settings" not in inspector.get_table_names():
+            return
+
+        columns = {col["name"] for col in inspector.get_columns("channel_settings")}
+        required_columns = {
+            "overall_queue_cap": "ALTER TABLE channel_settings ADD COLUMN overall_queue_cap INTEGER NOT NULL DEFAULT 100",
+            "nonpriority_queue_cap": "ALTER TABLE channel_settings ADD COLUMN nonpriority_queue_cap INTEGER NOT NULL DEFAULT 100",
+            "full_auto_priority_mode": "ALTER TABLE channel_settings ADD COLUMN full_auto_priority_mode INTEGER DEFAULT 0",
+            "prio_follow_enabled": "ALTER TABLE channel_settings ADD COLUMN prio_follow_enabled INTEGER NOT NULL DEFAULT 1",
+            "prio_raid_enabled": "ALTER TABLE channel_settings ADD COLUMN prio_raid_enabled INTEGER NOT NULL DEFAULT 1",
+            "prio_bits_per_point": "ALTER TABLE channel_settings ADD COLUMN prio_bits_per_point INTEGER NOT NULL DEFAULT 200",
+            "prio_gifts_per_point": "ALTER TABLE channel_settings ADD COLUMN prio_gifts_per_point INTEGER NOT NULL DEFAULT 5",
+            "prio_sub_tier1_points": "ALTER TABLE channel_settings ADD COLUMN prio_sub_tier1_points INTEGER NOT NULL DEFAULT 0",
+            "prio_sub_tier2_points": "ALTER TABLE channel_settings ADD COLUMN prio_sub_tier2_points INTEGER NOT NULL DEFAULT 0",
+            "prio_sub_tier3_points": "ALTER TABLE channel_settings ADD COLUMN prio_sub_tier3_points INTEGER NOT NULL DEFAULT 0",
+            "prio_reset_points_tier1": "ALTER TABLE channel_settings ADD COLUMN prio_reset_points_tier1 INTEGER NOT NULL DEFAULT 0",
+            "prio_reset_points_tier2": "ALTER TABLE channel_settings ADD COLUMN prio_reset_points_tier2 INTEGER NOT NULL DEFAULT 0",
+            "prio_reset_points_tier3": "ALTER TABLE channel_settings ADD COLUMN prio_reset_points_tier3 INTEGER NOT NULL DEFAULT 0",
+            "prio_reset_points_vip": "ALTER TABLE channel_settings ADD COLUMN prio_reset_points_vip INTEGER NOT NULL DEFAULT 0",
+            "prio_reset_points_mod": "ALTER TABLE channel_settings ADD COLUMN prio_reset_points_mod INTEGER NOT NULL DEFAULT 0",
+            "free_mod_priority_requests": "ALTER TABLE channel_settings ADD COLUMN free_mod_priority_requests INTEGER NOT NULL DEFAULT 0",
+            "bot_message_level": "ALTER TABLE channel_settings ADD COLUMN bot_message_level VARCHAR NOT NULL DEFAULT 'normal'",
+        }
         missing = {name: ddl for name, ddl in required_columns.items() if name not in columns}
         for ddl in missing.values():
             conn.execute(text(ddl))
+
+        if "overall_queue_cap" in columns:
+            conn.execute(
+                text(
+                    "UPDATE channel_settings SET overall_queue_cap = 100 "
+                    "WHERE overall_queue_cap IS NULL"
+                )
+            )
+        if "nonpriority_queue_cap" in columns:
+            conn.execute(
+                text(
+                    "UPDATE channel_settings SET nonpriority_queue_cap = 100 "
+                    "WHERE nonpriority_queue_cap IS NULL"
+                )
+            )
+        if "full_auto_priority_mode" in columns:
+            conn.execute(
+                text(
+                    "UPDATE channel_settings SET full_auto_priority_mode = 0 "
+                    "WHERE full_auto_priority_mode IS NULL"
+                )
+            )
         if "bot_message_level" in columns:
             conn.execute(
                 text(
@@ -1051,92 +1075,6 @@ class PlaylistItem(Base):
 Base.metadata.create_all(bind=engine)
 
 
-def _ensure_channel_settings_schema() -> None:
-    """Ensure channel settings tables include queue capacity columns for legacy DBs.
-
-    Dependencies: Relies on the module-level SQLAlchemy ``engine`` and ``inspect``
-    helpers to introspect the ``channel_settings`` table and execute ``ALTER``
-    statements when columns are missing.
-    Code customers: Runtime settings reads/writes, queue enforcement, event
-    emitters, and tests that assume queue capacity fields exist.
-    Used variables/origin: Reads the discovered column names from the inspector
-    and applies a default of ``100`` for both ``overall_queue_cap`` and
-    ``nonpriority_queue_cap`` plus ``"normal"`` for ``bot_message_level`` when
-    adding or backfilling those fields.
-    """
-
-    with engine.begin() as connection:
-        inspector = inspect(connection)
-        if "channel_settings" not in inspector.get_table_names():
-            return
-
-        columns = {column["name"] for column in inspector.get_columns("channel_settings")}
-        pricing_columns = {
-            "prio_follow_enabled": "ALTER TABLE channel_settings ADD COLUMN prio_follow_enabled INTEGER NOT NULL DEFAULT 1",
-            "prio_raid_enabled": "ALTER TABLE channel_settings ADD COLUMN prio_raid_enabled INTEGER NOT NULL DEFAULT 1",
-            "prio_bits_per_point": "ALTER TABLE channel_settings ADD COLUMN prio_bits_per_point INTEGER NOT NULL DEFAULT 200",
-            "prio_gifts_per_point": "ALTER TABLE channel_settings ADD COLUMN prio_gifts_per_point INTEGER NOT NULL DEFAULT 5",
-            "prio_sub_tier1_points": "ALTER TABLE channel_settings ADD COLUMN prio_sub_tier1_points INTEGER NOT NULL DEFAULT 0",
-            "prio_sub_tier2_points": "ALTER TABLE channel_settings ADD COLUMN prio_sub_tier2_points INTEGER NOT NULL DEFAULT 0",
-            "prio_sub_tier3_points": "ALTER TABLE channel_settings ADD COLUMN prio_sub_tier3_points INTEGER NOT NULL DEFAULT 0",
-            "prio_reset_points_tier1": "ALTER TABLE channel_settings ADD COLUMN prio_reset_points_tier1 INTEGER NOT NULL DEFAULT 0",
-            "prio_reset_points_tier2": "ALTER TABLE channel_settings ADD COLUMN prio_reset_points_tier2 INTEGER NOT NULL DEFAULT 0",
-            "prio_reset_points_tier3": "ALTER TABLE channel_settings ADD COLUMN prio_reset_points_tier3 INTEGER NOT NULL DEFAULT 0",
-            "prio_reset_points_vip": "ALTER TABLE channel_settings ADD COLUMN prio_reset_points_vip INTEGER NOT NULL DEFAULT 0",
-            "prio_reset_points_mod": "ALTER TABLE channel_settings ADD COLUMN prio_reset_points_mod INTEGER NOT NULL DEFAULT 0",
-            "free_mod_priority_requests": "ALTER TABLE channel_settings ADD COLUMN free_mod_priority_requests INTEGER NOT NULL DEFAULT 0",
-        }
-
-        if "overall_queue_cap" not in columns:
-            connection.execute(
-                text(
-                    "ALTER TABLE channel_settings "
-                    "ADD COLUMN overall_queue_cap INTEGER NOT NULL DEFAULT 100"
-                )
-            )
-        else:
-            connection.execute(
-                text(
-                    "UPDATE channel_settings SET overall_queue_cap = 100 "
-                    "WHERE overall_queue_cap IS NULL"
-                )
-            )
-
-        if "nonpriority_queue_cap" not in columns:
-            connection.execute(
-                text(
-                    "ALTER TABLE channel_settings "
-                    "ADD COLUMN nonpriority_queue_cap INTEGER NOT NULL DEFAULT 100"
-                )
-            )
-        else:
-            connection.execute(
-                text(
-                    "UPDATE channel_settings SET nonpriority_queue_cap = 100 "
-                    "WHERE nonpriority_queue_cap IS NULL"
-                )
-            )
-
-        for name, ddl in pricing_columns.items():
-            if name not in columns:
-                connection.execute(text(ddl))
-
-        if "bot_message_level" not in columns:
-            connection.execute(
-                text(
-                    "ALTER TABLE channel_settings "
-                    "ADD COLUMN bot_message_level VARCHAR NOT NULL DEFAULT 'normal'"
-                )
-            )
-        else:
-            connection.execute(
-                text(
-                    "UPDATE channel_settings SET bot_message_level = 'normal' "
-                    "WHERE bot_message_level IS NULL OR bot_message_level = ''"
-                )
-            )
-
-
 def _ensure_playlist_schema() -> None:
     """Ensure legacy databases have the latest playlist columns."""
 
@@ -1224,7 +1162,7 @@ def _ensure_playlist_schema() -> None:
             connection.execute(text("ALTER TABLE playlists_tmp RENAME TO playlists"))
 
 
-_ensure_channel_settings_schema()
+ensure_channel_settings_schema()
 _ensure_playlist_schema()
 bootstrap_settings_from_env()
 
@@ -4259,7 +4197,6 @@ def seed_default_data():
 
 
 ensure_channel_key_schema()
-ensure_channel_settings_schema()
 backfill_missing_channel_keys()
 seed_default_data()
 
