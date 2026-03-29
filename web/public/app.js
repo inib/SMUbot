@@ -457,6 +457,26 @@ function render(list, container) {
   list.forEach(({ q, song, user }) => container.appendChild(itemNode(q, song, user)));
 }
 
+/**
+ * Resolve the in-memory expansion state for a public playlist card.
+ * Dependencies: `queueCtx.playlistExpandState` (state store initialized in queue mode).
+ * Consumers: `renderPublicPlaylists` during initial render and button toggles during rerenders.
+ */
+function isPublicPlaylistExpanded(playlistKey) {
+  if (!queueCtx || !(queueCtx.playlistExpandState instanceof Map)) return false;
+  return Boolean(queueCtx.playlistExpandState.get(playlistKey));
+}
+
+/**
+ * Persist the in-memory expansion state for a public playlist card.
+ * Dependencies: `queueCtx.playlistExpandState` map and playlist slug/id keys.
+ * Consumers: toggle-button click handlers and initial state seeding in `renderPublicPlaylists`.
+ */
+function setPublicPlaylistExpanded(playlistKey, expanded) {
+  if (!queueCtx || !(queueCtx.playlistExpandState instanceof Map)) return;
+  queueCtx.playlistExpandState.set(playlistKey, Boolean(expanded));
+}
+
 function renderPublicPlaylists(list, { errored = false } = {}) {
   if (!queueCtx || !queueCtx.playlistsEl) return;
   const container = queueCtx.playlistsEl;
@@ -487,7 +507,7 @@ function renderPublicPlaylists(list, { errored = false } = {}) {
   if (cta && defaultCta) {
     cta.innerHTML = defaultCta;
   }
-  normalized.forEach((playlist) => {
+  normalized.forEach((playlist, playlistIdx) => {
     const card = document.createElement('div');
     card.className = 'public-playlist';
 
@@ -527,12 +547,34 @@ function renderPublicPlaylists(list, { errored = false } = {}) {
       keywordsLabel.textContent = `Keywords: ${keywords.join(', ')}`;
       meta.appendChild(keywordsLabel);
     }
+    const playlistKey = slug || `playlist-${playlistIdx}`;
+    if (!queueCtx.playlistExpandState.has(playlistKey)) {
+      setPublicPlaylistExpanded(playlistKey, false);
+    }
+    const toggleBtn = document.createElement('button');
+    toggleBtn.type = 'button';
+    toggleBtn.className = 'public-playlist__toggle';
+    const isExpanded = isPublicPlaylistExpanded(playlistKey);
+    toggleBtn.textContent = isExpanded ? 'Hide songs' : 'Show songs';
+    toggleBtn.setAttribute('aria-expanded', isExpanded ? 'true' : 'false');
+    meta.appendChild(toggleBtn);
 
     header.appendChild(meta);
     card.appendChild(header);
 
     const itemsContainer = document.createElement('div');
     itemsContainer.className = 'public-playlist__items';
+    const itemsContainerId = `public-playlist-items-${playlistIdx}-${slug.replace(/[^a-z0-9_-]+/gi, '-').toLowerCase() || 'default'}`;
+    itemsContainer.id = itemsContainerId;
+    itemsContainer.hidden = !isExpanded;
+    toggleBtn.setAttribute('aria-controls', itemsContainerId);
+    toggleBtn.addEventListener('click', () => {
+      const nextExpanded = !isPublicPlaylistExpanded(playlistKey);
+      setPublicPlaylistExpanded(playlistKey, nextExpanded);
+      itemsContainer.hidden = !nextExpanded;
+      toggleBtn.textContent = nextExpanded ? 'Hide songs' : 'Show songs';
+      toggleBtn.setAttribute('aria-expanded', nextExpanded ? 'true' : 'false');
+    });
     const items = Array.isArray(playlist?.items) ? playlist.items : [];
     if (!items.length) {
       const emptyRow = document.createElement('div');
@@ -785,6 +827,7 @@ function initQueueMode() {
     playlistCta: playlistCtaEl || null,
     playlistCtaDefault: playlistCtaEl ? playlistCtaEl.innerHTML : '',
     playlistCache: null,
+    playlistExpandState: new Map(),
     lastPlaylistFetch: 0,
   };
 
