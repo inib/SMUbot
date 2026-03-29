@@ -16,15 +16,22 @@ Additional directories include:
 ## Admin panel bot message controls
 - Channel detail cards in the Admin panel now include a dedicated **Bot Messages**
   tab beside **Custom Settings** and **Active Streams**.
+- Each channel card shows a short summary above the tabs clarifying that the
+  message matrix lives in **Bot Messages** (labelled **Bot Messages (Matrix)**).
 - The tab reads `/channels/{channel}/settings`, shows the current
   `bot_message_level`, and persists level changes with
   `PUT /channels/{channel}/settings`.
 - The UI includes a read-only message catalog matrix grouped by message ID with
   default level badges (`normal`, `verbose`, `debug`) and inherited inclusion
   behavior: **Normal ⊂ Verbose ⊂ Debug**, while **Mute overrides all**.
+- If `/bot/messages/catalog` fails, the panel shows a prominent warning card
+  with reason/remediation and renders a lightweight local fallback matrix so
+  operators can still validate expected categories (`queue`, `commands`,
+  `lifecycle`, `rewards`, `errors`) while fixing auth.
 - Front-end state reserves a `perMessageOverrides` object map keyed by message
   ID for future customization workflows (editing controls intentionally hidden
-  for now).
+  for now; currently unused and marked for future cleanup if this direction is
+  dropped).
 
 ### Bot message catalog auth checklist (manual UI verification)
 - [ ] **Admin token only works**: clear browser cookies, enter a valid admin
@@ -38,6 +45,20 @@ Additional directories include:
   session cookie, then open **Bot Messages**. Confirm the panel shows a
   user-facing authentication guidance message that explains admin token/session
   is missing and how to recover.
+
+### Troubleshooting missing matrix / auth failures
+- **Warning card says `401 unauthorized`**:
+  1. In Admin panel **Setup**, set a valid admin token (`X-Admin-Token`) and save.
+  2. Or sign in through the Admin Twitch auth flow to restore an admin session cookie.
+  3. Refresh the channel card and re-open **Bot Messages (Matrix)**.
+- **Matrix missing after sign-in**:
+  1. Open browser devtools network tab and confirm `/bot/messages/catalog` returns 200.
+  2. Confirm the backend origin in Admin footer points at the expected API host.
+  3. Re-check reverse proxy auth/header forwarding for `X-Admin-Token` and cookies.
+- **Temporary fallback matrix shown**:
+  - This is expected degraded mode when live catalog metadata cannot be fetched.
+  - Use fallback categories for quick validation, then restore auth to return to
+    the full live catalog.
 
 ## Deployment setup flow
 When the stack starts for the first time, the backend remains locked until an
