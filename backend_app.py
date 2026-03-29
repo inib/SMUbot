@@ -1182,6 +1182,7 @@ class ChannelOut(BaseModel):
     authorized: bool
     bot_active: bool
     bot_last_error: Optional[str] = None
+    bot_message_level: Literal["mute", "normal", "verbose", "debug"] = "normal"
 
     class Config:
         from_attributes = True
@@ -4297,6 +4298,8 @@ def list_channels(db: Session = Depends(get_db)):
     for channel in channels:
         if not channel.bot_state:
             channel.bot_state = get_or_create_bot_state(db, channel.id)
+        settings = get_or_create_settings(db, channel.id)
+        channel.bot_message_level = settings.bot_message_level or "normal"
     return channels
 
 
@@ -4380,7 +4383,11 @@ def add_channel(payload: ChannelIn, db: Session = Depends(get_db)):
     return ch
 
 @app.put("/channels/{channel}", dependencies=[Depends(require_token)])
-def update_channel_status(channel: str, join_active: int, db: Session = Depends(get_db)):
+def update_channel_status(
+    channel: str,
+    join_active: int = Query(..., ge=0, le=1),
+    db: Session = Depends(get_db),
+):
     channel_pk = get_channel_pk(channel, db)
     ch = db.get(ActiveChannel, channel_pk)
     if not ch:

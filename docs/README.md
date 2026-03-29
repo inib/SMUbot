@@ -169,6 +169,21 @@ them via `/me/channels`.
 - Channel owners and the playlist automation helper are filtered out of the
   listing, and badges update automatically as pages load or refresh.
 
+## Queue Manager unified bot control dropdown
+- The Queue Manager header now shows a single bot-control dropdown beside the
+  channel and bot badges whenever the selected channel is authorized.
+- Dropdown options are state-aware:
+  - **Disconnected (`join_active = 0`)**: only `connect` is shown.
+  - **Connected (`join_active = 1`)**: `disconnect` plus message levels
+    `mute`, `normal`, `verbose`, and `debug` are shown.
+- API mapping is explicit:
+  - `connect`/`disconnect` -> `PUT /channels/{channel}?join_active=1|0`
+  - `mute|normal|verbose|debug` -> `PUT /channels/{channel}/settings` with
+    `{ "bot_message_level": "<level>" }`
+- The Settings tab reuses the same dropdown renderer for
+  `bot_message_level`, so message-level selection behavior stays aligned with
+  the header control.
+
 ## Development Tips
 - Install Python dependencies from `requirements.txt` for local development.
 - Run the backend directly:
