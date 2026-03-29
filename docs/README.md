@@ -57,6 +57,13 @@ unlocks the API for the bot, queue manager, and public web frontend.
 - Honors each channel's `bot_message_level` (`mute`, `normal`, `verbose`,
   `debug`) when deciding whether to send chat output; suppressed messages still
   go to backend bot logs for observability.
+- Uses a central message catalog in `bot/bot_app.py` keyed by message IDs. Each
+  entry defines a template key (`messages.yml`), default level, human
+  description, and optional group (`commands`, `lifecycle`, `rewards`, `errors`,
+  `queue`).
+- Supports channel-level `bot_message_overrides` / `message_overrides` payloads
+  so future per-command/per-message template or level customization can be
+  rolled out without refactoring dispatch logic.
 - Supports commands:
   - `!request` – add a song request.
   - `!playlist <name> <index>` – queue a song from a saved playlist by position.

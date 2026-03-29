@@ -1,6 +1,6 @@
 from __future__ import annotations
 import os, re, asyncio, json, yaml, logging
-from typing import Optional, Dict, List, Tuple, Callable, Awaitable, Set
+from typing import Optional, Dict, List, Tuple, Callable, Awaitable, Set, Any
 from enum import IntEnum
 from dataclasses import dataclass
 from pathlib import Path
@@ -68,7 +68,13 @@ DEFAULT_MESSAGES = {
     'playlist_not_found': 'Playlist "{playlist}" not found',
     'playlist_song_missing': 'Playlist "{playlist}" has no song #{index}',
     'playlist_usage': 'Usage: !playlist <name> <index>',
+    'vip_points_awarded': 'Thx for becoming a VIP {username}, take {word} - you have now {points} {currency_plural}',
+    'queue_position_changed': 'Request #{request_id} moved from #{old_position} to #{new_position}',
+    'token_refreshed': 'Bot token refreshed successfully.',
+    'action_failed_debug': 'Debug failure in {action}: {error}',
 }
+
+
 
 # Channels that should never trigger Twitch joins/subscriptions even if they
 # appear in the backend (e.g. seeded test data).
@@ -331,6 +337,50 @@ class BotMessageLevel(IntEnum):
     DEBUG = 3
 
 
+@dataclass(frozen=True)
+class BotMessageCatalogEntry:
+    """Defines a logical bot message identity and default presentation behavior."""
+
+    template_key: str
+    level: BotMessageLevel
+    description: str
+    group: Optional[str] = None
+
+
+DEFAULT_MESSAGE_CATALOG: Dict[str, BotMessageCatalogEntry] = {
+    'channel_not_registered': BotMessageCatalogEntry('channel_not_registered', BotMessageLevel.NORMAL, 'Command target channel is not registered.', 'commands'),
+    'request_added': BotMessageCatalogEntry('request_added', BotMessageLevel.NORMAL, 'User song request accepted.', 'commands'),
+    'random_request_added': BotMessageCatalogEntry('random_request_added', BotMessageLevel.NORMAL, 'Random playlist request accepted.', 'commands'),
+    'random_not_found': BotMessageCatalogEntry('random_not_found', BotMessageLevel.NORMAL, 'Random playlist keyword did not match any playlist.', 'commands'),
+    'playlist_request_added': BotMessageCatalogEntry('playlist_request_added', BotMessageLevel.NORMAL, 'Playlist song request accepted.', 'commands'),
+    'playlist_not_found': BotMessageCatalogEntry('playlist_not_found', BotMessageLevel.NORMAL, 'Playlist command referenced a missing playlist.', 'commands'),
+    'playlist_song_missing': BotMessageCatalogEntry('playlist_song_missing', BotMessageLevel.NORMAL, 'Playlist command referenced an out-of-range song index.', 'commands'),
+    'playlist_usage': BotMessageCatalogEntry('playlist_usage', BotMessageLevel.NORMAL, 'Playlist command usage guidance.', 'commands'),
+    'prioritize_limit': BotMessageCatalogEntry('prioritize_limit', BotMessageLevel.NORMAL, 'User reached prioritize limit.', 'commands'),
+    'prioritize_no_target': BotMessageCatalogEntry('prioritize_no_target', BotMessageLevel.NORMAL, 'No eligible request to prioritize.', 'commands'),
+    'prioritize_success': BotMessageCatalogEntry('prioritize_success', BotMessageLevel.NORMAL, 'Request prioritized successfully.', 'commands'),
+    'points': BotMessageCatalogEntry('points', BotMessageLevel.NORMAL, 'Points command response.', 'commands'),
+    'remove_no_pending': BotMessageCatalogEntry('remove_no_pending', BotMessageLevel.NORMAL, 'Remove command found no pending requests.', 'commands'),
+    'remove_success': BotMessageCatalogEntry('remove_success', BotMessageLevel.NORMAL, 'Remove command deleted latest request.', 'commands'),
+    'archive_success': BotMessageCatalogEntry('archive_success', BotMessageLevel.NORMAL, 'Queue archive command succeeded.', 'commands'),
+    'archive_denied': BotMessageCatalogEntry('archive_denied', BotMessageLevel.NORMAL, 'Archive command denied due to missing permissions.', 'commands'),
+    'failed': BotMessageCatalogEntry('failed', BotMessageLevel.NORMAL, 'Command failed with a user-facing error.', 'errors'),
+    'bot_joined': BotMessageCatalogEntry('bot_joined', BotMessageLevel.VERBOSE, 'Bot joined channel chat.', 'lifecycle'),
+    'bot_left': BotMessageCatalogEntry('bot_left', BotMessageLevel.VERBOSE, 'Bot left channel chat.', 'lifecycle'),
+    'played_next': BotMessageCatalogEntry('played_next', BotMessageLevel.VERBOSE, 'Playback advanced and next prioritized song announced.', 'queue'),
+    'played_last': BotMessageCatalogEntry('played_last', BotMessageLevel.VERBOSE, 'Playback advanced and no prioritized songs remain.', 'queue'),
+    'bump_free': BotMessageCatalogEntry('bump_free', BotMessageLevel.VERBOSE, 'Automatic free bump was granted.', 'rewards'),
+    'award_follow': BotMessageCatalogEntry('award_follow', BotMessageLevel.VERBOSE, 'Follow reward points announcement.', 'rewards'),
+    'award_raid': BotMessageCatalogEntry('award_raid', BotMessageLevel.VERBOSE, 'Raid reward points announcement.', 'rewards'),
+    'award_gift_sub': BotMessageCatalogEntry('award_gift_sub', BotMessageLevel.VERBOSE, 'Gifted subscription reward points announcement.', 'rewards'),
+    'award_bits': BotMessageCatalogEntry('award_bits', BotMessageLevel.VERBOSE, 'Bits reward points announcement.', 'rewards'),
+    'vip_points_awarded': BotMessageCatalogEntry('vip_points_awarded', BotMessageLevel.VERBOSE, 'VIP reward points announcement.', 'rewards'),
+    'queue_position_changed': BotMessageCatalogEntry('queue_position_changed', BotMessageLevel.VERBOSE, 'Queue item moved to a new position.', 'queue'),
+    'token_refreshed': BotMessageCatalogEntry('token_refreshed', BotMessageLevel.DEBUG, 'Token refresh succeeded.', 'lifecycle'),
+    'action_failed_debug': BotMessageCatalogEntry('action_failed_debug', BotMessageLevel.DEBUG, 'Internal action failure diagnostic.', 'errors'),
+}
+
+
 def _format_token(token: str) -> str:
     return token.removeprefix('oauth:') if token else token
 
@@ -433,6 +483,7 @@ class SongBot(commands.Bot):
             raise RuntimeError('token, refresh_token, login, and bot_id are required')
         self.commands_map = load_commands(COMMANDS_FILE)
         self.messages = load_messages(MESSAGES_PATH)
+        self.message_catalog = DEFAULT_MESSAGE_CATALOG.copy()
         self.currency_singular = self.messages.get('currency_singular', 'point')
         self.currency_plural = self.messages.get('currency_plural', 'points')
         prefix = self.commands_map['prefix'][0]
@@ -515,6 +566,12 @@ class SongBot(commands.Bot):
             expires_in=payload.expires_in,
             scopes=self._scopes,
         )
+        for login in list(self.joined):
+            await self._send_catalog_message(
+                login,
+                'token_refreshed',
+                metadata={'event': 'token_refresh'},
+            )
 
     async def event_ready(self) -> None:
         if self.enabled:
@@ -614,6 +671,12 @@ class SongBot(commands.Bot):
                         f'Failed to subscribe channel {channel_name}: {exc}',
                         event='join_error',
                         metadata={'channel': channel_name, 'error': str(exc)},
+                    )
+                    await self._announce_debug_failure(
+                        key,
+                        action='subscribe_channel',
+                        error=exc,
+                        metadata={'channel': channel_name},
                     )
                     self.channel_map.pop(key, None)
                     continue
@@ -794,28 +857,20 @@ class SongBot(commands.Bot):
         await backend.close()
 
     async def _announce_joined(self, login: str) -> None:
-        message = self.messages.get('bot_joined')
-        if not message:
-            return
         info = self._channel_info(login)
         channel_label = info.get('channel_name') if info else login
-        await self._send_bot_message(
+        await self._send_catalog_message(
             login,
-            message,
-            level=BotMessageLevel.VERBOSE,
+            'bot_joined',
             metadata={'channel': channel_label, 'event': 'bot_join'},
         )
 
     async def _announce_left(self, login: str) -> None:
-        message = self.messages.get('bot_left')
-        if not message:
-            return
         info = self._channel_info(login)
         channel_label = info.get('channel_name') if info else login
-        await self._send_bot_message(
+        await self._send_catalog_message(
             login,
-            message,
-            level=BotMessageLevel.VERBOSE,
+            'bot_left',
             metadata={'channel': channel_label, 'event': 'bot_part'},
         )
 
@@ -870,6 +925,76 @@ class SongBot(commands.Bot):
                 raw_level = settings.get('bot_message_level')
         return self._coerce_message_level(raw_level)
 
+    def _resolve_message_catalog_entry(
+        self,
+        channel_login: str,
+        message_id: str,
+    ) -> BotMessageCatalogEntry:
+        """Resolve message catalog entries with optional per-channel overrides."""
+
+        catalog = getattr(self, 'message_catalog', DEFAULT_MESSAGE_CATALOG) or DEFAULT_MESSAGE_CATALOG
+        entry = catalog.get(message_id)
+        if not entry:
+            return BotMessageCatalogEntry(
+                template_key=message_id,
+                level=BotMessageLevel.NORMAL,
+                description='Ad-hoc message key fallback.',
+            )
+        channel_info = (getattr(self, 'channel_map', {}) or {}).get(self._channel_login(channel_login), {})
+        overrides: Dict[str, Dict[str, Any]] = {}
+        if isinstance(channel_info, dict):
+            raw_overrides = channel_info.get('bot_message_overrides') or channel_info.get('message_overrides')
+            if isinstance(raw_overrides, dict):
+                overrides = raw_overrides
+        override = overrides.get(message_id, {}) if isinstance(overrides, dict) else {}
+        if not isinstance(override, dict):
+            override = {}
+        template_key = str(override.get('template_key') or entry.template_key)
+        level_value = self._coerce_message_level(override.get('level', entry.level))
+        return BotMessageCatalogEntry(
+            template_key=template_key,
+            level=level_value,
+            description=entry.description,
+            group=entry.group,
+        )
+
+    async def _send_catalog_message(
+        self,
+        channel_login: str,
+        message_id: str,
+        *,
+        template_vars: Optional[Dict[str, object]] = None,
+        metadata: Optional[Dict[str, object]] = None,
+        reply_to: Optional[str] = None,
+        fallback_partial: Optional[object] = None,
+    ) -> None:
+        """Send a logical message by catalog ID with templating and level policy."""
+
+        entry = self._resolve_message_catalog_entry(channel_login, message_id)
+        message_templates = getattr(self, 'messages', DEFAULT_MESSAGES) or DEFAULT_MESSAGES
+        template = message_templates.get(entry.template_key)
+        if not template:
+            return
+        values = template_vars or {}
+        try:
+            message_text = template.format(**values)
+        except Exception:
+            message_text = template
+        enriched_meta = {
+            **(metadata or {}),
+            'message_id': message_id,
+            'template_key': entry.template_key,
+            'group': entry.group,
+        }
+        await self._send_bot_message(
+            channel_login,
+            message_text,
+            level=entry.level,
+            metadata=enriched_meta,
+            reply_to=reply_to,
+            fallback_partial=fallback_partial,
+        )
+
     async def _send_bot_message(
         self,
         channel_login: str,
@@ -921,6 +1046,23 @@ class SongBot(commands.Bot):
             fallback_partial=fallback_partial,
         )
 
+    async def _announce_debug_failure(
+        self,
+        channel_login: str,
+        *,
+        action: str,
+        error: object,
+        metadata: Optional[Dict[str, object]] = None,
+    ) -> None:
+        """Emit debug-tier failure diagnostics using catalog templates."""
+
+        await self._send_catalog_message(
+            channel_login,
+            'action_failed_debug',
+            template_vars={'action': action, 'error': error},
+            metadata={**(metadata or {}), 'event': 'action_failed_debug'},
+        )
+
     async def _send_message(
         self,
         channel_login: str,
@@ -964,6 +1106,13 @@ class SongBot(commands.Bot):
                 event='message',
                 metadata={**(metadata or {}), 'channel': channel_label, 'error': str(exc)},
             )
+            if (metadata or {}).get('event') != 'action_failed_debug':
+                await self._announce_debug_failure(
+                    channel_login,
+                    action='send_message',
+                    error=exc,
+                    metadata={'channel': channel_label},
+                )
 
     async def update_enabled(self, enabled: bool) -> None:
         if self.enabled == enabled:
@@ -1644,6 +1793,7 @@ class SongBot(commands.Bot):
 
             await self.check_played(login, ch_name, prev_queue, new_queue)
             await self.check_bumps(login, ch_name, prev_queue, new_queue)
+            await self.check_queue_position_changes(login, ch_name, prev_queue, new_queue)
 
             events = await backend.get_events(ch_name, since=last_event) if last_event else await backend.get_events(ch_name)
             if events:
@@ -1692,10 +1842,18 @@ class SongBot(commands.Bot):
                         user=user.get('username', '?'),
                         channel=channel,
                     )
-                await self._send_bot_message(
+                await self._send_catalog_message(
                     login,
-                    msg,
-                    level=BotMessageLevel.VERBOSE,
+                    'played_next' if pending_prio else 'played_last',
+                    template_vars={
+                        'artist': song.get('artist', '?'),
+                        'title': song.get('title', '?'),
+                        'user': user.get('username', '?'),
+                        'next_artist': next_song.get('artist', '?') if pending_prio else '',
+                        'next_title': next_song.get('title', '?') if pending_prio else '',
+                        'next_user': next_user.get('username', '?') if pending_prio else '',
+                        'channel': channel,
+                    },
                     metadata={'channel': channel, 'event': 'played'},
                 )
 
@@ -1716,16 +1874,51 @@ class SongBot(commands.Bot):
             if new_prio and not was_prio:
                 song = await backend.get_song(channel, req['song_id'])
                 user = await backend.get_user(channel, req['user_id'])
-                await self._send_bot_message(
+                await self._send_catalog_message(
                     login,
-                    self.messages['bump_free'].format(
-                        artist=song.get('artist', '?'),
-                        title=song.get('title', '?'),
-                        user=user.get('username', '?'),
-                    ),
-                    level=BotMessageLevel.VERBOSE,
+                    'bump_free',
+                    template_vars={
+                        'artist': song.get('artist', '?'),
+                        'title': song.get('title', '?'),
+                        'user': user.get('username', '?'),
+                    },
                     metadata={'channel': channel, 'event': 'bump'},
                 )
+
+
+    async def check_queue_position_changes(
+        self,
+        login: str,
+        channel: str,
+        prev_queue: List[dict],
+        new_queue: List[dict],
+    ) -> None:
+        """Announce pending queue position changes for verbose/diagnostic tiers."""
+
+        if login not in self.joined:
+            return
+        prev_positions: Dict[int, int] = {
+            int(item['id']): idx + 1
+            for idx, item in enumerate([q for q in prev_queue if q.get('played') == 0])
+            if item.get('id') is not None
+        }
+        for index, req in enumerate([q for q in new_queue if q.get('played') == 0], start=1):
+            req_id = req.get('id')
+            if req_id is None:
+                continue
+            old_position = prev_positions.get(int(req_id))
+            if old_position is None or old_position == index:
+                continue
+            await self._send_catalog_message(
+                login,
+                'queue_position_changed',
+                template_vars={
+                    'request_id': req_id,
+                    'old_position': old_position,
+                    'new_position': index,
+                },
+                metadata={'channel': channel, 'event': 'queue_position_changed'},
+            )
 
     async def announce_event(self, login: str, channel: str, ev: dict) -> None:
         if login not in self.joined:
@@ -1746,6 +1939,8 @@ class SongBot(commands.Bot):
         elif etype == 'bits':
             amount = int(meta.get('amount', 0))
             extra['amount'] = amount
+        elif etype == 'vip':
+            delta = int(meta.get('count', 1) or 1)
         elif etype not in ('follow', 'raid'):
             return
         word = (
@@ -1753,20 +1948,19 @@ class SongBot(commands.Bot):
             if delta == 1
             else f"these {delta} {self.currency_plural}"
         )
-        template = self.messages.get(f"award_{etype}")
-        if template:
-            await self._send_bot_message(
-                login,
-                template.format(
-                    username=user.get('username', ''),
-                    word=word,
-                    points=user.get('prio_points', 0),
-                    currency_plural=self.currency_plural,
-                    **extra,
-                ),
-                level=BotMessageLevel.VERBOSE,
-                metadata={'channel': channel, 'event': etype},
-            )
+        message_id = 'vip_points_awarded' if etype == 'vip' else f"award_{etype}"
+        await self._send_catalog_message(
+            login,
+            message_id,
+            template_vars={
+                'username': user.get('username', ''),
+                'word': word,
+                'points': user.get('prio_points', 0),
+                'currency_plural': self.currency_plural,
+                **extra,
+            },
+            metadata={'channel': channel, 'event': etype},
+        )
 class BotService:
     def __init__(
         self,
@@ -2028,6 +2222,9 @@ class BotService:
             enabled=enabled,
         )
 
+    # TODO(cleanup): Legacy chat-handler methods below are currently unused by
+    # BotService (runtime uses SongBot handlers). Keep temporarily for
+    # backward compatibility tests and remove in a follow-up refactor.
     async def event_message(self, message):
         if not self.enabled:
             return
@@ -2443,6 +2640,8 @@ class BotService:
         elif etype == 'bits':
             amount = int(meta.get('amount', 0))
             extra['amount'] = amount
+        elif etype == 'vip':
+            delta = int(meta.get('count', 1) or 1)
         elif etype not in ('follow', 'raid'):
             return
         word = (
