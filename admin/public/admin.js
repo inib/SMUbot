@@ -103,7 +103,48 @@ const state = {
       return '';
     }
   })(),
+  channelUiState: {},
 };
+const BOT_MESSAGE_LEVELS = ['mute', 'normal', 'verbose', 'debug'];
+const BOT_MESSAGE_LEVEL_DESCRIPTIONS = {
+  mute: 'Mute — suppress all bot chat messages for this channel.',
+  normal: 'Normal — core command and error responses.',
+  verbose: 'Verbose — Normal plus lifecycle/reward/queue activity updates.',
+  debug: 'Debug — Verbose plus diagnostics intended for troubleshooting.',
+};
+const BOT_MESSAGE_CATALOG_FALLBACK = [
+  { id: 'channel_not_registered', level: 'normal', category: 'commands', description: 'Command target channel is not registered.' },
+  { id: 'request_added', level: 'normal', category: 'commands', description: 'User song request accepted.' },
+  { id: 'random_request_added', level: 'normal', category: 'commands', description: 'Random playlist request accepted.' },
+  { id: 'random_not_found', level: 'normal', category: 'commands', description: 'Random playlist keyword did not match any playlist.' },
+  { id: 'playlist_request_added', level: 'normal', category: 'commands', description: 'Playlist song request accepted.' },
+  { id: 'playlist_not_found', level: 'normal', category: 'commands', description: 'Playlist command referenced a missing playlist.' },
+  { id: 'playlist_song_missing', level: 'normal', category: 'commands', description: 'Playlist command referenced an out-of-range song index.' },
+  { id: 'playlist_usage', level: 'normal', category: 'commands', description: 'Playlist command usage guidance.' },
+  { id: 'prioritize_limit', level: 'normal', category: 'commands', description: 'User reached prioritize limit.' },
+  { id: 'prioritize_no_target', level: 'normal', category: 'commands', description: 'No eligible request to prioritize.' },
+  { id: 'prioritize_success', level: 'normal', category: 'commands', description: 'Request prioritized successfully.' },
+  { id: 'points', level: 'normal', category: 'commands', description: 'Points command response.' },
+  { id: 'remove_no_pending', level: 'normal', category: 'commands', description: 'Remove command found no pending requests.' },
+  { id: 'remove_success', level: 'normal', category: 'commands', description: 'Remove command deleted latest request.' },
+  { id: 'archive_success', level: 'normal', category: 'commands', description: 'Queue archive command succeeded.' },
+  { id: 'archive_denied', level: 'normal', category: 'commands', description: 'Archive command denied due to missing permissions.' },
+  { id: 'failed', level: 'normal', category: 'errors', description: 'Command failed with a user-facing error.' },
+  { id: 'bot_joined', level: 'verbose', category: 'lifecycle', description: 'Bot joined channel chat.' },
+  { id: 'bot_left', level: 'verbose', category: 'lifecycle', description: 'Bot left channel chat.' },
+  { id: 'played_next', level: 'verbose', category: 'queue', description: 'Playback advanced and next prioritized song announced.' },
+  { id: 'played_last', level: 'verbose', category: 'queue', description: 'Playback advanced and no prioritized songs remain.' },
+  { id: 'bump_free', level: 'verbose', category: 'rewards', description: 'Automatic free bump was granted.' },
+  { id: 'award_follow', level: 'verbose', category: 'rewards', description: 'Follow reward points announcement.' },
+  { id: 'award_raid', level: 'verbose', category: 'rewards', description: 'Raid reward points announcement.' },
+  { id: 'award_gift_sub', level: 'verbose', category: 'rewards', description: 'Gifted subscription reward points announcement.' },
+  { id: 'award_bits', level: 'verbose', category: 'rewards', description: 'Bits reward points announcement.' },
+  { id: 'vip_points_awarded', level: 'verbose', category: 'rewards', description: 'VIP reward points announcement.' },
+  { id: 'queue_position_changed', level: 'verbose', category: 'queue', description: 'Queue item moved to a new position.' },
+  { id: 'token_refreshed', level: 'debug', category: 'lifecycle', description: 'Token refresh succeeded.' },
+  { id: 'action_failed_debug', level: 'debug', category: 'errors', description: 'Internal action failure diagnostic.' },
+];
+let botMessageCatalogCache = null;
 const channelListEl = document.getElementById('channel-list');
 const treeEl = document.getElementById('channel-tree');
 const botPanelEl = document.getElementById('bot-panel');
@@ -549,6 +590,175 @@ function renderSettings(container, settings) {
   container.appendChild(grid);
 }
 
+/**
+ * Retrieve bot message catalog metadata for the channel settings panel.
+ * Dependencies: backend optional endpoint `/bot/messages/catalog`; fallback
+ * uses shared catalog entries mirrored from bot/bot_app.py.
+ * Code customers: renderBotMessagesPanel matrix/list UI.
+ * Variables used/origin: `API` for endpoint base and module-level
+ * `botMessageCatalogCache` memoization for repeat calls.
+ */
+async function loadBotMessageCatalog() {
+  if (Array.isArray(botMessageCatalogCache)) {
+    return botMessageCatalogCache;
+  }
+  try {
+    const payload = await fetchJson('/bot/messages/catalog');
+    if (Array.isArray(payload)) {
+      botMessageCatalogCache = payload;
+    } else if (Array.isArray(payload?.items)) {
+      botMessageCatalogCache = payload.items;
+    } else {
+      botMessageCatalogCache = BOT_MESSAGE_CATALOG_FALLBACK;
+    }
+  } catch (err) {
+    botMessageCatalogCache = BOT_MESSAGE_CATALOG_FALLBACK;
+  }
+  return botMessageCatalogCache;
+}
+
+/**
+ * Persist the selected bot message level for a channel.
+ * Dependencies: adminHeaders token helper and channel settings PUT endpoint.
+ * Code customers: level selector in renderBotMessagesPanel.
+ * Variables used/origin: `state.adminToken` from local storage-backed state
+ * and caller-supplied `channelName`/`level`.
+ */
+async function saveChannelBotMessageLevel(channelName, level) {
+  if (!state.adminToken) {
+    throw new Error('Admin token required to update channel settings.');
+  }
+  const response = await fetch(`${API}/channels/${encodeURIComponent(channelName)}/settings`, {
+    method: 'PUT',
+    headers: adminHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ bot_message_level: level }),
+  });
+  if (!response.ok) {
+    throw new Error(`request failed: ${response.status}`);
+  }
+  return response.json();
+}
+
+function messageIncludedInLevel(messageLevel, selectedLevel) {
+  if (selectedLevel === 'mute') return false;
+  return BOT_MESSAGE_LEVELS.indexOf(messageLevel) <= BOT_MESSAGE_LEVELS.indexOf(selectedLevel);
+}
+
+function buildBotLevelBadge(level) {
+  const badge = document.createElement('span');
+  badge.className = `badge bot-level-badge level-${level}`;
+  badge.textContent = level;
+  return badge;
+}
+
+/**
+ * Render the per-channel Bot Messages tab controls and inclusion matrix.
+ * Dependencies: channel settings endpoints and loadBotMessageCatalog metadata.
+ * Code customers: renderChannelTree channel detail tabs.
+ * Variables used/origin: channel login from active channel records and
+ * `state.channelUiState` extension map for future per-message overrides.
+ */
+async function renderBotMessagesPanel(container, channelName, settings) {
+  container.innerHTML = '';
+  const channelKey = (channelName || '').toLowerCase();
+  if (!state.channelUiState[channelKey]) {
+    state.channelUiState[channelKey] = {
+      botMessages: {
+        selectedLevel: 'normal',
+        perMessageOverrides: {},
+      },
+    };
+  }
+  const panelState = state.channelUiState[channelKey].botMessages;
+  panelState.selectedLevel = settings?.bot_message_level || panelState.selectedLevel || 'normal';
+
+  const helper = document.createElement('p');
+  helper.className = 'bot-message-helper';
+  helper.textContent = 'Inheritance: Normal ⊂ Verbose ⊂ Debug. Mute overrides all levels and sends nothing.';
+  container.appendChild(helper);
+
+  const controlWrap = document.createElement('div');
+  controlWrap.className = 'bot-message-controls';
+  const selectorLabel = document.createElement('label');
+  selectorLabel.textContent = 'Bot message level';
+  selectorLabel.setAttribute('for', `bot-message-level-${channelKey}`);
+  const selector = document.createElement('select');
+  selector.id = `bot-message-level-${channelKey}`;
+  selector.className = 'bot-message-select';
+  BOT_MESSAGE_LEVELS.forEach(level => {
+    const option = document.createElement('option');
+    option.value = level;
+    option.textContent = level[0].toUpperCase() + level.slice(1);
+    option.selected = panelState.selectedLevel === level;
+    selector.appendChild(option);
+  });
+  const selectorHelp = document.createElement('div');
+  selectorHelp.className = 'form-hint';
+  selectorHelp.textContent = BOT_MESSAGE_LEVEL_DESCRIPTIONS[panelState.selectedLevel] || '';
+  selector.addEventListener('change', async () => {
+    const nextLevel = selector.value;
+    selector.disabled = true;
+    try {
+      const updated = await saveChannelBotMessageLevel(channelName, nextLevel);
+      panelState.selectedLevel = updated?.bot_message_level || nextLevel;
+      selectorHelp.textContent = BOT_MESSAGE_LEVEL_DESCRIPTIONS[panelState.selectedLevel] || '';
+      await renderBotMessagesPanel(container, channelName, updated);
+    } catch (err) {
+      console.error('failed to update bot message level', channelName, err);
+      selector.value = panelState.selectedLevel;
+      selectorHelp.textContent = err instanceof Error ? err.message : 'Failed to update bot message level.';
+    } finally {
+      selector.disabled = false;
+    }
+  });
+  controlWrap.appendChild(selectorLabel);
+  controlWrap.appendChild(selector);
+  controlWrap.appendChild(selectorHelp);
+  container.appendChild(controlWrap);
+
+  const catalog = await loadBotMessageCatalog();
+  const rows = Array.isArray(catalog) ? catalog.slice() : [];
+  rows.sort((a, b) => String(a.id || '').localeCompare(String(b.id || '')));
+  if (!rows.length) {
+    const empty = document.createElement('div');
+    empty.className = 'empty';
+    empty.textContent = 'Bot message catalog metadata unavailable.';
+    container.appendChild(empty);
+    return;
+  }
+
+  const grid = document.createElement('div');
+  grid.className = 'bot-message-grid';
+  rows.forEach(entry => {
+    const level = BOT_MESSAGE_LEVELS.includes(entry.level) ? entry.level : 'normal';
+    const card = document.createElement('div');
+    card.className = 'bot-message-card';
+    const title = document.createElement('div');
+    title.className = 'bot-message-card-head';
+    const idEl = document.createElement('code');
+    idEl.textContent = entry.id || 'unknown_message';
+    title.appendChild(idEl);
+    title.appendChild(buildBotLevelBadge(level));
+    card.appendChild(title);
+
+    const meta = document.createElement('div');
+    meta.className = 'bot-message-meta';
+    const category = entry.category ? `Category: ${entry.category}` : 'Category: uncategorized';
+    const included = messageIncludedInLevel(level, panelState.selectedLevel);
+    meta.textContent = `${category} • ${included ? 'Included' : 'Excluded'} at current level`;
+    card.appendChild(meta);
+
+    if (entry.description) {
+      const desc = document.createElement('div');
+      desc.className = 'bot-message-desc';
+      desc.textContent = entry.description;
+      card.appendChild(desc);
+    }
+    grid.appendChild(card);
+  });
+  container.appendChild(grid);
+}
+
 function queueItemNode(entry) {
   const { request, song, user } = entry;
   const node = document.createElement('li');
@@ -702,11 +912,53 @@ async function renderChannelTree(channels, oauthMap) {
     summary.appendChild(meta);
     details.appendChild(summary);
 
+    const channelTabs = document.createElement('div');
+    channelTabs.className = 'channel-detail-tabs';
+    const tabButtons = [
+      { id: 'custom-settings', label: 'Custom Settings' },
+      { id: 'bot-messages', label: 'Bot Messages' },
+      { id: 'active-streams', label: 'Active Streams' },
+    ];
+    const panelMap = new Map();
+    tabButtons.forEach((tab, index) => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = `channel-detail-tab${index === 0 ? ' active' : ''}`;
+      button.dataset.channelTab = tab.id;
+      button.textContent = tab.label;
+      channelTabs.appendChild(button);
+    });
+    details.appendChild(channelTabs);
+
     const settingsWrapper = document.createElement('div');
-    const settingsTitle = document.createElement('h3');
-    settingsTitle.textContent = 'Custom Settings';
-    details.appendChild(settingsTitle);
+    settingsWrapper.className = 'channel-detail-panel active';
+    settingsWrapper.dataset.channelPanel = 'custom-settings';
+    panelMap.set('custom-settings', settingsWrapper);
     details.appendChild(settingsWrapper);
+
+    const botMessagesWrapper = document.createElement('div');
+    botMessagesWrapper.className = 'channel-detail-panel';
+    botMessagesWrapper.dataset.channelPanel = 'bot-messages';
+    panelMap.set('bot-messages', botMessagesWrapper);
+    details.appendChild(botMessagesWrapper);
+
+    const streamContainer = document.createElement('div');
+    streamContainer.className = 'channel-detail-panel';
+    streamContainer.dataset.channelPanel = 'active-streams';
+    panelMap.set('active-streams', streamContainer);
+    details.appendChild(streamContainer);
+
+    channelTabs.querySelectorAll('.channel-detail-tab').forEach(button => {
+      button.addEventListener('click', () => {
+        const selected = button.dataset.channelTab;
+        channelTabs.querySelectorAll('.channel-detail-tab').forEach(node => {
+          node.classList.toggle('active', node === button);
+        });
+        panelMap.forEach((panel, panelId) => {
+          panel.classList.toggle('active', panelId === selected);
+        });
+      });
+    });
 
     let settings = null;
     try {
@@ -715,12 +967,7 @@ async function renderChannelTree(channels, oauthMap) {
       console.error('failed to load settings for', ch.channel_name, err);
     }
     renderSettings(settingsWrapper, settings);
-
-    const streamTitle = document.createElement('h3');
-    streamTitle.textContent = 'Active Streams';
-    details.appendChild(streamTitle);
-    const streamContainer = document.createElement('div');
-    details.appendChild(streamContainer);
+    await renderBotMessagesPanel(botMessagesWrapper, ch.channel_name, settings);
 
     let streams = [];
     try {

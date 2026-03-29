@@ -309,6 +309,36 @@ a:hover {
   letter-spacing: 0.04em;
 }
 
+.channel-detail-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.channel-detail-tab {
+  background: #1a1d2a;
+  border: 1px solid #2a2f45;
+  border-radius: 999px;
+  padding: 6px 12px;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.channel-detail-tab.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.channel-detail-panel {
+  display: none;
+}
+
+.channel-detail-panel.active {
+  display: block;
+}
+
 .tree .settings {
   background: #0f121a;
   border-radius: 8px;
@@ -318,6 +348,90 @@ a:hover {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 8px;
+}
+
+.bot-message-helper {
+  margin: 10px 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.bot-message-controls {
+  background: #0f121a;
+  border: 1px solid #24283b;
+  border-radius: 8px;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.bot-message-select {
+  max-width: 240px;
+  border-radius: 8px;
+  border: 1px solid #24283b;
+  background: #151821;
+  color: var(--text);
+  padding: 8px 10px;
+}
+
+.bot-message-grid {
+  margin-top: 10px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 10px;
+}
+
+.bot-message-card {
+  background: #0f121a;
+  border: 1px solid #24283b;
+  border-radius: 8px;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.bot-message-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.bot-message-card-head code {
+  color: #c7d2fe;
+}
+
+.bot-level-badge {
+  text-transform: uppercase;
+  font-size: 11px;
+}
+
+.bot-level-badge.level-mute {
+  border-color: #6b7280;
+  color: #cbd5e1;
+}
+
+.bot-level-badge.level-normal {
+  border-color: var(--ok);
+  color: var(--ok);
+}
+
+.bot-level-badge.level-verbose {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
+.bot-level-badge.level-debug {
+  border-color: var(--accent);
+  color: #c4b5fd;
+}
+
+.bot-message-meta,
+.bot-message-desc {
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .tree .setting {
