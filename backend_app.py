@@ -2489,6 +2489,16 @@ def _resolve_user_from_token(
 
 
 def _auto_register_channel_from_token(user: TwitchUser, data: dict[str, Any], db: Session) -> None:
+    """Auto-create/update channel ownership from a validated user OAuth token.
+
+    Dependencies: Consumes token metadata produced by ``_resolve_user_from_token``
+    and persists ``ActiveChannel``/settings/default playlists via SQLAlchemy.
+    Code customers: Invoked by ``/auth/session`` to complete self-service
+    onboarding for channel owners signing in with Twitch.
+    Used variables/origin: Reads ``data.scopes/login/user_id`` from Twitch
+    validation output and maps those values onto ``ActiveChannel`` ownership.
+    """
+
     scopes = set(data.get("scopes") or [])
     login = data.get("login")
     user_id = data.get("user_id")
@@ -2536,6 +2546,8 @@ def _auto_register_channel_from_token(user: TwitchUser, data: dict[str, Any], db
             owner_id=user.id,
         )
         db.add(channel)
+        db.flush()
+        _create_default_favorites_playlist(db, channel.id)
         db.commit()
         db.refresh(channel)
         get_or_create_settings(db, channel.id)
@@ -2740,6 +2752,8 @@ def auth_callback(
             owner_id=user.id,
         )
         db.add(ch)
+        db.flush()
+        _create_default_favorites_playlist(db, ch.id)
     else:
         ch.owner_id = user.id
         ch.authorized = True
@@ -3714,8 +3728,41 @@ def _aggregate_playlist_items(playlists: Iterable[Playlist]) -> List[PlaylistIte
     return collected
 
 
+FAVORITES_SEED_TRACKS: tuple[dict[str, str], ...] = (
+    {
+        "title": "Night Drive",
+        "artist": "FM-84",
+        "url": "https://www.youtube.com/watch?v=TvZskcqdYcE",
+        "video_id": "TvZskcqdYcE",
+    },
+    {
+        "title": "Strobe",
+        "artist": "deadmau5",
+        "url": "https://www.youtube.com/watch?v=tKi9Z-f6qX4",
+        "video_id": "tKi9Z-f6qX4",
+    },
+    {
+        "title": "Voices",
+        "artist": "LONG DISTANCE CALLING",
+        "url": "https://www.youtube.com/watch?v=uWQQbQ9jqU4",
+        "video_id": "uWQQbQ9jqU4",
+    },
+)
+
+
 def _create_default_favorites_playlist(db: Session, channel_pk: int) -> Playlist:
-    existing = (
+    """Ensure a channel has the seeded Favorites playlist without duplicating tracks.
+
+    Dependencies: Uses ``Playlist``/``PlaylistItem`` ORM models and
+    ``_canonicalize_video_url`` to normalize the configured seed metadata.
+    Code customers: Called during channel onboarding paths (manual creation,
+    OAuth callback registration, and token auto-registration).
+    Used variables/origin: ``channel_pk`` identifies the owning channel;
+    ``FAVORITES_SEED_TRACKS`` defines deterministic seeded title/artist/url/video
+    values that are inserted only when missing.
+    """
+
+    playlist = (
         db.query(Playlist)
         .filter(
             Playlist.channel_id == channel_pk,
@@ -3724,32 +3771,54 @@ def _create_default_favorites_playlist(db: Session, channel_pk: int) -> Playlist
         )
         .one_or_none()
     )
-    if existing:
-        return existing
-    playlist = Playlist(
-        channel_id=channel_pk,
-        title="Favorites",
-        description="Default favorites playlist",
-        source="manual",
-        visibility="public",
-    )
-    db.add(playlist)
-    db.flush()
+    if not playlist:
+        playlist = Playlist(
+            channel_id=channel_pk,
+            title="Favorites",
+            description="Default favorites playlist",
+            source="manual",
+            visibility="public",
+        )
+        db.add(playlist)
+        db.flush()
+
+    existing_keywords = {keyword.keyword for keyword in playlist.keywords}
     for keyword in ("default", "favorite"):
-        playlist.keywords.append(PlaylistKeyword(keyword=keyword))
-    url, video_id = _canonicalize_video_url(
-        "https://www.youtube.com/watch?v=9Pzj6U5c2cs",
-        "9Pzj6U5c2cs",
-    )
-    item = PlaylistItem(
-        playlist_id=playlist.id,
-        title="Default Favorite",
-        artist="Unknown",
-        position=1,
-        video_id=video_id,
-        url=url,
-    )
-    db.add(item)
+        if keyword not in existing_keywords:
+            playlist.keywords.append(PlaylistKeyword(keyword=keyword))
+
+    existing_item_keys: set[str] = set()
+    max_position = 0
+    for item in playlist.items:
+        normalized_url, normalized_video_id = _canonicalize_video_url(item.url, item.video_id)
+        if normalized_url and item.url != normalized_url:
+            item.url = normalized_url
+        if normalized_video_id and item.video_id != normalized_video_id:
+            item.video_id = normalized_video_id
+        key = normalized_video_id or normalized_url
+        if key:
+            existing_item_keys.add(key)
+        max_position = max(max_position, item.position or 0)
+
+    for seed in FAVORITES_SEED_TRACKS:
+        normalized_url, normalized_video_id = _canonicalize_video_url(seed["url"], seed["video_id"])
+        seed_key = normalized_video_id or normalized_url
+        if seed_key and seed_key in existing_item_keys:
+            continue
+        max_position += 1
+        db.add(
+            PlaylistItem(
+                playlist_id=playlist.id,
+                title=seed["title"],
+                artist=seed["artist"],
+                position=max_position,
+                video_id=normalized_video_id,
+                url=normalized_url,
+            )
+        )
+        if seed_key:
+            existing_item_keys.add(seed_key)
+
     db.flush()
     return playlist
 
@@ -4365,6 +4434,16 @@ def get_channel_live_status(db: Session = Depends(get_db)):
 
 @app.post("/channels", response_model=ChannelOut, dependencies=[Depends(require_token)])
 def add_channel(payload: ChannelIn, db: Session = Depends(get_db)):
+    """Create a channel and initialize default bot/settings/favorites resources.
+
+    Dependencies: Persists ``ActiveChannel`` plus helper-created settings/bot
+    state/favorites rows through the shared SQLAlchemy ``Session``.
+    Code customers: Admin bootstrap workflows and tests that provision channels
+    without Twitch OAuth.
+    Used variables/origin: ``payload`` provides persisted channel identifiers and
+    join-state; generated ``channel_key`` secures follow-up API operations.
+    """
+
     ch = ActiveChannel(
         channel_id=payload.channel_id,
         channel_name=payload.channel_name,
@@ -4372,12 +4451,12 @@ def add_channel(payload: ChannelIn, db: Session = Depends(get_db)):
         join_active=payload.join_active,
     )
     db.add(ch)
-    db.commit()
-    db.refresh(ch)
+    db.flush()
     get_or_create_settings(db, ch.id)
     get_or_create_bot_state(db, ch.id)
     _create_default_favorites_playlist(db, ch.id)
     db.commit()
+    db.refresh(ch)
     channel_pk = ch.id
     publish_queue_changed(channel_pk)
     return ch

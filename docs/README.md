@@ -95,6 +95,11 @@ unlocks the API for the bot, queue manager, and public web frontend.
 - Uses a SQLite database stored at `/data/db.sqlite` and defines models for channels, songs, users, stream sessions, and requests.
 - Stores bot OAuth credentials via the `/bot/config` API and exposes an OAuth
   helper flow for authorizing the bot account.
+- Automatically creates a manual `Favorites` playlist for new channels during
+  admin channel creation and OAuth onboarding flows. The playlist is seeded
+  idempotently with three tracks: `Night Drive` (FM-84),
+  `Strobe` (deadmau5), and `LONG DISTANCE CALLING - Voices`
+  (`https://www.youtube.com/watch?v=uWQQbQ9jqU4`).
 - Exposes REST endpoints for managing songs and queue entries, plus SSE streams
   for queue updates and bot log streaming.
 - `run.sh` initializes the database and starts the server with Uvicorn.
