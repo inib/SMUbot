@@ -199,8 +199,17 @@ them via `/me/channels`.
   - `mute|normal|verbose|debug` -> `PUT /channels/{channel}/settings` with
     `{ "bot_message_level": "<level>" }`
 - The Settings tab reuses the same dropdown renderer for
-  `bot_message_level`, so message-level selection behavior stays aligned with
-  the header control.
+  bot controls so behavior stays aligned with the header control while each
+  surface remains independently usable.
+- Settings organization now includes a dedicated **Bot Control** section with
+  two rows:
+  - **Bot connection** (`join/part`) -> `PUT /channels/{channel}?join_active=1|0`
+  - **Bot message level** (`mute|normal|verbose|debug`) ->
+    `PUT /channels/{channel}/settings` with
+    `{ "bot_message_level": "<level>" }`
+- After successful bot-control updates, the Queue Manager syncs header and
+  Settings state via `updateRegButton()` plus a settings refresh so both
+  controls stay consistent without coupling their rendering lifecycles.
 
 ## Queue Manager quick controls strip
 - The Queue tab now includes a compact **quick controls** strip above the queue

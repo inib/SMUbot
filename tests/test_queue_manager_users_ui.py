@@ -70,6 +70,34 @@ class QueueManagerUsersUiTests(unittest.TestCase):
         self.assertIn("{ value: 'verbose'", script)
         self.assertIn("{ value: 'debug'", script)
 
+    def test_settings_bot_control_group_and_virtual_connection_row_exist(self) -> None:
+        """Settings should expose a dedicated Bot Control section with join/part and message-level rows."""
+
+        script = Path("queue_manager/public/queue_manager.js").read_text(encoding="utf-8")
+        self.assertIn("bot: 'Bot Control'", script)
+        self.assertIn("['main', 'bot', 'caps', 'earn', 'followers', 'reset', 'experimental', 'other']", script)
+        self.assertIn("const BOT_CONNECTION_SETTING_KEY = '__bot_connection_state';", script)
+        self.assertIn("type: 'bot-connection'", script)
+        self.assertIn("type: 'bot-message-level'", script)
+        self.assertIn("group: 'bot'", script)
+
+    def test_bot_connection_control_maps_join_part_api_path(self) -> None:
+        """Join/part control should map through channel-status endpoint with join_active query params."""
+
+        script = Path("queue_manager/public/queue_manager.js").read_text(encoding="utf-8")
+        self.assertIn("if (option.action === 'channel-status') {", script)
+        self.assertIn("`${API}/channels/${encodedChannel}?join_active=${option.joinActive}`", script)
+        self.assertIn("type === 'bot-connection' || type === 'bot-message-level'", script)
+        self.assertIn("await applyBotControlSelection(next, { refreshSettingsView: false });", script)
+
+    def test_verbosity_control_remains_mapped_to_bot_message_level_setting(self) -> None:
+        """Verbosity control should still persist via the bot_message_level settings payload."""
+
+        script = Path("queue_manager/public/queue_manager.js").read_text(encoding="utf-8")
+        self.assertIn("body: JSON.stringify({ bot_message_level: option.messageLevel })", script)
+        self.assertIn("bot_message_level: {", script)
+        self.assertIn("type: 'bot-message-level'", script)
+
     def test_disconnected_header_control_uses_placeholder_for_connect_action(self) -> None:
         """Disconnected header state should keep `connect` invokable via a placeholder-first dropdown."""
 
