@@ -1205,6 +1205,11 @@ async function startBotOAuthFlow() {
   }
 }
 
+/**
+ * Process OAuth completion messages from the bot authorization popup.
+ * Dependencies: window.postMessage payload from backend callback HTML and showBotAlert/loadBotConfig UI helpers.
+ * Variables used: API_ORIGIN (trusted origin), botOAuthWindow + botOAuthPending (popup lifecycle), botAuthorizeBtn/currentUser (button state).
+ */
 function handleBotOAuthMessage(event) {
   if (!event || !event.data || event.data.type !== 'bot-oauth-complete') {
     return;
@@ -1212,20 +1217,23 @@ function handleBotOAuthMessage(event) {
   if (API_ORIGIN && event.origin !== API_ORIGIN) {
     return;
   }
+  const payload = event.data || {};
+  const successful = payload.success === true;
   botOAuthPending = false;
-  if (botOAuthWindow && !botOAuthWindow.closed) {
+  if (successful && botOAuthWindow && !botOAuthWindow.closed) {
     try {
       botOAuthWindow.close();
     } catch (_) {
       // ignore errors closing popup
     }
   }
-  botOAuthWindow = null;
+  if (successful) {
+    botOAuthWindow = null;
+  }
   if (botAuthorizeBtn) {
     botAuthorizeBtn.disabled = !currentUser;
   }
-  const payload = event.data || {};
-  if (payload.success) {
+  if (successful) {
     showBotAlert('Bot authorization completed successfully.', 'info');
     loadBotConfig();
   } else {

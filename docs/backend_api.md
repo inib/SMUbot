@@ -66,6 +66,13 @@ This document summarizes the REST endpoints exposed by `backend_app.py`.
 | POST | `/bot/config/oauth` | Start the OAuth authorization flow for the bot account (admin). |
 | GET | `/bot/config/oauth/callback` | Callback used by Twitch to finish the bot OAuth flow. |
 
+### `/bot/config/oauth/callback`
+- **Behavior**
+  - Returns a compact HTML page for popup-based OAuth flows.
+  - Posts `{"type":"bot-oauth-complete","success":<bool>,"error"?:<string>}` to the opener/parent window so the admin panel can render a success or error banner.
+  - Auto-closes the popup only on success; failure responses stay open so the error message remains visible for debugging.
+  - Includes a short CTA in the popup (`"You may close this window."` on failures).
+
 ## Bot Logs
 | Method | Path | Description |
 |--------|------|-------------|
@@ -354,4 +361,3 @@ All payloads only expose queue-facing data:
 - **Authentication**: Requires `X-Admin-Token` or a valid bearer token/session cookie. No additional role check is enforced beyond token validity.
 - **Payload**: `{ "active": <bool>, "error": "<optional last error>" }`.
 - **Behavior**: Ensures a `ChannelBotState` row exists, updates `active` and `last_error`, persists changes, and emits a queue change notification.
-
