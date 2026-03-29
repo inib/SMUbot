@@ -26,6 +26,19 @@ Additional directories include:
   ID for future customization workflows (editing controls intentionally hidden
   for now).
 
+### Bot message catalog auth checklist (manual UI verification)
+- [ ] **Admin token only works**: clear browser cookies, enter a valid admin
+  token in the setup panel, and open a channel’s **Bot Messages** tab. Confirm
+  the catalog matrix loads from `/bot/messages/catalog`.
+- [ ] **Session-cookie only works**: remove any stored admin token from the
+  setup panel, sign in via the Admin Twitch login flow so an admin session
+  cookie exists, and re-open **Bot Messages**. Confirm the catalog matrix still
+  loads.
+- [ ] **Missing auth shows explicit guidance**: clear both admin token and
+  session cookie, then open **Bot Messages**. Confirm the panel shows a
+  user-facing authentication guidance message that explains admin token/session
+  is missing and how to recover.
+
 ## Deployment setup flow
 When the stack starts for the first time, the backend remains locked until an
 administrator opens the Admin panel and saves the Twitch application
