@@ -631,6 +631,7 @@ function formatScopeWarning(key) {
 
 const SETTING_GROUP_LABELS = {
   main: 'Main Queue Controls',
+  bot: 'Bot Control',
   caps: 'Queue Caps',
   earn: 'Earn points',
   followers: 'Followers/Raids',
@@ -639,7 +640,9 @@ const SETTING_GROUP_LABELS = {
   other: 'Other settings',
 };
 
-const SETTING_GROUP_ORDER = ['main', 'caps', 'earn', 'followers', 'reset', 'experimental', 'other'];
+const SETTING_GROUP_ORDER = ['main', 'bot', 'caps', 'earn', 'followers', 'reset', 'experimental', 'other'];
+
+const BOT_CONNECTION_SETTING_KEY = '__bot_connection_state';
 
 const SETTINGS_CONFIG = {
   queue_closed: {
@@ -819,10 +822,17 @@ const SETTINGS_CONFIG = {
     group: 'main',
   },
   bot_message_level: {
-    type: 'select',
+    type: 'bot-message-level',
     label: 'Bot message level',
     description: 'Choose chat output verbosity. Uses the same dropdown behavior as the header bot control.',
-    group: 'main',
+    group: 'bot',
+  },
+  [BOT_CONNECTION_SETTING_KEY]: {
+    type: 'bot-connection',
+    label: 'Bot connection',
+    description: 'Connect or disconnect the chat bot for this channel using the same join/part flow as the header control.',
+    group: 'bot',
+    virtual: true,
   },
   other_flags: {
     type: 'text',
@@ -871,7 +881,7 @@ function getBotControlOptions(channelInfo, { includeConnectionActions = true, in
  * Code customers: header dropdown and settings-level selector save handlers.
  * Used variables/origin: maps `connect`/`disconnect` to `PUT /channels/{channel}?join_active=...` and levels to `PUT /channels/{channel}/settings`.
  */
-async function applyBotControlSelection(selectionValue) {
+async function applyBotControlSelection(selectionValue, { refreshSettingsView = true } = {}) {
   if (!channelName) { return false; }
   const option = BOT_CONTROL_OPTION_MODEL.find(entry => entry.value === selectionValue);
   if (!option) { return false; }
@@ -897,7 +907,7 @@ async function applyBotControlSelection(selectionValue) {
       }
     }
     await updateRegButton();
-    if (option.action === 'message-level') {
+    if (refreshSettingsView) {
       await fetchSettings();
     }
     return true;
@@ -3013,6 +3023,14 @@ function normaliseSettingOrder(data) {
     grouped.other.push(...extras);
   }
 
+  Object.entries(SETTINGS_CONFIG).forEach(([key, meta]) => {
+    if (!meta?.virtual) { return; }
+    const groupId = SETTING_GROUP_ORDER.includes(meta.group) ? meta.group : 'other';
+    if (!grouped[groupId].includes(key)) {
+      grouped[groupId].push(key);
+    }
+  });
+
   return grouped;
 }
 
@@ -3143,38 +3161,57 @@ function createBotControlDropdown({
   return select;
 }
 
+/**
+ * Build a settings-row bot control backed by the shared dropdown model.
+ * Dependencies: uses createBotControlDropdown() and applyBotControlSelection() to keep API behavior aligned with the header control.
+ * Code customers: createSettingControl() for `bot-connection` and `bot-message-level` row types.
+ * Used variables/origin: derives join/message state from `getChannelInfo(channelName)` and uses setting/default values from row payload.
+ */
+function createBotSettingControl({ controlType, value, meta }) {
+  const wrapper = document.createElement('div');
+  wrapper.className = 'setting-select';
+  const channelInfo = getChannelInfo(channelName);
+  const isConnectionControl = controlType === 'bot-connection';
+  let currentSelection = isConnectionControl
+    ? (channelInfo?.join_active ? 'disconnect' : 'connect')
+    : (typeof value === 'string' ? value : 'normal');
+
+  const select = createBotControlDropdown({
+    channelInfo,
+    currentValue: currentSelection,
+    includeConnectionActions: isConnectionControl,
+    includeMessageLevels: !isConnectionControl,
+    placeholderLabel: '',
+    disabled: !!meta.disabled,
+    onSelection: async (_event, element) => {
+      const next = element.value;
+      if (next === currentSelection) {
+        return;
+      }
+      wrapper.classList.add('loading');
+      element.disabled = true;
+      const ok = await applyBotControlSelection(next, { refreshSettingsView: false });
+      if (ok) {
+        currentSelection = isConnectionControl
+          ? (next === 'connect' ? 'disconnect' : 'connect')
+          : next;
+        element.value = currentSelection;
+        await fetchSettings();
+      } else {
+        element.value = currentSelection;
+      }
+      element.disabled = !!meta.disabled;
+      wrapper.classList.remove('loading');
+    },
+  });
+  wrapper.appendChild(select);
+  return wrapper;
+}
+
 function createSettingControl(key, value, meta) {
   const type = meta.type || (typeof value === 'number' ? 'number' : 'text');
-  if (key === 'bot_message_level') {
-    const wrapper = document.createElement('div');
-    wrapper.className = 'setting-select';
-    const channelInfo = getChannelInfo(channelName);
-    let currentSelection = typeof value === 'string' ? value : 'normal';
-    const select = createBotControlDropdown({
-      channelInfo,
-      currentValue: currentSelection,
-      includeConnectionActions: false,
-      includeMessageLevels: true,
-      disabled: !!meta.disabled,
-      onSelection: async (_event, element) => {
-        const next = element.value;
-        if (next === currentSelection) {
-          return;
-        }
-        wrapper.classList.add('loading');
-        element.disabled = true;
-        const ok = await applyBotControlSelection(next);
-        if (ok) {
-          currentSelection = next;
-        } else {
-          element.value = currentSelection;
-        }
-        element.disabled = !!meta.disabled;
-        wrapper.classList.remove('loading');
-      },
-    });
-    wrapper.appendChild(select);
-    return wrapper;
+  if (type === 'bot-connection' || type === 'bot-message-level') {
+    return createBotSettingControl({ controlType: type, value, meta });
   }
 
   if (type === 'boolean') {
