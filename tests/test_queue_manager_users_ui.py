@@ -80,6 +80,18 @@ class QueueManagerUsersUiTests(unittest.TestCase):
         self.assertIn("if (!element.value) {", script)
         self.assertIn("if (!selectedValue && !hasPlaceholder && options[0]?.value)", script)
 
+    def test_quick_controls_responsive_wrap_hooks_exist(self) -> None:
+        """Quick-controls should wrap by default and stay width-constrained across tabs."""
+
+        css = Path("queue_manager/public/style.css").read_text(encoding="utf-8")
+
+        self.assertIn('.queue-layout{display:flex;flex-direction:column;gap:24px;min-width:0}', css)
+        self.assertIn('.queue-column{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:12px}', css)
+        self.assertIn('.quick-controls{display:flex;align-items:center;gap:6px;flex-wrap:wrap;overflow-x:visible;max-width:100%;min-width:0;', css)
+        self.assertIn('.quick-controls>*{min-width:0}', css)
+        self.assertIn('@media (min-width: 1200px){', css)
+        self.assertIn('.quick-controls{flex-wrap:nowrap;overflow-x:auto;max-width:100%}', css)
+
     def test_quick_controls_container_and_setting_keys_exist(self) -> None:
         """Queue tab should expose quick controls wired to key queue setting toggles."""
 

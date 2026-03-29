@@ -213,6 +213,9 @@ them via `/me/channels`.
 - Scope-gated setting behavior is shared with the main settings renderer, so a
   quick-control toggle is disabled and carries the same warning text whenever a
   required Twitch scope is missing.
+- The strip now wraps by default to preserve queue card width parity with the
+  Playlists, Users, and Settings tabs, and only enables horizontal scrolling at
+  explicit wide breakpoints with a `max-width: 100%` guard.
 
 ## Development Tips
 - Install Python dependencies from `requirements.txt` for local development.
