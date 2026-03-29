@@ -18,3 +18,7 @@ award_follow: "Thx for following {username}, take {word} - you have now {points}
 award_raid: "Thx for raiding {username}, take {word} - you have now {points} {currency_plural}"
 award_gift_sub: "Thx for gifting {count} subs {username}, take {word} - you have now {points} {currency_plural}"
 award_bits: "Thx for cheering {amount} bits {username}, take {word} - you have now {points} {currency_plural}"
+vip_points_awarded: "Thx for becoming a VIP {username}, take {word} - you have now {points} {currency_plural}"
+queue_position_changed: "Request #{request_id} moved from #{old_position} to #{new_position}"
+token_refreshed: "Bot token refreshed successfully."
+action_failed_debug: "Debug failure in {action}: {error}"
