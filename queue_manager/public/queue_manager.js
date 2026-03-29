@@ -2207,6 +2207,7 @@ document.addEventListener('keydown', evt => {
 
 document.addEventListener('DOMContentLoaded', () => {
   initPlaylistPickerElements();
+  renderUsersLegend();
 });
 
 function formatTier(tier) {
@@ -2506,6 +2507,86 @@ function updateUsersPaginationControls() {
   }
 }
 
+const USER_BADGE_DEFINITIONS = Object.freeze([
+  {
+    role: 'mod',
+    legendLabel: 'Moderator',
+    legendSymbol: 'M',
+    ariaLabel: 'Moderator',
+    matches: user => user?.is_mod === true,
+    resolveLabel: () => 'M',
+  },
+  {
+    role: 'vip',
+    legendLabel: 'VIP',
+    legendSymbol: 'V',
+    ariaLabel: 'VIP',
+    matches: user => user?.is_vip === true,
+    resolveLabel: () => 'V',
+  },
+  {
+    role: 'sub',
+    legendLabel: 'Subscriber',
+    legendSymbol: '1',
+    ariaLabel: 'Subscriber',
+    matches: user => user?.is_subscriber === true,
+    resolveLabel: user => {
+      const tier = typeof user?.subscriber_tier === 'string' ? user.subscriber_tier : '';
+      const parsed = parseInt(tier, 10);
+      if (!Number.isNaN(parsed) && parsed >= 1000) {
+        return `${Math.floor(parsed / 1000)}`;
+      }
+      return tier?.slice(0, 1) || 'S';
+    },
+  },
+  {
+    role: 'viewer',
+    legendLabel: 'Viewer',
+    legendSymbol: '•',
+    ariaLabel: 'Viewer',
+    matches: () => true,
+    resolveLabel: () => '•',
+  },
+]);
+
+/**
+ * Render the compact badge legend row shown above the users list.
+ * Dependencies: uses `USER_BADGE_DEFINITIONS` to stay aligned with badge
+ * rendering and expects `#users-legend` to exist in index.html.
+ * Code customers: users tab bootstrap and regression tests verifying legend
+ * hooks. Used variables/origin: legend labels/symbols come from the shared
+ * badge definition map.
+ */
+function renderUsersLegend() {
+  const legend = qs('users-legend');
+  if (!legend) { return; }
+  legend.innerHTML = '';
+  USER_BADGE_DEFINITIONS.forEach(definition => {
+    const item = document.createElement('div');
+    item.className = 'users-legend-item';
+    item.setAttribute('role', 'listitem');
+
+    const badge = document.createElement('span');
+    badge.className = `user-role-badge user-role-${definition.role}`;
+    badge.textContent = definition.legendSymbol;
+    badge.setAttribute('role', 'img');
+    badge.setAttribute('aria-label', `${definition.legendLabel} badge`);
+    badge.title = `${definition.legendLabel} badge`;
+
+    const text = document.createElement('span');
+    text.className = 'users-legend-text';
+    if (definition.role === 'sub') {
+      text.textContent = `${definition.legendLabel} (tier)`;
+    } else {
+      text.textContent = definition.legendLabel;
+    }
+
+    item.appendChild(badge);
+    item.appendChild(text);
+    legend.appendChild(item);
+  });
+}
+
 /**
  * Determine the highest-priority badge to display for a user.
  * Dependencies: consumes role hints (`is_mod`, `is_vip`, `is_subscriber`,
@@ -2515,29 +2596,12 @@ function updateUsersPaginationControls() {
  * tier parsing helper for subscriber labels.
  */
 function resolveUserBadge(user) {
-  const badge = { role: 'viewer', label: '•' };
-  if (user?.is_mod) {
-    badge.role = 'mod';
-    badge.label = 'M';
-    return badge;
-  }
-  if (user?.is_vip) {
-    badge.role = 'vip';
-    badge.label = 'V';
-    return badge;
-  }
-  if (user?.is_subscriber) {
-    badge.role = 'sub';
-    const tier = typeof user.subscriber_tier === 'string' ? user.subscriber_tier : '';
-    const parsed = parseInt(tier, 10);
-    if (!Number.isNaN(parsed) && parsed >= 1000) {
-      badge.label = `${Math.floor(parsed / 1000)}`;
-    } else {
-      badge.label = tier?.slice(0, 1) || 'S';
-    }
-    return badge;
-  }
-  return badge;
+  const match = USER_BADGE_DEFINITIONS.find(definition => definition.matches(user)) || USER_BADGE_DEFINITIONS[USER_BADGE_DEFINITIONS.length - 1];
+  return {
+    role: match.role,
+    label: match.resolveLabel(user),
+    ariaLabel: `${match.ariaLabel} badge`,
+  };
 }
 
 /**
@@ -2551,7 +2615,9 @@ function renderUserBadge(user) {
   const el = document.createElement('span');
   el.className = `user-role-badge user-role-${badge.role}`;
   el.textContent = badge.label;
-  el.setAttribute('aria-hidden', 'true');
+  el.setAttribute('role', 'img');
+  el.setAttribute('aria-label', badge.ariaLabel);
+  el.title = badge.ariaLabel;
   return el;
 }
 

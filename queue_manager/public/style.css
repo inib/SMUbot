@@ -45,6 +45,10 @@ a:hover{text-decoration:underline}
 .users-pagination button{padding:.35rem .7rem;border-radius:8px;border:1px solid #24283b;background:#1a1d29;color:var(--text);cursor:pointer;font-size:12px;font-weight:600}
 .users-pagination button:hover{background:#24283b}
 .users-pagination .muted{min-width:90px;text-align:center}
+.users-legend{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 10px 0;padding:6px 8px;border-radius:8px;border:1px solid #24283b;background:#0f1117;align-items:center}
+.users-legend-item{display:inline-flex;align-items:center;gap:6px;padding:2px 6px;border-radius:999px;border:1px solid #24283b;background:#121423;min-height:22px}
+.users-legend-item .user-role-badge{width:16px;height:16px;font-size:10px;border-radius:4px}
+.users-legend-text{font-size:11px;color:var(--muted);line-height:1}
 .users-list{display:flex;flex-direction:column;gap:10px}
 .user-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:center;padding:10px 12px;border-radius:10px;border:1px solid #24283b;background:#121423}
 .user-row:hover{border-color:var(--accent)}
