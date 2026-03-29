@@ -21,15 +21,19 @@ class QueueManagerUsersUiTests(unittest.TestCase):
         self.assertIn('const USER_PAGE_SIZE = 25;', script)
 
     def test_users_layout_and_badge_hooks(self) -> None:
-        """Layout and badge CSS hooks should exist for regression coverage."""
+        """Layout, badge hooks, and users legend wiring should stay in place."""
 
         html = Path("queue_manager/public/index.html").read_text(encoding="utf-8")
         script = Path("queue_manager/public/queue_manager.js").read_text(encoding="utf-8")
         css = Path("queue_manager/public/style.css").read_text(encoding="utf-8")
 
         self.assertIn('class="users-list"', html)
+        self.assertIn('id="users-legend"', html)
         self.assertIn('resolveUserBadge', script)
+        self.assertIn('USER_BADGE_DEFINITIONS', script)
+        self.assertIn('renderUsersLegend', script)
         self.assertIn('.user-role-badge', css)
+        self.assertIn('.users-legend', css)
 
     def test_header_bot_dropdown_hook_exists(self) -> None:
         """Queue Manager header should expose the shared bot-control dropdown mount."""

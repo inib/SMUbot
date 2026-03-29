@@ -161,6 +161,8 @@ them via `/me/channels`.
 - A square role badge precedes each name with priority Mod > VIP > Subscriber >
   Viewer; subscribers show their tier number inside the badge while viewers get
   a neutral grey marker.
+- A compact legend row appears above the user list (`M`, `V`, subscriber tier,
+  and `•`) so managers and screen readers can decode each symbol quickly.
 - Metadata is presented in bracketed chips (for example `[behind: 3]` and
   `[prio: 2]`) to keep “amount behind” context aligned across rows.
 - Each row includes a **Delete** action so managers can remove malformed or
