@@ -70,6 +70,16 @@ class QueueManagerUsersUiTests(unittest.TestCase):
         self.assertIn("{ value: 'verbose'", script)
         self.assertIn("{ value: 'debug'", script)
 
+    def test_disconnected_header_control_uses_placeholder_for_connect_action(self) -> None:
+        """Disconnected header state should keep `connect` invokable via a placeholder-first dropdown."""
+
+        script = Path("queue_manager/public/queue_manager.js").read_text(encoding="utf-8")
+        self.assertIn("placeholderLabel: 'Select action…'", script)
+        self.assertIn("placeholderOption.value = '';", script)
+        self.assertIn("placeholderOption.disabled = true;", script)
+        self.assertIn("if (!element.value) {", script)
+        self.assertIn("if (!selectedValue && !hasPlaceholder && options[0]?.value)", script)
+
     def test_quick_controls_container_and_setting_keys_exist(self) -> None:
         """Queue tab should expose quick controls wired to key queue setting toggles."""
 
