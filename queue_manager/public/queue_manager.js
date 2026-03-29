@@ -203,6 +203,7 @@ const queueToggleBtn = qs('queue-toggle');
 const queueContent = qs('queue-content');
 const previewToggleBtn = qs('preview-toggle');
 const previewContent = qs('preview-content');
+const quickControlsContainer = qs('quick-controls');
 
 const eventFeedEl = qs('event-feed');
 const eventStatusEl = qs('event-status');
@@ -832,6 +833,8 @@ const SETTINGS_CONFIG = {
     group: 'experimental',
   },
 };
+
+const QUICK_CONTROL_KEYS = ['queue_closed', 'prio_only', 'allow_bumps', 'full_auto_priority_mode'];
 
 const BOT_CONTROL_OPTION_MODEL = [
   { value: 'connect', label: 'Connect bot to chat', action: 'channel-status', joinActive: 1, requiresConnection: false },
@@ -2858,7 +2861,136 @@ function wireUsersControls() {
   }
 }
 
+/**
+ * Fetch raw channel settings for the active channel from the backend.
+ * Dependencies: requires `channelName` and API origin, and calls `/channels/{channel}/settings`.
+ * Code customers: settings tab renderer and quick-controls sync layer.
+ * Used variables/origin: reads global `channelName` set by selectChannel() and returns backend JSON payload.
+ */
+async function fetchChannelSettings() {
+  if (!channelName) { return null; }
+  const encoded = encodeURIComponent(channelName);
+  const resp = await fetch(`${API}/channels/${encoded}/settings`, { credentials: 'include' });
+  if (!resp.ok) { return null; }
+  return resp.json();
+}
+
 // ===== Settings view =====
+/**
+ * Determine whether a setting should be disabled due to missing Twitch scopes.
+ * Dependencies: mirrors existing scope-gating logic via getMissingScopesForSetting() and formatScopeWarning().
+ * Code customers: settings tab rows and queue quick-controls strip so both surfaces behave the same.
+ * Used variables/origin: derives missing scopes from channelScopeInfo data loaded by loadChannelScopes().
+ */
+function resolveScopeGateMeta(key, baseMeta = {}) {
+  const meta = { ...baseMeta };
+  const missingScopes = getMissingScopesForSetting(key);
+  if (!missingScopes.length) {
+    return meta;
+  }
+  meta.disabled = true;
+  meta.missingScopes = missingScopes;
+  const scopeMessage = formatScopeWarning(key);
+  if (scopeMessage) {
+    meta.scopeHint = scopeMessage;
+    if (!meta.disabledReason) {
+      meta.disabledReason = scopeMessage;
+    }
+  }
+  return meta;
+}
+
+/**
+ * Build the compact quick-controls strip displayed above the queue layout.
+ * Dependencies: uses SETTINGS_CONFIG labels, scope-gating helpers, and updateSetting() to persist toggles.
+ * Code customers: renderQuickControls() when queue tab loads and after setting updates.
+ * Used variables/origin: reads current values from `values` (fetched `/settings` payload) and writes through updateSetting().
+ */
+function buildQuickControls(values) {
+  if (!quickControlsContainer) { return; }
+  quickControlsContainer.innerHTML = '';
+  quickControlsContainer.classList.remove('disabled');
+
+  if (!channelName || !values) {
+    const hint = document.createElement('p');
+    hint.className = 'quick-controls-hint muted';
+    hint.textContent = 'Select a channel to use quick queue controls.';
+    quickControlsContainer.appendChild(hint);
+    quickControlsContainer.classList.add('disabled');
+    return;
+  }
+
+  const fragment = document.createDocumentFragment();
+  QUICK_CONTROL_KEYS.forEach(key => {
+    const baseMeta = SETTINGS_CONFIG[key] || { label: key, onLabel: 'On', offLabel: 'Off' };
+    const meta = resolveScopeGateMeta(key, baseMeta);
+    const item = document.createElement('label');
+    item.className = 'quick-control-item';
+    item.dataset.key = key;
+
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.checked = !!Number(values[key]);
+    input.disabled = !!meta.disabled;
+
+    const labelText = document.createElement('span');
+    labelText.className = 'quick-control-label';
+    labelText.textContent = meta.label || key;
+
+    const stateText = document.createElement('span');
+    stateText.className = 'quick-control-state muted';
+    const onLabel = meta.onLabel || 'On';
+    const offLabel = meta.offLabel || 'Off';
+    const refreshState = () => {
+      stateText.textContent = input.checked ? onLabel : offLabel;
+    };
+    refreshState();
+
+    if (meta.disabledReason) {
+      item.title = meta.disabledReason;
+    }
+    if (meta.scopeHint) {
+      const scopeNote = document.createElement('span');
+      scopeNote.className = 'quick-control-warning muted';
+      scopeNote.textContent = meta.scopeHint;
+      item.appendChild(scopeNote);
+    }
+
+    if (!meta.disabled) {
+      input.addEventListener('change', async () => {
+        const next = input.checked ? 1 : 0;
+        input.disabled = true;
+        const ok = await updateSetting(key, next);
+        if (!ok) {
+          input.checked = !input.checked;
+          refreshState();
+          input.disabled = false;
+          return;
+        }
+      });
+    }
+
+    item.appendChild(input);
+    item.appendChild(labelText);
+    item.appendChild(stateText);
+    fragment.appendChild(item);
+  });
+
+  quickControlsContainer.appendChild(fragment);
+}
+
+/**
+ * Refresh quick-controls with latest backend values without re-rendering settings tab.
+ * Dependencies: uses fetchChannelSettings() and buildQuickControls().
+ * Code customers: queue tab updates, channel selection bootstrap, and updateSetting() success path.
+ * Used variables/origin: stores payload in `quickControlValues` cache for UI refreshes.
+ */
+async function refreshQuickControls() {
+  if (!quickControlsContainer) { return; }
+  const data = await fetchChannelSettings();
+  buildQuickControls(data);
+}
+
 /**
  * Bucket settings into ordered groups to drive section headings in the UI.
  * Dependencies: consumes SETTING_GROUP_ORDER, SETTING_GROUP_LABELS, and SETTINGS_CONFIG for metadata.
@@ -2907,19 +3039,8 @@ function buildSettingGroupSection(groupId, keys, data) {
 
   keys.forEach(key => {
     if (key === 'channel_id') { return; }
-    const meta = { ...(SETTINGS_CONFIG[key] || { type: typeof data[key] === 'number' ? 'number' : 'text', label: key }) };
-    const missingScopes = getMissingScopesForSetting(key);
-    if (missingScopes.length) {
-      meta.disabled = true;
-      meta.missingScopes = missingScopes;
-      const scopeMessage = formatScopeWarning(key);
-      if (scopeMessage) {
-        meta.scopeHint = scopeMessage;
-        if (!meta.disabledReason) {
-          meta.disabledReason = scopeMessage;
-        }
-      }
-    }
+    const baseMeta = SETTINGS_CONFIG[key] || { type: typeof data[key] === 'number' ? 'number' : 'text', label: key };
+    const meta = resolveScopeGateMeta(key, baseMeta);
     const row = buildSettingRow(key, data[key], meta);
     if (row) {
       body.appendChild(row);
@@ -3302,9 +3423,9 @@ function createSettingControl(key, value, meta) {
  */
 async function fetchSettings() {
   if (!channelName) { return; }
-  const resp = await fetch(`${API}/channels/${channelName}/settings`, { credentials: 'include' });
-  if (!resp.ok) { return; }
-  const data = await resp.json();
+  const data = await fetchChannelSettings();
+  if (!data) { return; }
+  buildQuickControls(data);
   const container = qs('settings');
   if (!container) { return; }
   container.innerHTML = '';
@@ -3354,6 +3475,7 @@ async function updateSetting(key, value) {
       const text = await resp.text();
       throw new Error(text || `Request failed with status ${resp.status}`);
     }
+    await refreshQuickControls();
     return true;
   } catch (e) {
     console.error('Failed to update setting', key, e);
@@ -3976,6 +4098,7 @@ async function loadChannelScopes() {
 
 function selectChannel(ch) {
   channelName = ch;
+  buildQuickControls(null);
   qs('ch-badge').textContent = `channel: ${channelName}`;
   updateBotStatusBadge(getChannelInfo(channelName));
   updateLoginStatus();

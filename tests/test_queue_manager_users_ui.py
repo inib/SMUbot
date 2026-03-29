@@ -53,6 +53,15 @@ class QueueManagerUsersUiTests(unittest.TestCase):
         self.assertIn("{ value: 'verbose'", script)
         self.assertIn("{ value: 'debug'", script)
 
+    def test_quick_controls_container_and_setting_keys_exist(self) -> None:
+        """Queue tab should expose quick controls wired to key queue setting toggles."""
+
+        html = Path("queue_manager/public/index.html").read_text(encoding="utf-8")
+        script = Path("queue_manager/public/queue_manager.js").read_text(encoding="utf-8")
+
+        self.assertIn('id="quick-controls"', html)
+        self.assertIn("const QUICK_CONTROL_KEYS = ['queue_closed', 'prio_only', 'allow_bumps', 'full_auto_priority_mode'];", script)
+
 
 if __name__ == "__main__":
     unittest.main()

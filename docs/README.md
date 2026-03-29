@@ -186,6 +186,18 @@ them via `/me/channels`.
   `bot_message_level`, so message-level selection behavior stays aligned with
   the header control.
 
+## Queue Manager quick controls strip
+- The Queue tab now includes a compact **quick controls** strip above the queue
+  layout for the four highest-touch toggles:
+  `queue_closed`, `prio_only`, `allow_bumps`, and `full_auto_priority_mode`.
+- The strip loads values from `GET /channels/{channel}/settings`, writes
+  changes with the same `PUT /channels/{channel}/settings` flow used in the
+  Settings tab, and auto-refreshes after any successful setting change from
+  either surface.
+- Scope-gated setting behavior is shared with the main settings renderer, so a
+  quick-control toggle is disabled and carries the same warning text whenever a
+  required Twitch scope is missing.
+
 ## Development Tips
 - Install Python dependencies from `requirements.txt` for local development.
 - Run the backend directly:
