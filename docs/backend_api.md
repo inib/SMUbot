@@ -334,7 +334,7 @@ Example calls (keywords and numeric IDs are interchangeable):
 ## Events
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/twitch/eventsub/callback` | Twitch EventSub webhook used for follows, raids, cheers, and subscriptions (signature verified). |
+| POST | `/twitch/eventsub/callback` | Twitch EventSub webhook used for follows, raids, cheers, subscriptions, and `channel.chat.message` ingress (signature verified + message dedupe). |
 | POST | `/channels/{channel}/events` | Log a channel event such as follows, subscriptions, or bits (channel key or admin). |
 | GET | `/channels/{channel}/events` | Retrieve logged events with optional filtering by type and time. |
 | GET | `/channels/{channel}/eventsub/health` | Inspect persisted and remote EventSub subscription status (admin/OAuth), including conduit/shard assignment coverage. |
@@ -358,6 +358,43 @@ Certain events award priority points and are fed by EventSub subscriptions creat
   - `twitch_conduits`, `twitch_conduit_shards`
   - `event_subscriptions` with `transport="conduit"` for `channel.chat.message`.
 - `GET /channels/{channel}/eventsub/health?reconcile=true` runs reconciliation on-demand and reports any reconciliation errors alongside local/remote state snapshots.
+
+### EventSub callback contract (operations)
+
+- **Public reachability is required**: Twitch must be able to reach `POST /twitch/eventsub/callback` from the public internet over HTTPS. Private-only callback URLs (localhost/private VPC hostnames) will fail verification and delivery.
+- **Required headers**:
+  - `Twitch-Eventsub-Message-Id`
+  - `Twitch-Eventsub-Message-Timestamp`
+  - `Twitch-Eventsub-Message-Signature`
+  - `Twitch-Eventsub-Message-Type`
+- **Signature verification**:
+  - The backend computes `HMAC_SHA256(secret, message_id + timestamp + raw_body)` and rejects mismatches with `403`.
+  - The `secret` is taken from the stored `event_subscriptions.secret` value for the incoming subscription id.
+- **Idempotency / retries**:
+  - `notification` deliveries are inserted into `eventsub_message_dedupe` keyed by `message_id` before processing.
+  - Duplicate retries are acknowledged with success and skipped to prevent duplicate command/event execution.
+- **Notification routing**:
+  - Reward events (`follow`, `raid`, `bits`, `sub`, `gift_sub`) continue through existing event persistence/reward logic.
+  - `channel.chat.message` notifications route to the dedicated webhook chat ingress handler, which emits structured comparison logs for webhook vs websocket parsing/execution state.
+- **Ingress authority behavior**:
+  - `chat_ingress_mode=websocket` keeps websocket authoritative.
+  - `chat_ingress_mode=webhook_conduit` makes webhook authoritative for chat ingress.
+  - `chat_ingress_shadow_mode=true` forces webhook into non-authoritative shadow execution (parse/observe + structured comparison logs) while websocket remains authoritative.
+
+### EventSub callback runbook
+
+1. Ensure DNS + TLS expose the backend origin publicly and the callback route is reachable from Twitch.
+2. Validate stored callback URL and subscription secrets via admin APIs/DB before rotating Twitch subscriptions.
+3. Keep webhook secrets out of logs and source control; rotate by recreating or patching subscriptions and updating `event_subscriptions.secret`.
+4. Monitor callback logs for:
+   - signature failures,
+   - unknown subscription IDs,
+   - dedupe hits (retry storms),
+   - webhook/websocket comparison deltas while shadow mode is enabled.
+5. During cutover:
+   - enable `chat_ingress_shadow_mode=true` first and confirm comparison logs are stable,
+   - switch `chat_ingress_mode=webhook_conduit`,
+   - disable shadow mode after validating authoritative webhook behavior.
 
 ### Channel event stream
 

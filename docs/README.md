@@ -85,6 +85,21 @@ unlocks the API for the bot, queue manager, and public web frontend.
   - `GET /system/health` reports global conduit assignment coverage.
   - `GET /channels/{channel}/eventsub/health` reports per-channel shard
     assignment state and can trigger reconcile with `?reconcile=true`.
+- EventSub callback operations contract:
+  - `/twitch/eventsub/callback` must be publicly reachable via HTTPS from
+    Twitch (no private-only callback hostnames).
+  - Signatures are validated against the persisted per-subscription secret
+    before processing.
+  - `notification` retries are deduplicated via `eventsub_message_dedupe` to
+    avoid replaying queue commands/reward logic.
+  - `channel.chat.message` webhook notifications now route through a dedicated
+    chat ingress handler that emits structured websocket-vs-webhook comparison
+    logs for rollout verification.
+- Shadow mode behavior:
+  - With `chat_ingress_shadow_mode=true`, webhook chat ingress runs in
+    non-authoritative observe/compare mode while websocket remains authoritative.
+  - With `chat_ingress_mode=webhook_conduit` and shadow mode disabled, webhook
+    ingress is authoritative.
 
 ## Running with Docker
 1. Copy `example.env` to `stack.env` and adjust values such as `ADMIN_TOKEN`,
@@ -279,6 +294,10 @@ them via `/me/channels`.
   logic for staggered deploys.
 - Marked ingress shadow mode as a rollout guard; if rollout strategy changes
   permanently, review for future cleanup.
+- Added EventSub callback routing for `channel.chat.message` notifications plus
+  structured websocket-vs-webhook ingress comparison logs.
+- Added callback retry dedupe guard enforcement in callback processing to avoid
+  duplicate command/event execution on Twitch notification retries.
 
 ### 2026-03-29
 - Removed duplicate channel-settings bootstrap technical debt by retiring
