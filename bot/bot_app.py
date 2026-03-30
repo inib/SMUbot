@@ -10,6 +10,18 @@ import aiohttp
 from twitchio import eventsub, HTTPException
 from twitchio.ext import commands
 from twitchio.payloads import TokenRefreshedPayload
+from .chat_command_core import (
+    ChatCommandContext,
+    NormalizedChatInput,
+    dispatch_chat_command,
+    execute_playlist_request,
+    execute_points,
+    execute_prioritize,
+    execute_random_request,
+    execute_remove,
+    execute_request,
+    parse_chat_command,
+)
 
 # ---- Env ----
 # Configure logging before other components so that early startup messages are visible.
@@ -1130,568 +1142,196 @@ class SongBot(commands.Bot):
             await self.sync_channels()
             self._ensure_refresher_running()
 
+    def _normalize_twitch_chat_input(self, message) -> NormalizedChatInput:
+        """Convert TwitchIO chat payloads into normalized command DTOs.
+
+        Dependencies: TwitchIO `event_message` payload fields (`broadcaster`,
+        `chatter`, and `text`). Code customers: command dispatcher entrypoint
+        and compatibility wrappers used in unit tests. Used variables/origin:
+        IDs/roles/time values are copied from incoming payload attributes.
+        """
+
+        chatter = getattr(message, 'chatter', None)
+        broadcaster = getattr(message, 'broadcaster', None)
+        return NormalizedChatInput(
+            channel_login=self._channel_login(getattr(broadcaster, 'name', '')),
+            user_id=str(getattr(chatter, 'id', '')),
+            username=(getattr(chatter, 'display_name', None) or getattr(chatter, 'name', '')),
+            text=(getattr(message, 'text', None) or ''),
+            is_subscriber=bool(getattr(chatter, 'subscriber', False)),
+            is_moderator=bool(getattr(chatter, 'moderator', False)),
+            is_broadcaster=bool(getattr(chatter, 'broadcaster', False)),
+            message_id=getattr(message, 'id', None),
+            message_timestamp=getattr(message, 'timestamp', None),
+        )
+
+    async def _fetch_youtube_title_by_url(self, url: str) -> Optional[str]:
+        """Fetch YouTube title metadata with shared backend aiohttp session.
+
+        Dependencies: global `backend` HTTP client session and
+        `fetch_youtube_oembed_title`. Code customers: shared command core via
+        `ChatCommandContext.fetch_youtube_title`. Used variables/origin: `url`
+        comes from parsed chat command arguments.
+        """
+
+        if backend.session is None:
+            await backend.start()
+        return await fetch_youtube_oembed_title(backend.session, url)
+
+    async def _log_command_error(self, message: str, metadata: Dict[str, object]) -> None:
+        """Log command execution failures through consolidated console events.
+
+        Dependencies: `push_console_event` logger bridge. Code customers:
+        command core execution handlers through `ChatCommandContext.log_error`.
+        Used variables/origin: parameters are composed in shared command logic.
+        """
+
+        await push_console_event('error', message, metadata=metadata)
+
+    async def _send_command_reply(
+        self,
+        login: str,
+        message: str,
+        *,
+        command: str,
+        channel: str,
+        reply_to: Optional[str] = None,
+        **metadata: object,
+    ) -> None:
+        """Send command replies with standard bot message policy metadata.
+
+        Dependencies: `_send_bot_message` visibility policy and channel map for
+        fallback partial lookup. Code customers: reusable command core handlers
+        via `ChatCommandContext.send_reply`. Used variables/origin:
+        `command/channel/reply_to` are passed through from command execution.
+        """
+
+        info = self.channel_map.get(login) or {}
+        fallback_partial = None
+        channel_id = info.get('channel_id')
+        channel_name = info.get('channel_name') or channel
+        if channel_id:
+            try:
+                fallback_partial = self.create_partialuser(channel_id, channel_name)
+            except Exception:
+                fallback_partial = None
+        await self._send_bot_message(
+            login,
+            message,
+            level=BotMessageLevel.NORMAL,
+            metadata={'channel': channel, 'command': command, **metadata},
+            reply_to=reply_to,
+            fallback_partial=fallback_partial,
+        )
+
+    def _build_chat_command_context(self) -> ChatCommandContext:
+        """Build command-core dependency adapters from the current bot state.
+
+        Dependencies: runtime command config, message templates, backend client,
+        and helper callbacks. Code customers: `event_message` dispatcher and
+        legacy `handle_*` wrappers. Used variables/origin: values are read from
+        current `SongBot` instance attributes.
+        """
+
+        return ChatCommandContext(
+            backend=backend,
+            messages=getattr(self, 'messages', DEFAULT_MESSAGES),
+            commands_map=getattr(self, 'commands_map', {k: ([v] if not isinstance(v, list) else v) for k, v in DEFAULT_COMMANDS.items()}),
+            currency_plural=getattr(self, 'currency_plural', 'points'),
+            channel_map=getattr(self, 'channel_map', {}),
+            extract_youtube_url=extract_youtube_url,
+            parse_artist_title=parse_artist_title,
+            fetch_youtube_title=self._fetch_youtube_title_by_url,
+            send_reply=self._send_command_reply,
+            log_error=self._log_command_error,
+            backend_error_cls=BackendError,
+        )
+
     async def event_message(self, message) -> None:
+        """Route Twitch chat messages through shared normalized command core.
+
+        Dependencies: TwitchIO event payload and `parse_chat_command`
+        dispatcher. Code customers: runtime EventSub websocket chat handler.
+        Used variables/origin: message payload fields are normalized first.
+        """
+
         if not self.enabled:
             return
         if getattr(message.chatter, 'id', None) == self.bot_user_id:
             return
-        content = (message.text or '').strip()
-        prefix = self.commands_map['prefix'][0]
-        if not content.startswith(prefix):
+        chat_input = self._normalize_twitch_chat_input(message)
+        parsed = parse_chat_command(chat_input, self.commands_map)
+        if not parsed:
             return
-        cmd, *rest = content[len(prefix):].split(' ', 1)
-        args = rest[0] if rest else ''
-        cmd_lower = cmd.lower()
-        if cmd_lower in self.commands_map['request']:
-            await self.handle_request(message, args)
-        elif cmd_lower in self.commands_map['random_request']:
-            await self.handle_random_request(message, args)
-        elif cmd_lower in self.commands_map['playlist_request']:
-            await self.handle_playlist_request(message, args)
-        elif cmd_lower in self.commands_map['prioritize']:
-            await self.handle_prioritize(message, args)
-        elif cmd_lower in self.commands_map['points']:
-            await self.handle_points(message)
-        elif cmd_lower in self.commands_map['remove']:
-            await self.handle_remove(message)
-        elif cmd_lower in self.commands_map['archive']:
+        if parsed.canonical == 'archive':
             await self.handle_archive(message)
+            return
+        await dispatch_chat_command(chat_input, parsed, self._build_chat_command_context())
 
     async def handle_request(self, msg, arg: str) -> None:
-        login = self._channel_login(msg.broadcaster.name)
-        row = self.channel_map.get(login)
-        if not row:
-            await self._send_bot_message(
-                login,
-                self.messages['channel_not_registered'],
-                level=BotMessageLevel.NORMAL,
-                metadata={'channel': msg.broadcaster.name, 'command': 'request'},
-                reply_to=msg.id,
-                fallback_partial=msg.broadcaster,
-            )
-            return
-        channel = row['channel_name']
-        display_name = getattr(msg.chatter, 'display_name', None) or msg.chatter.name
-        user_id = await backend.find_or_create_user(channel, str(msg.chatter.id), display_name)
+        """Compatibility wrapper executing request logic via normalized core.
 
-        ylink = extract_youtube_url(arg)
-        song = None
-        if ylink:
-            song = await backend.song_by_link(channel, ylink)
-            if not song:
-                if backend.session is None:
-                    await backend.start()
-                title_text = await fetch_youtube_oembed_title(backend.session, ylink)
-                artist, title = parse_artist_title(title_text) if title_text else ("YouTube", ylink)
-                song_id = await backend.add_song(channel, artist, title, ylink)
-                song = {'id': song_id, 'artist': artist, 'title': title, 'youtube_link': ylink}
-        else:
-            artist, title = parse_artist_title(arg)
-            found = await backend.search_song(channel, f"{artist} - {title}")
-            if not found:
-                song_id = await backend.add_song(channel, artist, title, None)
-                song = {'id': song_id, 'artist': artist, 'title': title}
-            else:
-                song = found
+        Dependencies: `_normalize_twitch_chat_input` and command dispatcher
+        adapters. Code customers: tests and any direct call sites that invoke
+        `handle_request`. Used variables/origin: `arg` is provided by caller.
+        """
 
-        try:
-            await backend.add_request(
-                channel,
-                song['id'],
-                user_id,
-                want_priority=False,
-                prefer_sub_free=True,
-                is_subscriber=bool(msg.chatter.subscriber),
-                is_mod=bool(msg.chatter.moderator or msg.chatter.broadcaster),
-            )
-            await self._send_bot_message(
-                login,
-                self.messages['request_added'].format(
-                    artist=song.get('artist', ''),
-                    title=song.get('title', ''),
-                ),
-                level=BotMessageLevel.NORMAL,
-                metadata={'channel': channel, 'command': 'request'},
-                reply_to=msg.id,
-                fallback_partial=msg.broadcaster,
-            )
-        except Exception as exc:
-            await push_console_event(
-                'error',
-                f'Failed to add request for {msg.chatter.name}: {exc}',
-                metadata={'channel': channel, 'command': 'request'},
-            )
-            await self._send_bot_message(
-                login,
-                self.messages['failed'].format(error=exc),
-                level=BotMessageLevel.NORMAL,
-                metadata={'channel': channel, 'command': 'request'},
-                reply_to=msg.id,
-                fallback_partial=msg.broadcaster,
-            )
+        chat_input = self._normalize_twitch_chat_input(msg)
+        await execute_request(chat_input, arg, self._build_chat_command_context())
 
     async def handle_random_request(self, msg, arg: str) -> None:
-        login = self._channel_login(msg.broadcaster.name)
-        row = self.channel_map.get(login)
-        if not row:
-            await self._send_bot_message(
-                login,
-                self.messages['channel_not_registered'],
-                level=BotMessageLevel.NORMAL,
-                metadata={'channel': msg.broadcaster.name, 'command': 'random_request'},
-                reply_to=msg.id,
-                fallback_partial=msg.broadcaster,
-            )
-            return
-        channel = row['channel_name']
-        display_name = getattr(msg.chatter, 'display_name', None) or msg.chatter.name
-        keyword = (arg or '').strip()
-        try:
-            response = await backend.random_playlist_request(
-                channel,
-                keyword=keyword or None,
-                twitch_id=str(msg.chatter.id),
-                username=display_name,
-                is_subscriber=bool(msg.chatter.subscriber),
-            )
-        except BackendError as exc:
-            if exc.status == 404:
-                template = self.messages.get('random_not_found', 'No playlist found for "{keyword}"')
-                await self._send_bot_message(
-                    login,
-                    template.format(keyword=keyword or 'default'),
-                    level=BotMessageLevel.NORMAL,
-                    metadata={'channel': channel, 'command': 'random_request'},
-                    reply_to=msg.id,
-                    fallback_partial=msg.broadcaster,
-                )
-                return
-            await push_console_event(
-                'error',
-                f'Failed random request for {msg.chatter.name}: {exc.detail}',
-                metadata={'channel': channel, 'command': 'random_request', 'status': exc.status, 'keyword': keyword},
-            )
-            await self._send_bot_message(
-                login,
-                self.messages['failed'].format(error=exc.detail),
-                level=BotMessageLevel.NORMAL,
-                metadata={'channel': channel, 'command': 'random_request'},
-                reply_to=msg.id,
-                fallback_partial=msg.broadcaster,
-            )
-            return
-        except Exception as exc:
-            await push_console_event(
-                'error',
-                f'Failed random request for {msg.chatter.name}: {exc}',
-                metadata={'channel': channel, 'command': 'random_request'},
-            )
-            await self._send_bot_message(
-                login,
-                self.messages['failed'].format(error=exc),
-                level=BotMessageLevel.NORMAL,
-                metadata={'channel': channel, 'command': 'random_request'},
-                reply_to=msg.id,
-                fallback_partial=msg.broadcaster,
-            )
-            return
+        """Compatibility wrapper executing random logic via normalized core.
 
-        song_payload = response.get('song') if isinstance(response, dict) else None
-        artist = song_payload.get('artist', '') if isinstance(song_payload, dict) else ''
-        title = song_payload.get('title', '') if isinstance(song_payload, dict) else ''
-        resolved_keyword = ''
-        if isinstance(response, dict):
-            resolved_keyword = response.get('keyword') or ''
-        template = self.messages.get('random_request_added') or self.messages.get('request_added')
-        if template:
-            try:
-                message_text = template.format(
-                    artist=artist,
-                    title=title,
-                    keyword=resolved_keyword or keyword or '',
-                )
-            except KeyError:
-                message_text = template
-            await self._send_bot_message(
-                login,
-                message_text,
-                level=BotMessageLevel.NORMAL,
-                metadata={'channel': channel, 'command': 'random_request', 'keyword': resolved_keyword or keyword},
-                reply_to=msg.id,
-                fallback_partial=msg.broadcaster,
-            )
+        Dependencies: shared command context adapters. Code customers: tests
+        and direct bot method callers. Used variables/origin: `arg` from caller.
+        """
+
+        chat_input = self._normalize_twitch_chat_input(msg)
+        await execute_random_request(chat_input, arg, self._build_chat_command_context())
 
     async def handle_playlist_request(self, msg, arg: str) -> None:
-        login = self._channel_login(msg.broadcaster.name)
-        row = self.channel_map.get(login)
-        if not row:
-            await self._send_bot_message(
-                login,
-                self.messages['channel_not_registered'],
-                level=BotMessageLevel.NORMAL,
-                metadata={'channel': msg.broadcaster.name, 'command': 'playlist_request'},
-                reply_to=msg.id,
-                fallback_partial=msg.broadcaster,
-            )
-            return
-        channel = row['channel_name']
-        arg = (arg or '').strip()
-        if not arg:
-            await self._send_bot_message(
-                login,
-                self.messages.get('playlist_usage', 'Usage: !playlist <name> <index>'),
-                level=BotMessageLevel.NORMAL,
-                metadata={'channel': channel, 'command': 'playlist_request'},
-                reply_to=msg.id,
-                fallback_partial=msg.broadcaster,
-            )
-            return
-        name_part, sep, index_part = arg.rpartition(' ')
-        if not sep or not name_part.strip() or not index_part.strip():
-            await self._send_bot_message(
-                login,
-                self.messages.get('playlist_usage', 'Usage: !playlist <name> <index>'),
-                level=BotMessageLevel.NORMAL,
-                metadata={'channel': channel, 'command': 'playlist_request'},
-                reply_to=msg.id,
-                fallback_partial=msg.broadcaster,
-            )
-            return
-        playlist_name = name_part.strip()
-        try:
-            index = int(index_part)
-        except ValueError:
-            await self._send_bot_message(
-                login,
-                self.messages.get('playlist_usage', 'Usage: !playlist <name> <index>'),
-                level=BotMessageLevel.NORMAL,
-                metadata={'channel': channel, 'command': 'playlist_request'},
-                reply_to=msg.id,
-                fallback_partial=msg.broadcaster,
-            )
-            return
-        if index < 1:
-            await self._send_bot_message(
-                login,
-                self.messages.get('playlist_usage', 'Usage: !playlist <name> <index>'),
-                level=BotMessageLevel.NORMAL,
-                metadata={'channel': channel, 'command': 'playlist_request'},
-                reply_to=msg.id,
-                fallback_partial=msg.broadcaster,
-            )
-            return
-        try:
-            playlists = await backend.list_playlists(channel)
-        except Exception as exc:
-            await push_console_event(
-                'error',
-                f'Failed to list playlists for {channel}: {exc}',
-                metadata={'channel': channel, 'command': 'playlist_request'},
-            )
-            await self._send_bot_message(
-                login,
-                self.messages['failed'].format(error=exc),
-                level=BotMessageLevel.NORMAL,
-                metadata={'channel': channel, 'command': 'playlist_request'},
-                reply_to=msg.id,
-                fallback_partial=msg.broadcaster,
-            )
-            return
-        match = None
-        playlist_lookup = playlist_name.lower()
-        for entry in playlists or []:
-            title = str(entry.get('title', '')).strip()
-            if title and title.lower() == playlist_lookup:
-                match = entry
-                break
-            slug_candidates: Set[str] = set()
-            identifier = entry.get('playlist_id')
-            if isinstance(identifier, str):
-                slug = identifier.strip()
-                if slug:
-                    slug_candidates.add(slug.lower())
-            entry_id = entry.get('id')
-            if entry_id is not None:
-                entry_slug = str(entry_id).strip()
-                if entry_slug:
-                    slug_candidates.add(entry_slug.lower())
-            if playlist_lookup in slug_candidates:
-                match = entry
-                break
-        if not match:
-            template = self.messages.get('playlist_not_found', 'Playlist "{playlist}" not found')
-            await self._send_bot_message(
-                login,
-                template.format(playlist=playlist_name),
-                level=BotMessageLevel.NORMAL,
-                metadata={'channel': channel, 'command': 'playlist_request'},
-                reply_to=msg.id,
-                fallback_partial=msg.broadcaster,
-            )
-            return
-        identifier_value = match.get('id')
-        if identifier_value is None:
-            identifier_value = match.get('playlist_id') or playlist_name
-        playlist_title = str(match.get('title') or playlist_name)
-        try:
-            response = await backend.playlist_request(
-                channel,
-                identifier=str(identifier_value),
-                index=index,
-            )
-        except BackendError as exc:
-            detail = (exc.detail or '').lower()
-            if exc.status == 404 and 'playlist' in detail:
-                template = self.messages.get('playlist_not_found', 'Playlist "{playlist}" not found')
-                await self._send_bot_message(
-                    login,
-                    template.format(playlist=playlist_title),
-                    level=BotMessageLevel.NORMAL,
-                    metadata={'channel': channel, 'command': 'playlist_request'},
-                    reply_to=msg.id,
-                    fallback_partial=msg.broadcaster,
-                )
-                return
-            if exc.status in (400, 404) and any(keyword in detail for keyword in ('index', 'item')):
-                template = self.messages.get('playlist_song_missing', 'Playlist "{playlist}" has no song #{index}')
-                await self._send_bot_message(
-                    login,
-                    template.format(playlist=playlist_title, index=index),
-                    level=BotMessageLevel.NORMAL,
-                    metadata={'channel': channel, 'command': 'playlist_request'},
-                    reply_to=msg.id,
-                    fallback_partial=msg.broadcaster,
-                )
-                return
-            await push_console_event(
-                'error',
-                f'Failed playlist request for {msg.chatter.name}: {exc.detail}',
-                metadata={
-                    'channel': channel,
-                    'command': 'playlist_request',
-                    'status': exc.status,
-                    'playlist': playlist_title,
-                    'index': index,
-                },
-            )
-            await self._send_bot_message(
-                login,
-                self.messages['failed'].format(error=exc.detail),
-                level=BotMessageLevel.NORMAL,
-                metadata={'channel': channel, 'command': 'playlist_request'},
-                reply_to=msg.id,
-                fallback_partial=msg.broadcaster,
-            )
-            return
-        except Exception as exc:
-            await push_console_event(
-                'error',
-                f'Failed playlist request for {msg.chatter.name}: {exc}',
-                metadata={'channel': channel, 'command': 'playlist_request'},
-            )
-            await self._send_bot_message(
-                login,
-                self.messages['failed'].format(error=exc),
-                level=BotMessageLevel.NORMAL,
-                metadata={'channel': channel, 'command': 'playlist_request'},
-                reply_to=msg.id,
-                fallback_partial=msg.broadcaster,
-            )
-            return
+        """Compatibility wrapper executing playlist logic via normalized core.
 
-        song_payload = response.get('song') if isinstance(response, dict) else None
-        artist = song_payload.get('artist', '') if isinstance(song_payload, dict) else ''
-        title = song_payload.get('title', '') if isinstance(song_payload, dict) else ''
-        template = self.messages.get('playlist_request_added') or self.messages.get('request_added')
-        if template:
-            try:
-                message_text = template.format(
-                    playlist=playlist_title,
-                    artist=artist,
-                    title=title,
-                    index=index,
-                )
-            except KeyError:
-                message_text = template
-            await self._send_bot_message(
-                login,
-                message_text,
-                level=BotMessageLevel.NORMAL,
-                metadata={
-                    'channel': channel,
-                    'command': 'playlist_request',
-                    'playlist': playlist_title,
-                    'index': index,
-                },
-                reply_to=msg.id,
-                fallback_partial=msg.broadcaster,
-            )
+        Dependencies: shared command context adapters. Code customers: tests
+        and runtime callers using direct method dispatch. Used variables/origin:
+        `arg` is provided by caller/event parser.
+        """
+
+        chat_input = self._normalize_twitch_chat_input(msg)
+        await execute_playlist_request(chat_input, arg, self._build_chat_command_context())
 
     async def handle_prioritize(self, msg, arg: str) -> None:
-        login = self._channel_login(msg.broadcaster.name)
-        row = self.channel_map.get(login)
-        if not row:
-            await self._send_bot_message(
-                login,
-                self.messages['channel_not_registered'],
-                level=BotMessageLevel.NORMAL,
-                metadata={'channel': msg.broadcaster.name, 'command': 'prioritize'},
-                reply_to=msg.id,
-                fallback_partial=msg.broadcaster,
-            )
-            return
-        channel = row['channel_name']
-        display_name = getattr(msg.chatter, 'display_name', None) or msg.chatter.name
-        user_id = await backend.find_or_create_user(channel, str(msg.chatter.id), display_name)
+        """Compatibility wrapper executing prioritize logic via shared core.
 
-        queue = await backend.get_queue(channel)
-        my_prio = [q for q in queue if q['user_id'] == user_id and q['is_priority'] == 1]
-        if len(my_prio) >= 3:
-            await self._send_bot_message(
-                login,
-                self.messages['prioritize_limit'],
-                level=BotMessageLevel.NORMAL,
-                metadata={'channel': channel, 'command': 'prioritize'},
-                reply_to=msg.id,
-                fallback_partial=msg.broadcaster,
-            )
-            return
+        Dependencies: normalized DTO converter and command context adapters.
+        Code customers: tests and direct handler invocations. Used
+        variables/origin: `arg` command arguments are caller-provided.
+        """
 
-        target = None
-        if arg.strip().isdigit():
-            rid = int(arg.strip())
-            target = next((q for q in queue if q['id'] == rid and q['user_id'] == user_id and q['played'] == 0), None)
-        if not target:
-            mine = [q for q in queue if q['user_id'] == user_id and q['played'] == 0 and q['is_priority'] == 0]
-            target = mine[-1] if mine else None
-        if not target:
-            await self._send_bot_message(
-                login,
-                self.messages['prioritize_no_target'],
-                level=BotMessageLevel.NORMAL,
-                metadata={'channel': channel, 'command': 'prioritize'},
-                reply_to=msg.id,
-                fallback_partial=msg.broadcaster,
-            )
-            return
-
-        try:
-            await backend.add_request(
-                channel,
-                target['song_id'],
-                user_id,
-                want_priority=True,
-                prefer_sub_free=True,
-                is_subscriber=bool(msg.chatter.subscriber),
-                is_mod=bool(msg.chatter.moderator or msg.chatter.broadcaster),
-            )
-            await backend.delete_request(channel, target['id'])
-            await self._send_bot_message(
-                login,
-                self.messages['prioritize_success'].format(request_id=target['id']),
-                level=BotMessageLevel.NORMAL,
-                metadata={'channel': channel, 'command': 'prioritize'},
-                reply_to=msg.id,
-                fallback_partial=msg.broadcaster,
-            )
-        except Exception as exc:
-            await push_console_event(
-                'error',
-                f'Failed to prioritize for {msg.chatter.name}: {exc}',
-                metadata={'channel': channel, 'command': 'prioritize'},
-            )
-            await self._send_bot_message(
-                login,
-                self.messages['failed'].format(error=exc),
-                level=BotMessageLevel.NORMAL,
-                metadata={'channel': channel, 'command': 'prioritize'},
-                reply_to=msg.id,
-                fallback_partial=msg.broadcaster,
-            )
+        chat_input = self._normalize_twitch_chat_input(msg)
+        await execute_prioritize(chat_input, arg, self._build_chat_command_context())
 
     async def handle_points(self, msg) -> None:
-        login = self._channel_login(msg.broadcaster.name)
-        row = self.channel_map.get(login)
-        if not row:
-            await self._send_bot_message(
-                login,
-                self.messages['channel_not_registered'],
-                level=BotMessageLevel.NORMAL,
-                metadata={'channel': msg.broadcaster.name, 'command': 'points'},
-                reply_to=msg.id,
-                fallback_partial=msg.broadcaster,
-            )
-            return
-        channel = row['channel_name']
-        display_name = getattr(msg.chatter, 'display_name', None) or msg.chatter.name
-        user_id = await backend.find_or_create_user(channel, str(msg.chatter.id), display_name)
-        u = await backend.get_user(channel, user_id)
-        await self._send_bot_message(
-            login,
-            self.messages['points'].format(
-                username=display_name,
-                points=u.get('prio_points', 0),
-                currency_plural=self.currency_plural,
-            ),
-            level=BotMessageLevel.NORMAL,
-            metadata={'channel': channel, 'command': 'points'},
-            reply_to=msg.id,
-            fallback_partial=msg.broadcaster,
-        )
+        """Compatibility wrapper executing points logic via normalized core.
+
+        Dependencies: shared command dispatcher context and backend adapter.
+        Code customers: tests and direct points handler call sites. Used
+        variables/origin: requester identity comes from `msg` payload.
+        """
+
+        chat_input = self._normalize_twitch_chat_input(msg)
+        await execute_points(chat_input, '', self._build_chat_command_context())
 
     async def handle_remove(self, msg) -> None:
-        login = self._channel_login(msg.broadcaster.name)
-        row = self.channel_map.get(login)
-        if not row:
-            await self._send_bot_message(
-                login,
-                self.messages['channel_not_registered'],
-                level=BotMessageLevel.NORMAL,
-                metadata={'channel': msg.broadcaster.name, 'command': 'remove'},
-                reply_to=msg.id,
-                fallback_partial=msg.broadcaster,
-            )
-            return
-        channel = row['channel_name']
-        display_name = getattr(msg.chatter, 'display_name', None) or msg.chatter.name
-        user_id = await backend.find_or_create_user(channel, str(msg.chatter.id), display_name)
-        queue = await backend.get_queue(channel)
-        mine = [q for q in queue if q['user_id'] == user_id and q['played'] == 0]
-        if not mine:
-            await self._send_bot_message(
-                login,
-                self.messages['remove_no_pending'],
-                level=BotMessageLevel.NORMAL,
-                metadata={'channel': channel, 'command': 'remove'},
-                reply_to=msg.id,
-                fallback_partial=msg.broadcaster,
-            )
-            return
-        latest = mine[-1]
-        try:
-            await backend.delete_request(channel, latest['id'])
-            await self._send_bot_message(
-                login,
-                self.messages['remove_success'].format(request_id=latest['id']),
-                level=BotMessageLevel.NORMAL,
-                metadata={'channel': channel, 'command': 'remove'},
-                reply_to=msg.id,
-                fallback_partial=msg.broadcaster,
-            )
-        except Exception as exc:
-            await push_console_event(
-                'error',
-                f'Failed to remove request for {msg.chatter.name}: {exc}',
-                metadata={'channel': channel, 'command': 'remove'},
-            )
-            await self._send_bot_message(
-                login,
-                self.messages['failed'].format(error=exc),
-                level=BotMessageLevel.NORMAL,
-                metadata={'channel': channel, 'command': 'remove'},
-                reply_to=msg.id,
-                fallback_partial=msg.broadcaster,
-            )
+        """Compatibility wrapper executing remove logic via normalized core.
+
+        Dependencies: normalized DTO converter and reusable command core.
+        Code customers: tests and direct `handle_remove` invocations. Used
+        variables/origin: requester and channel fields come from `msg`.
+        """
+
+        chat_input = self._normalize_twitch_chat_input(msg)
+        await execute_remove(chat_input, '', self._build_chat_command_context())
 
     async def handle_archive(self, msg) -> None:
         if not (msg.chatter.moderator or msg.chatter.broadcaster):

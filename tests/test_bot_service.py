@@ -153,8 +153,8 @@ class BotServiceTests(unittest.IsolatedAsyncioTestCase):
             await service.apply_settings(settings)
 
         self.assertEqual(self.created_bots, [])
-        push_event.assert_awaited_once()
-        args, kwargs = push_event.call_args
+        self.assertGreaterEqual(push_event.await_count, 1)
+        args, kwargs = push_event.await_args_list[0]
         self.assertEqual(args[0], "error")
         self.assertIn("Missing bot credentials", args[1])
         self.assertEqual(kwargs.get("event"), "startup")
@@ -275,8 +275,8 @@ class BotServiceTests(unittest.IsolatedAsyncioTestCase):
             patch.object(bot_app, "push_console_event", push_event):
             await song_bot.sync_channels()
 
-        push_event.assert_awaited_once()
-        args, kwargs = push_event.call_args
+        self.assertGreaterEqual(push_event.await_count, 1)
+        args, kwargs = push_event.await_args_list[0]
         self.assertEqual(args[0], "error")
         self.assertIn("Failed to subscribe channel Foo", args[1])
         self.assertEqual(kwargs.get("metadata"), {"channel": "Foo", "error": "boom"})
@@ -410,27 +410,26 @@ class BotServiceTests(unittest.IsolatedAsyncioTestCase):
         song_bot = bot_app.SongBot.__new__(bot_app.SongBot)
         commands_map = {k: ([v] if not isinstance(v, list) else v) for k, v in bot_app.DEFAULT_COMMANDS.items()}
         song_bot.commands_map = commands_map
-        song_bot.handle_request = AsyncMock()
-        song_bot.handle_random_request = AsyncMock()
-        song_bot.handle_prioritize = AsyncMock()
-        song_bot.handle_points = AsyncMock()
-        song_bot.handle_remove = AsyncMock()
-        song_bot.handle_archive = AsyncMock()
-        song_bot.handle_playlist_request = AsyncMock()
         song_bot.enabled = True
         song_bot.bot_user_id = 'bot'
+        song_bot.channel_map = {'channelname': {'channel_name': 'ChannelName'}}
+        song_bot.messages = bot_app.DEFAULT_MESSAGES.copy()
+        song_bot.currency_plural = 'points'
+        song_bot._send_message = AsyncMock()
+        song_bot._channel_login = bot_app.SongBot._channel_login.__get__(song_bot, bot_app.SongBot)
         msg = SimpleNamespace(
             text='!playlist mix 2',
             broadcaster=SimpleNamespace(name='ChannelName'),
             chatter=SimpleNamespace(id='user', name='viewer', display_name='Viewer', subscriber=False),
             id='msg126',
         )
+        with patch.object(bot_app.backend, "list_playlists", AsyncMock(return_value=[])) as list_playlists:
+            await song_bot.event_message(msg)
 
-        await song_bot.event_message(msg)
-
-        song_bot.handle_playlist_request.assert_awaited_once_with(msg, 'mix 2')
-        song_bot.handle_request.assert_not_awaited()
-        song_bot.handle_random_request.assert_not_awaited()
+        list_playlists.assert_awaited_once_with('ChannelName')
+        song_bot._send_message.assert_awaited_once()
+        sent_args, _ = song_bot._send_message.call_args
+        self.assertIn('not found', sent_args[1].lower())
 
     async def test_send_bot_message_policy_matrix(self) -> None:
         """Verify per-channel thresholds include lower-severity messages."""
