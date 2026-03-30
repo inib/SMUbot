@@ -77,6 +77,8 @@ SETTINGS_ENV_MAP: Dict[str, str] = {
 SETTINGS_DEFAULTS: Dict[str, Optional[str]] = {
     "twitch_scopes": "channel:bot channel:read:subscriptions channel:read:vips bits:read moderator:read:followers",
     "bot_app_scopes": "user:read:chat user:write:chat user:bot",
+    "chat_ingress_mode": "websocket",
+    "chat_ingress_shadow_mode": "0",
 }
 
 SETUP_REQUIRED_KEYS = ("twitch_client_id", "twitch_client_secret")
@@ -278,6 +280,82 @@ def ensure_channel_settings_schema() -> None:
             )
 
 
+def ensure_eventsub_conduit_schema() -> None:
+    """Additive startup patch for EventSub conduit/idempotency schema compatibility.
+
+    Dependencies: Uses SQLAlchemy ``inspect`` plus raw SQL statements executed
+    against the module-level ``engine``.
+    Code customers: Startup bootstrap and webhook/conduit workers that rely on
+    replay dedupe and conduit metadata tables.
+    Used variables/origin: Inspects existing ``event_subscriptions`` columns and
+    creates/patches ``eventsub_message_dedupe``, ``twitch_conduits``, and
+    ``twitch_conduit_shards`` tables in-place for staggered deploy safety.
+    """
+
+    with engine.begin() as conn:
+        inspector = inspect(conn)
+        table_names = set(inspector.get_table_names())
+
+        if "event_subscriptions" in table_names:
+            eventsub_columns = {
+                col["name"] for col in inspector.get_columns("event_subscriptions")
+            }
+            if "conduit_id" not in eventsub_columns:
+                conn.execute(text("ALTER TABLE event_subscriptions ADD COLUMN conduit_id VARCHAR"))
+            if "shard_id" not in eventsub_columns:
+                conn.execute(text("ALTER TABLE event_subscriptions ADD COLUMN shard_id VARCHAR"))
+
+        if "eventsub_message_dedupe" not in table_names:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE eventsub_message_dedupe (
+                        id INTEGER PRIMARY KEY,
+                        message_id VARCHAR NOT NULL,
+                        received_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        CONSTRAINT uq_eventsub_message_dedupe_message_id UNIQUE (message_id)
+                    )
+                    """
+                )
+            )
+
+        if "twitch_conduits" not in table_names:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE twitch_conduits (
+                        id INTEGER PRIMARY KEY,
+                        conduit_id VARCHAR NOT NULL,
+                        status VARCHAR NOT NULL DEFAULT 'pending',
+                        last_sync_at DATETIME,
+                        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        CONSTRAINT uq_twitch_conduits_conduit_id UNIQUE (conduit_id)
+                    )
+                    """
+                )
+            )
+
+        if "twitch_conduit_shards" not in table_names:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE twitch_conduit_shards (
+                        id INTEGER PRIMARY KEY,
+                        conduit_fk INTEGER NOT NULL REFERENCES twitch_conduits(id) ON DELETE CASCADE,
+                        shard_id VARCHAR NOT NULL,
+                        transport_callback TEXT,
+                        status VARCHAR NOT NULL DEFAULT 'pending',
+                        last_sync_at DATETIME,
+                        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        CONSTRAINT uq_twitch_conduit_shards UNIQUE (conduit_fk, shard_id)
+                    )
+                    """
+                )
+            )
+
+
 def backfill_missing_channel_keys() -> None:
     """Assign generated keys to any existing channels lacking a `channel_key` value.
 
@@ -473,6 +551,34 @@ def get_bot_app_scopes() -> list[str]:
     return scopes or list(DEFAULT_BOT_APP_SCOPES)
 
 
+def get_chat_ingress_mode() -> str:
+    """Return the configured chat ingress mode with a safe fallback.
+
+    Dependencies: Reads persisted values through ``get_setting``.
+    Code customers: ``/system/config`` payload consumers and chat ingress
+    workers deciding websocket vs webhook/conduit intake.
+    Used variables/origin: Pulls the ``chat_ingress_mode`` app setting and
+    normalizes unsupported values back to ``websocket``.
+    """
+
+    value = (get_setting("chat_ingress_mode", "websocket") or "websocket").strip().lower()
+    if value not in {"websocket", "webhook_conduit"}:
+        return "websocket"
+    return value
+
+
+def get_chat_ingress_shadow_mode() -> bool:
+    """Return whether dual-run ingress shadow mode is enabled.
+
+    Dependencies: Uses ``get_setting`` plus ``_env_flag`` for boolean parsing.
+    Code customers: ``/system/config`` responses and chat validation workers.
+    Used variables/origin: Reads the ``chat_ingress_shadow_mode`` app setting
+    and interprets string truthy values such as ``1``/``true``/``yes``.
+    """
+
+    return _env_flag(get_setting("chat_ingress_shadow_mode", "0"))
+
+
 def _system_config_payload() -> Dict[str, Any]:
     return {
         "setup_complete": is_setup_complete(),
@@ -482,6 +588,8 @@ def _system_config_payload() -> Dict[str, Any]:
         "bot_redirect_uri": get_bot_redirect_uri(),
         "twitch_scopes": get_twitch_scopes(),
         "bot_app_scopes": get_bot_app_scopes(),
+        "chat_ingress_mode": get_chat_ingress_mode(),
+        "chat_ingress_shadow_mode": get_chat_ingress_shadow_mode(),
     }
 
 
@@ -973,6 +1081,8 @@ class EventSubscription(Base):
     secret = Column(String, nullable=False)
     callback = Column(Text, nullable=False)
     transport = Column(String, nullable=False, default="webhook")
+    conduit_id = Column(String)
+    shard_id = Column(String)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
     last_notified_at = Column(DateTime)
@@ -982,6 +1092,47 @@ class EventSubscription(Base):
     __table_args__ = (
         UniqueConstraint("channel_id", "type", name="uq_channel_eventsub"),
     )
+
+
+class EventSubMessageDedupe(Base):
+    __tablename__ = "eventsub_message_dedupe"
+
+    id = Column(Integer, primary_key=True)
+    message_id = Column(String, nullable=False, unique=True)
+    received_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class TwitchConduit(Base):
+    __tablename__ = "twitch_conduits"
+
+    id = Column(Integer, primary_key=True)
+    conduit_id = Column(String, nullable=False, unique=True)
+    status = Column(String, nullable=False, default="pending")
+    last_sync_at = Column(DateTime)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    shards = relationship("TwitchConduitShard", back_populates="conduit", cascade="all, delete-orphan")
+
+
+class TwitchConduitShard(Base):
+    __tablename__ = "twitch_conduit_shards"
+
+    id = Column(Integer, primary_key=True)
+    conduit_fk = Column(Integer, ForeignKey("twitch_conduits.id", ondelete="CASCADE"), nullable=False)
+    shard_id = Column(String, nullable=False)
+    transport_callback = Column(Text)
+    status = Column(String, nullable=False, default="pending")
+    last_sync_at = Column(DateTime)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    conduit = relationship("TwitchConduit", back_populates="shards")
+
+    __table_args__ = (
+        UniqueConstraint("conduit_fk", "shard_id", name="uq_twitch_conduit_shards"),
+    )
+
 
 class TwitchUser(Base):
     __tablename__ = "twitch_users"
@@ -1164,6 +1315,7 @@ def _ensure_playlist_schema() -> None:
 
 ensure_channel_settings_schema()
 _ensure_playlist_schema()
+ensure_eventsub_conduit_schema()
 bootstrap_settings_from_env()
 
 # =====================================
@@ -1364,6 +1516,8 @@ class SystemConfigOut(BaseModel):
     bot_redirect_uri: Optional[str]
     twitch_scopes: List[str]
     bot_app_scopes: List[str]
+    chat_ingress_mode: Literal["websocket", "webhook_conduit"]
+    chat_ingress_shadow_mode: bool
 
 
 class SystemConfigUpdate(BaseModel):
@@ -1373,6 +1527,8 @@ class SystemConfigUpdate(BaseModel):
     bot_redirect_uri: Optional[str] = None
     twitch_scopes: Optional[List[str]] = None
     bot_app_scopes: Optional[List[str]] = None
+    chat_ingress_mode: Optional[Literal["websocket", "webhook_conduit"]] = None
+    chat_ingress_shadow_mode: Optional[bool] = None
     setup_complete: Optional[bool] = None
 
 
@@ -4315,6 +4471,10 @@ def update_system_config(
     if payload.bot_app_scopes is not None:
         normalized_bot_scopes = _normalize_scope_list(payload.bot_app_scopes)
         updates["bot_app_scopes"] = " ".join(normalized_bot_scopes) if normalized_bot_scopes else None
+    if payload.chat_ingress_mode is not None:
+        updates["chat_ingress_mode"] = payload.chat_ingress_mode
+    if payload.chat_ingress_shadow_mode is not None:
+        updates["chat_ingress_shadow_mode"] = "1" if payload.chat_ingress_shadow_mode else "0"
 
     current = settings_store.snapshot()
     merged: Dict[str, Optional[str]] = dict(current)

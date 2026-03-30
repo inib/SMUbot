@@ -69,6 +69,19 @@ the required fields are saved (client ID, client secret, redirect URIs, and any
 desired scope overrides) the admin can mark the deployment as ready, which
 unlocks the API for the bot, queue manager, and public web frontend.
 
+### Chat ingress defaults and staged rollout flags
+- `/system/config` now exposes `chat_ingress_mode` with:
+  - `websocket` (default)
+  - `webhook_conduit`
+- `/system/config` also exposes `chat_ingress_shadow_mode` (default `false`) so
+  operators can run dual-path validation before a full ingress cutover.
+- Migration `migrations/20260330_eventsub_conduits.sql` adds additive EventSub
+  replay/conduit tables (`eventsub_message_dedupe`, `twitch_conduits`,
+  `twitch_conduit_shards`) plus conduit linkage columns on
+  `event_subscriptions`.
+- Startup now includes a compatibility patch for the same tables/columns so
+  staggered deploys on legacy SQLite/prod databases continue booting safely.
+
 ## Running with Docker
 1. Copy `example.env` to `stack.env` and adjust values such as `ADMIN_TOKEN`,
    `ADMIN_BASIC_AUTH_USERNAME`, `ADMIN_BASIC_AUTH_PASSWORD`, and `BACKEND_URL`
@@ -237,6 +250,15 @@ them via `/me/channels`.
   ```
 
 ## Changelog
+### 2026-03-30
+- Added EventSub webhook replay idempotency and conduit schema support via
+  `migrations/20260330_eventsub_conduits.sql`.
+- Added `/system/config` defaults for `chat_ingress_mode` (`websocket`) and
+  `chat_ingress_shadow_mode` (`false`), including startup compatibility patch
+  logic for staggered deploys.
+- Marked ingress shadow mode as a rollout guard; if rollout strategy changes
+  permanently, review for future cleanup.
+
 ### 2026-03-29
 - Removed duplicate channel-settings bootstrap technical debt by retiring
   `_ensure_channel_settings_schema()` and keeping
