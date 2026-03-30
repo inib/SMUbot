@@ -19,6 +19,7 @@ def _wipe_db() -> None:
             backend_app.StreamSession,
             backend_app.Event,
             backend_app.EventSubscription,
+            backend_app.EventSubMessageDedupe,
             backend_app.PlaylistItem,
             backend_app.PlaylistKeyword,
             backend_app.Playlist,
@@ -304,6 +305,149 @@ class ChannelEventTests(unittest.TestCase):
                 .one()
             )
             self.assertEqual(user.prio_points, 1)
+        finally:
+            db.close()
+
+    def test_eventsub_callback_dedupes_notification_retries(self) -> None:
+        """Ensure EventSub retries do not replay reward/command side effects.
+
+        Dependencies: Uses the EventSub callback route plus the
+        ``eventsub_message_dedupe`` table for idempotency checks. Code
+        customers: webhook retry behavior from Twitch and chat/event command
+        ingress processing. Used variables/origin: signs two identical payload
+        deliveries with the same ``Twitch-Eventsub-Message-Id``.
+        """
+
+        details = _setup_channel()
+        secret = "abc123secret"
+        db = backend_app.SessionLocal()
+        try:
+            sub = backend_app.EventSubscription(
+                channel_id=details["channel_pk"],
+                twitch_subscription_id="sub-dedupe",
+                type="channel.follow",
+                status="enabled",
+                secret=secret,
+                callback="https://example/callback",
+            )
+            db.add(sub)
+            db.commit()
+        finally:
+            db.close()
+
+        body = {
+            "subscription": {
+                "id": "sub-dedupe",
+                "type": "channel.follow",
+                "status": "enabled",
+                "version": "1",
+                "condition": {"broadcaster_user_id": "cid", "moderator_user_id": "owner"},
+            },
+            "event": {
+                "user_id": "retry-user",
+                "user_login": "retryuser",
+                "broadcaster_user_id": "cid",
+            },
+        }
+        raw = json.dumps(body).encode()
+        message_id = "msg-retry-1"
+        timestamp = "2023-01-01T00:00:00Z"
+        signature = hmac.new(secret.encode(), msg=(message_id + timestamp).encode() + raw, digestmod=hashlib.sha256)
+        headers = {
+            "Twitch-Eventsub-Message-Id": message_id,
+            "Twitch-Eventsub-Message-Timestamp": timestamp,
+            "Twitch-Eventsub-Message-Signature": f"sha256={signature.hexdigest()}",
+            "Twitch-Eventsub-Message-Type": "notification",
+        }
+
+        first = self.client.post("/twitch/eventsub/callback", data=raw, headers=headers)
+        second = self.client.post("/twitch/eventsub/callback", data=raw, headers=headers)
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(second.status_code, 200, second.text)
+        self.assertTrue(second.json().get("deduped"))
+
+        db = backend_app.SessionLocal()
+        try:
+            self.assertEqual(
+                db.query(backend_app.Event).filter(backend_app.Event.channel_id == details["channel_pk"]).count(),
+                1,
+            )
+            self.assertEqual(
+                db.query(backend_app.EventSubMessageDedupe).filter(backend_app.EventSubMessageDedupe.message_id == message_id).count(),
+                1,
+            )
+        finally:
+            db.close()
+
+    def test_eventsub_chat_notification_shadow_mode_records_dedupe(self) -> None:
+        """Verify chat webhook notifications in shadow mode stay non-authoritative.
+
+        Dependencies: EventSub callback routing, system settings persistence, and
+        dedupe storage. Code customers: dual-path webhook/websocket ingress
+        rollout validation. Used variables/origin: toggles
+        ``chat_ingress_shadow_mode`` and sends a signed ``channel.chat.message``
+        payload.
+        """
+
+        details = _setup_channel()
+        secret = "chatsecret"
+        db = backend_app.SessionLocal()
+        try:
+            backend_app.set_settings(db, {"chat_ingress_mode": "websocket", "chat_ingress_shadow_mode": "1"})
+            chat_sub = backend_app.EventSubscription(
+                channel_id=details["channel_pk"],
+                twitch_subscription_id="sub-chat-shadow",
+                type="channel.chat.message",
+                status="enabled",
+                secret=secret,
+                callback="https://example/callback",
+                transport="conduit",
+            )
+            db.add(chat_sub)
+            db.commit()
+        finally:
+            db.close()
+
+        body = {
+            "subscription": {
+                "id": "sub-chat-shadow",
+                "type": "channel.chat.message",
+                "status": "enabled",
+                "version": "1",
+                "condition": {"broadcaster_user_id": "cid"},
+            },
+            "event": {
+                "chatter_user_id": "chat-user-1",
+                "chatter_user_login": "chatuser",
+                "message": {"text": "!request artist - title"},
+            },
+        }
+        raw = json.dumps(body).encode()
+        message_id = "msg-chat-shadow"
+        timestamp = "2023-01-01T00:00:00Z"
+        signature = hmac.new(secret.encode(), msg=(message_id + timestamp).encode() + raw, digestmod=hashlib.sha256)
+        headers = {
+            "Twitch-Eventsub-Message-Id": message_id,
+            "Twitch-Eventsub-Message-Timestamp": timestamp,
+            "Twitch-Eventsub-Message-Signature": f"sha256={signature.hexdigest()}",
+            "Twitch-Eventsub-Message-Type": "notification",
+        }
+        response = self.client.post("/twitch/eventsub/callback", data=raw, headers=headers)
+        self.assertEqual(response.status_code, 200, response.text)
+
+        db = backend_app.SessionLocal()
+        try:
+            self.assertEqual(
+                db.query(backend_app.EventSubMessageDedupe).filter(backend_app.EventSubMessageDedupe.message_id == message_id).count(),
+                1,
+            )
+            sub_row = (
+                db.query(backend_app.EventSubscription)
+                .filter(backend_app.EventSubscription.twitch_subscription_id == "sub-chat-shadow")
+                .one()
+            )
+            self.assertIsNotNone(sub_row.last_notified_at)
+            self.assertEqual(db.query(backend_app.Event).filter(backend_app.Event.channel_id == details["channel_pk"]).count(), 0)
         finally:
             db.close()
 

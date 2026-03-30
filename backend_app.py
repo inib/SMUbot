@@ -814,7 +814,127 @@ def _verify_eventsub_signature(secret: str, message_id: str, timestamp: str, bod
     return hmac.compare_digest(expected, provided or "")
 
 
-def _process_eventsub_notification(db: Session, subscription: EventSubscription, message: dict[str, Any]) -> None:
+def _record_eventsub_notification_dedupe(db: Session, message_id: str) -> bool:
+    """Persist EventSub message IDs and return False when the payload is a retry.
+
+    Dependencies: Uses SQLAlchemy ``Session`` writes against
+    ``EventSubMessageDedupe`` and relies on the unique index over
+    ``message_id`` to reject duplicates.
+    Code customers: EventSub callback processing uses this guard before routing
+    notifications to avoid duplicate command/event execution during Twitch
+    retries.
+    Used variables/origin: ``message_id`` is sourced from the
+    ``Twitch-Eventsub-Message-Id`` request header.
+    """
+
+    dedupe = EventSubMessageDedupe(message_id=message_id)
+    db.add(dedupe)
+    try:
+        db.commit()
+        return True
+    except IntegrityError:
+        db.rollback()
+        logger.info("Ignoring duplicate EventSub notification retry", extra={"eventsub_message_id": message_id})
+        return False
+
+
+def _extract_eventsub_chat_command(message_text: str) -> dict[str, Optional[str]]:
+    """Parse a Twitch chat line into a normalized command summary.
+
+    Dependencies: Uses string normalization and the static command alias map so
+    webhook chat ingress can be evaluated without requiring bot runtime objects.
+    Code customers: ``_process_eventsub_chat_notification`` emits structured
+    webhook-vs-websocket comparison logs from this parsed command metadata.
+    Used variables/origin: ``message_text`` comes from Twitch
+    ``channel.chat.message`` payload fields.
+    """
+
+    text_content = (message_text or "").strip()
+    if not text_content.startswith("!"):
+        return {"alias": None, "canonical": None, "args": None}
+    command_blob = text_content[1:]
+    command_token, _, remainder = command_blob.partition(" ")
+    alias = command_token.strip().lower()
+    args = remainder.strip() or ""
+    aliases: dict[str, set[str]] = {
+        "request": {"request", "r"},
+        "random_request": {"random", "rand", "rr"},
+        "playlist_request": {"playlist", "pl"},
+        "prioritize": {"prioritize", "prio"},
+        "points": {"points", "pts"},
+        "remove": {"remove", "rm"},
+        "archive": {"archive"},
+    }
+    canonical = next((name for name, alias_set in aliases.items() if alias in alias_set), None)
+    return {"alias": alias or None, "canonical": canonical, "args": args}
+
+
+def _process_eventsub_chat_notification(
+    db: Session,
+    subscription: EventSubscription,
+    message: dict[str, Any],
+    *,
+    message_id: str,
+) -> None:
+    """Handle ``channel.chat.message`` notifications from EventSub webhook flow.
+
+    Dependencies: Reads ingress configuration via ``get_chat_ingress_mode`` and
+    ``get_chat_ingress_shadow_mode`` and uses ``_extract_eventsub_chat_command``
+    to produce structured parse metadata.
+    Code customers: ``_process_eventsub_notification`` routes Twitch
+    ``channel.chat.message`` notifications here for deduped ingress analysis.
+    Used variables/origin: Pulls chatter identity and text from the EventSub
+    ``event`` payload and channel ownership from ``EventSubscription``.
+    """
+
+    channel = db.get(ActiveChannel, subscription.channel_id)
+    if not channel:
+        logger.warning("Received chat EventSub for missing channel %s", subscription.channel_id)
+        return
+    event_payload = message.get("event") or {}
+    subscription_payload = message.get("subscription") or {}
+    condition_payload = subscription_payload.get("condition") or {}
+    broadcaster_id = condition_payload.get("broadcaster_user_id")
+    if broadcaster_id and broadcaster_id != channel.channel_id:
+        logger.warning(
+            "EventSub chat target mismatch: payload broadcaster %s vs channel %s",
+            broadcaster_id,
+            channel.channel_id,
+        )
+        return
+
+    chatter_login = event_payload.get("chatter_user_login") or event_payload.get("chatter_user_name")
+    message_text = (event_payload.get("message") or {}).get("text") or event_payload.get("text") or ""
+    parsed = _extract_eventsub_chat_command(message_text)
+    ingress_mode = get_chat_ingress_mode()
+    shadow_mode = get_chat_ingress_shadow_mode()
+    webhook_authoritative = ingress_mode == "webhook_conduit" and not shadow_mode
+    webhook_result = "executed_authoritative" if webhook_authoritative else "shadow_observe_only"
+
+    logger.info(
+        "EventSub chat ingress comparison",
+        extra={
+            "eventsub_message_id": message_id,
+            "channel": channel.channel_name,
+            "chat_ingress_mode": ingress_mode,
+            "chat_ingress_shadow_mode": shadow_mode,
+            "websocket_authoritative": not webhook_authoritative,
+            "webhook_authoritative": webhook_authoritative,
+            "chatter_login": chatter_login,
+            "webhook_parse": parsed,
+            "webhook_execution_result": webhook_result,
+            "websocket_result": "authoritative_path_external_to_callback",
+        },
+    )
+
+
+def _process_eventsub_notification(
+    db: Session,
+    subscription: EventSubscription,
+    message: dict[str, Any],
+    *,
+    message_id: str,
+) -> None:
     """Translate an EventSub notification into a stored event and priority rewards.
 
     Dependencies: Uses ``_persist_channel_event`` to write the event and award
@@ -828,6 +948,12 @@ def _process_eventsub_notification(db: Session, subscription: EventSubscription,
     """
 
     twitch_type = subscription.type
+    if twitch_type == EVENTSUB_CONDUIT_CHAT_TYPE:
+        _process_eventsub_chat_notification(db, subscription, message, message_id=message_id)
+        subscription.last_notified_at = datetime.utcnow()
+        db.commit()
+        return
+
     internal_type = EVENTSUB_EVENT_MAP.get(twitch_type)
     if not internal_type:
         logger.debug("Ignoring unhandled EventSub type %s", twitch_type)
@@ -7531,7 +7657,9 @@ async def eventsub_callback(request: FastAPIRequest, db: Session = Depends(get_d
         return Response(content=challenge, media_type="text/plain")
 
     if message_type == "notification":
-        _process_eventsub_notification(db, subscription, payload)
+        if not _record_eventsub_notification_dedupe(db, message_id):
+            return JSONResponse({"success": True, "deduped": True})
+        _process_eventsub_notification(db, subscription, payload, message_id=message_id)
         return JSONResponse({"success": True})
 
     db.commit()
