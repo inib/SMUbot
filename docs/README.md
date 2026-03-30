@@ -130,6 +130,9 @@ unlocks the API for the bot, queue manager, and public web frontend.
   `!prioritize`, `!points`, and `!remove` is centralized in
   `bot/chat_command_core.py` using a transport-agnostic normalized chat DTO so
   TwitchIO handlers and tests can share the same execution path.
+- `bot/bot_app.py` resolves that command core import in both package mode
+  (`bot.bot_app`) and direct script mode (`python /bot/bot_app.py`) to support
+  local debugging and container entrypoint execution.
 - Supports channel-level `bot_message_overrides` / `message_overrides` payloads
   so future per-command/per-message template or level customization can be
   rolled out without refactoring dispatch logic.

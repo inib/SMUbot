@@ -10,18 +10,32 @@ import aiohttp
 from twitchio import eventsub, HTTPException
 from twitchio.ext import commands
 from twitchio.payloads import TokenRefreshedPayload
-from .chat_command_core import (
-    ChatCommandContext,
-    NormalizedChatInput,
-    dispatch_chat_command,
-    execute_playlist_request,
-    execute_points,
-    execute_prioritize,
-    execute_random_request,
-    execute_remove,
-    execute_request,
-    parse_chat_command,
-)
+if __package__:
+    from .chat_command_core import (
+        ChatCommandContext,
+        NormalizedChatInput,
+        dispatch_chat_command,
+        execute_playlist_request,
+        execute_points,
+        execute_prioritize,
+        execute_random_request,
+        execute_remove,
+        execute_request,
+        parse_chat_command,
+    )
+else:
+    from chat_command_core import (
+        ChatCommandContext,
+        NormalizedChatInput,
+        dispatch_chat_command,
+        execute_playlist_request,
+        execute_points,
+        execute_prioritize,
+        execute_random_request,
+        execute_remove,
+        execute_request,
+        parse_chat_command,
+    )
 
 # ---- Env ----
 # Configure logging before other components so that early startup messages are visible.
