@@ -677,6 +677,24 @@ def _eventsub_headers(access_token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {access_token}", "Client-Id": client_id}
 
 
+def _eventsub_app_headers() -> dict[str, str]:
+    """Return Twitch Helix headers for EventSub app-auth conduit management APIs.
+
+    Dependencies: Reads the configured Twitch client ID and app access token
+    via ``get_twitch_client_id`` and ``get_app_access_token``.
+    Code customers: Conduit and shard reconciliation helpers call this for
+    app-auth Helix endpoints that should not use owner user tokens.
+    Used variables/origin: ``app_token`` comes from OAuth client credentials;
+    ``client_id`` comes from configured Twitch application credentials.
+    """
+
+    client_id = get_twitch_client_id()
+    if not client_id:
+        raise RuntimeError("twitch oauth credentials are not configured")
+    app_token = get_app_access_token()
+    return {"Authorization": f"Bearer {app_token}", "Client-Id": client_id}
+
+
 def ensure_eventsub_subscriptions(request: FastAPIRequest, channel_pk: int, db: Session) -> None:
     """Ensure required EventSub subscriptions are registered for a channel.
 
@@ -1061,8 +1079,8 @@ def _ensure_twitch_conduit(
     Dependencies: Calls Twitch Helix conduit list/create APIs and persists to
     ``TwitchConduit`` through SQLAlchemy.
     Code customers: EventSub conduit reconciliation workflows.
-    Used variables/origin: ``headers`` come from ``_eventsub_headers`` using a
-    channel owner token; ``shard_count`` is derived from active channels.
+    Used variables/origin: ``headers`` come from ``_eventsub_app_headers`` and
+    carry app-auth credentials; ``shard_count`` is derived from active channels.
     """
 
     errors: list[str] = []
@@ -1113,8 +1131,9 @@ def _reconcile_twitch_conduit_shards(
     Dependencies: Uses Twitch Helix conduit shard list/update APIs and
     SQLAlchemy persistence via ``TwitchConduitShard``.
     Code customers: Conduit reconciliation and eventsub health coverage checks.
-    Used variables/origin: shard IDs come from Helix payloads and fallback to a
-    local range when Twitch omits data; callback originates from API route URL.
+    Used variables/origin: ``headers`` are app-auth conduit credentials; shard
+    IDs come from Helix payloads and fallback to a local range when Twitch omits
+    data; callback originates from API route URL.
     """
 
     errors: list[str] = []
@@ -1200,8 +1219,9 @@ def _reconcile_twitch_conduit_shards(
 def reconcile_eventsub_conduit_subscriptions(request: FastAPIRequest, db: Session) -> dict[str, Any]:
     """Reconcile conduit + shards + chat subscriptions for every active channel.
 
-    Dependencies: Uses channel-owner tokens via ``_eventsub_headers`` and Twitch
-    Helix conduit/subscription APIs, persisting into ``TwitchConduit``,
+    Dependencies: Uses app-auth via ``_eventsub_app_headers`` for conduit/shard
+    Helix APIs, plus channel-owner tokens via ``_eventsub_headers`` only for
+    per-channel subscription list/create APIs; persists into ``TwitchConduit``,
     ``TwitchConduitShard``, and ``EventSubscription``.
     Code customers: Health routes and onboarding setup call this to surface
     conduit alignment status without disabling websocket subscriptions.
@@ -1226,9 +1246,8 @@ def reconcile_eventsub_conduit_subscriptions(request: FastAPIRequest, db: Sessio
 
     now = datetime.utcnow()
     callback = str(request.url_for("eventsub_callback"))
-    primary_owner = owner_channel_pairs[0][1]
     try:
-        headers = _eventsub_headers(primary_owner.access_token)
+        headers = _eventsub_app_headers()
     except RuntimeError as exc:
         result["errors"].append(f"headers_unavailable: {exc}")
         return result
