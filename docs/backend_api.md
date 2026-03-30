@@ -6,6 +6,18 @@ This document summarizes the REST endpoints exposed by `backend_app.py`.
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/system/health` | Health check that verifies database connectivity. |
+| GET | `/system/config` | Read deployment configuration defaults and ingress mode toggles. |
+| PUT | `/system/config` | Update deployment configuration, scopes, and ingress mode toggles (admin token required). |
+
+### `/system/config`
+- **GET response fields**
+  - Existing setup/OAuth fields (`setup_complete`, client IDs/secrets, redirect URIs, scopes).
+  - `chat_ingress_mode`: `websocket` (default) or `webhook_conduit`.
+  - `chat_ingress_shadow_mode`: boolean dual-run switch for validation mode (default `false`).
+- **PUT payload additions**
+  - `chat_ingress_mode?: "websocket" | "webhook_conduit"`
+  - `chat_ingress_shadow_mode?: boolean`
+- **Compatibility note**: Startup includes additive schema patching for staggered deployments so older SQLite/prod DBs can run until the dedicated migration is applied.
 
 ## Authentication
 | Method | Path | Description |
@@ -118,6 +130,10 @@ Channel settings include queue intake controls:
 - `bot_message_level` controls how chatty the bot is in channel responses; allowed values are exactly `mute`, `normal`, `verbose`, and `debug` (default `normal`).
 - Priority point pricing is configurable: `prio_follow_enabled`, `prio_raid_enabled`, `prio_bits_per_point`, `prio_gifts_per_point`, and per-tier fields (`prio_sub_tier1_points`, `prio_sub_tier2_points`, `prio_sub_tier3_points`) control how many points events grant. Reset bonuses (`prio_reset_points_tier1`, `prio_reset_points_tier2`, `prio_reset_points_tier3`, `prio_reset_points_vip`, `prio_reset_points_mod`) are awarded when the queue resets for a new stream. Use `free_mod_priority_requests` to allow moderators to request priority without spending points.
 - Existing deployments should apply `migrations/20240624_queue_caps.sql` to add the new capacity columns and backfill defaults for legacy channels; the application also attempts to patch missing columns on startup for SQLite/legacy installs before enforcing queue caps.
+- EventSub conduit/replay storage is added in `migrations/20260330_eventsub_conduits.sql`:
+  - `eventsub_message_dedupe` for message idempotency (`message_id`, `received_at`, unique message IDs).
+  - `twitch_conduits` and `twitch_conduit_shards` for conduit/shard sync state.
+  - additive `event_subscriptions.conduit_id` and `event_subscriptions.shard_id` linkage columns.
 
 ### Queue Manager unified bot dropdown API mapping
 - Queue Manager uses a single state-aware dropdown model with options:
