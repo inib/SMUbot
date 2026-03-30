@@ -632,6 +632,17 @@ def get_app_access_token() -> str:
 
 
 def get_bot_user_id() -> Optional[str]:
+    """Return the Twitch user id for the configured bot account login.
+
+    Dependencies: Reads ``BotConfig.login`` from the database and resolves the
+    login through Twitch Helix ``/users`` using app access credentials.
+    Code customers: Bot config API serialization and EventSub conduit
+    reconciliation use this to target chat subscriptions at the bot identity.
+    Used variables/origin: ``login`` comes from persisted ``BotConfig`` row;
+    OAuth app token/client id come from ``get_app_access_token`` and
+    ``get_twitch_client_id``.
+    """
+
     global BOT_USER_ID
     if BOT_USER_ID:
         return BOT_USER_ID
@@ -675,6 +686,26 @@ def _eventsub_headers(access_token: str) -> dict[str, str]:
     if not client_id:
         raise RuntimeError("twitch oauth credentials are not configured")
     return {"Authorization": f"Bearer {access_token}", "Client-Id": client_id}
+
+
+def _eventsub_bot_headers(db: Session) -> dict[str, str]:
+    """Return Twitch Helix headers authenticated as the configured bot account.
+
+    Dependencies: Reads ``BotConfig.access_token`` from the provided database
+    session and combines it with ``get_twitch_client_id``.
+    Code customers: Conduit mode EventSub chat subscription list/create calls
+    require bot-auth headers so Twitch accepts ``condition.user_id`` for bot.
+    Used variables/origin: ``access_token`` originates in bot OAuth callback
+    persistence; ``client_id`` originates from app-level Twitch configuration.
+    """
+
+    client_id = get_twitch_client_id()
+    if not client_id:
+        raise RuntimeError("twitch oauth credentials are not configured")
+    cfg = db.query(BotConfig).order_by(BotConfig.id.asc()).first()
+    if not cfg or not cfg.access_token:
+        raise RuntimeError("bot oauth credentials are not configured")
+    return {"Authorization": f"Bearer {cfg.access_token}", "Client-Id": client_id}
 
 
 def _eventsub_app_headers() -> dict[str, str]:
@@ -1220,27 +1251,30 @@ def reconcile_eventsub_conduit_subscriptions(request: FastAPIRequest, db: Sessio
     """Reconcile conduit + shards + chat subscriptions for every active channel.
 
     Dependencies: Uses app-auth via ``_eventsub_app_headers`` for conduit/shard
-    Helix APIs, plus channel-owner tokens via ``_eventsub_headers`` only for
-    per-channel subscription list/create APIs; persists into ``TwitchConduit``,
+    Helix APIs, plus bot-auth via ``_eventsub_bot_headers`` and bot identity
+    via ``get_bot_user_id`` for per-channel chat subscription list/create APIs;
+    persists into ``TwitchConduit``,
     ``TwitchConduitShard``, and ``EventSubscription``.
     Code customers: Health routes and onboarding setup call this to surface
     conduit alignment status without disabling websocket subscriptions.
     Used variables/origin: channel list comes from ``ActiveChannel`` rows and
-    callback URL resolves from ``eventsub_callback`` route on ``request``.
+    callback URL resolves from ``eventsub_callback`` route on ``request``;
+    chat ``condition.user_id`` is sourced from the bot account instead of
+    per-channel owner identity.
     """
 
     channels = db.query(ActiveChannel).order_by(ActiveChannel.id.asc()).all()
-    owner_channel_pairs = [(ch, ch.owner) for ch in channels if ch.owner and ch.owner.access_token]
+    channels_with_owner_tokens = [ch for ch in channels if ch.owner and ch.owner.access_token]
     result: dict[str, Any] = {
         "run_at": datetime.utcnow().isoformat() + "Z",
         "channels_total": len(channels),
-        "channels_with_owner_tokens": len(owner_channel_pairs),
+        "channels_with_owner_tokens": len(channels_with_owner_tokens),
         "conduit": None,
         "shards": [],
         "subscriptions": [],
         "errors": [],
     }
-    if not owner_channel_pairs:
+    if not channels_with_owner_tokens:
         result["errors"].append("no_channels_with_owner_tokens")
         return result
 
@@ -1251,20 +1285,28 @@ def reconcile_eventsub_conduit_subscriptions(request: FastAPIRequest, db: Sessio
     except RuntimeError as exc:
         result["errors"].append(f"headers_unavailable: {exc}")
         return result
+    try:
+        bot_user_id = get_bot_user_id()
+        if not bot_user_id:
+            raise RuntimeError("bot user id is unavailable")
+        bot_headers = _eventsub_bot_headers(db)
+    except RuntimeError as exc:
+        result["errors"].append(f"bot_identity_unavailable: {exc}")
+        return result
 
-    conduit_row, conduit_errors = _ensure_twitch_conduit(headers, len(owner_channel_pairs), db, now)
+    conduit_row, conduit_errors = _ensure_twitch_conduit(headers, len(channels_with_owner_tokens), db, now)
     result["errors"].extend(conduit_errors)
     if not conduit_row:
         return result
     result["conduit"] = {"id": conduit_row.conduit_id, "status": conduit_row.status}
     assignment, shard_errors = _reconcile_twitch_conduit_shards(
-        headers, conduit_row, callback, len(owner_channel_pairs), db, now
+        headers, conduit_row, callback, len(channels_with_owner_tokens), db, now
     )
     result["errors"].extend(shard_errors)
     result["shards"] = [{"id": shard_id, "status": status} for shard_id, status in sorted(assignment.items())]
     shard_ids = sorted(assignment.keys()) or ["0"]
 
-    for index, (channel, owner) in enumerate(owner_channel_pairs):
+    for index, channel in enumerate(channels_with_owner_tokens):
         channel_result: dict[str, Any] = {
             "channel": channel.channel_name,
             "channel_id": channel.channel_id,
@@ -1272,17 +1314,16 @@ def reconcile_eventsub_conduit_subscriptions(request: FastAPIRequest, db: Sessio
             "status": "pending",
             "shard_id": None,
         }
-        if not owner.twitch_id or not channel.channel_id:
+        if not channel.channel_id:
             channel_result["status"] = "skipped_missing_condition_values"
             result["subscriptions"].append(channel_result)
             continue
         shard_id = shard_ids[index % len(shard_ids)]
         channel_result["shard_id"] = shard_id
         try:
-            owner_headers = _eventsub_headers(owner.access_token)
             remote_resp = requests.get(
                 "https://api.twitch.tv/helix/eventsub/subscriptions",
-                headers=owner_headers,
+                headers=bot_headers,
                 timeout=8,
             )
             remote_resp.raise_for_status()
@@ -1293,7 +1334,7 @@ def reconcile_eventsub_conduit_subscriptions(request: FastAPIRequest, db: Sessio
 
         desired_condition = {
             "broadcaster_user_id": channel.channel_id,
-            "user_id": owner.twitch_id,
+            "user_id": bot_user_id,
         }
         remote_match = next(
             (
@@ -1327,7 +1368,7 @@ def reconcile_eventsub_conduit_subscriptions(request: FastAPIRequest, db: Sessio
                 create_resp = requests.post(
                     "https://api.twitch.tv/helix/eventsub/subscriptions",
                     json=payload,
-                    headers=owner_headers,
+                    headers=bot_headers,
                     timeout=8,
                 )
                 create_resp.raise_for_status()
