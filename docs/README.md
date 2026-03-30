@@ -104,6 +104,16 @@ unlocks the API for the bot, queue manager, and public web frontend.
    complete the “Deployment Setup” flow before the API, queue manager, or bot
    pages are accessible.
 
+### Bot deployment notes
+- The bot image must copy all Python modules under `bot/` (for example
+  `bot_app.py`, `chat_command_core.py`, and future helper modules) into `/bot/`
+  so direct-script runtime mode keeps working with
+  `CMD ["python", "-u", "bot_app.py"]`.
+- `bot/Dockerfile` now uses `COPY bot/*.py ./` for future-proof module pickup.
+  If additional non-runtime files appear under `bot/`, add or update a
+  `.dockerignore` rule to keep image context small while preserving required
+  runtime modules.
+
 ## Backend Highlights
 - Uses a SQLite database stored at `/data/db.sqlite` and defines models for channels, songs, users, stream sessions, and requests.
 - Stores bot OAuth credentials via the `/bot/config` API and exposes an OAuth
