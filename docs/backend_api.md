@@ -5,7 +5,7 @@ This document summarizes the REST endpoints exposed by `backend_app.py`.
 ## System
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/system/health` | Health check that verifies database connectivity. |
+| GET | `/system/health` | Health check that verifies database connectivity plus global EventSub webhook/conduit coverage and shard state. |
 | GET | `/system/config` | Read deployment configuration defaults and ingress mode toggles. |
 | PUT | `/system/config` | Update deployment configuration, scopes, and ingress mode toggles (admin token required). |
 
@@ -337,7 +337,7 @@ Example calls (keywords and numeric IDs are interchangeable):
 | POST | `/twitch/eventsub/callback` | Twitch EventSub webhook used for follows, raids, cheers, and subscriptions (signature verified). |
 | POST | `/channels/{channel}/events` | Log a channel event such as follows, subscriptions, or bits (channel key or admin). |
 | GET | `/channels/{channel}/events` | Retrieve logged events with optional filtering by type and time. |
-| GET | `/channels/{channel}/eventsub/health` | Inspect persisted and remote EventSub subscription status (admin/OAuth). |
+| GET | `/channels/{channel}/eventsub/health` | Inspect persisted and remote EventSub subscription status (admin/OAuth), including conduit/shard assignment coverage. |
 | WS | `/channels/{channel}/events` | WebSocket stream that pushes queue and settings events for overlays. |
 
 Certain events award priority points and are fed by EventSub subscriptions created with the channel owner's token:
@@ -346,6 +346,18 @@ Certain events award priority points and are fed by EventSub subscriptions creat
 - Gifted subs (`gift_sub` events) grant 1 point for every 5 subscriptions gifted.
 - Follows and raids each grant 1 point when enabled in channel settings.
 - Direct subscriptions honor the configured tier multipliers.
+
+### EventSub webhook + conduit reconciliation notes
+
+- Existing webhook subscriptions for follows/raids/cheers/subscriptions are preserved.
+- In `webhook_conduit` mode (or when shadow mode is enabled), backend reconciliation now:
+  - creates/reuses a Twitch conduit,
+  - patches/reconciles shard transports to the webhook callback,
+  - creates/reuses `channel.chat.message` subscriptions on conduit transport for each active channel.
+- Conduit/subscription metadata is persisted in existing storage:
+  - `twitch_conduits`, `twitch_conduit_shards`
+  - `event_subscriptions` with `transport="conduit"` for `channel.chat.message`.
+- `GET /channels/{channel}/eventsub/health?reconcile=true` runs reconciliation on-demand and reports any reconciliation errors alongside local/remote state snapshots.
 
 ### Channel event stream
 

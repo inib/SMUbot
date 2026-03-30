@@ -81,6 +81,10 @@ unlocks the API for the bot, queue manager, and public web frontend.
   `event_subscriptions`.
 - Startup now includes a compatibility patch for the same tables/columns so
   staggered deploys on legacy SQLite/prod databases continue booting safely.
+- EventSub health endpoints now include conduit + shard coverage summaries:
+  - `GET /system/health` reports global conduit assignment coverage.
+  - `GET /channels/{channel}/eventsub/health` reports per-channel shard
+    assignment state and can trigger reconcile with `?reconcile=true`.
 
 ## Running with Docker
 1. Copy `example.env` to `stack.env` and adjust values such as `ADMIN_TOKEN`,

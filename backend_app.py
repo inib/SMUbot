@@ -110,6 +110,7 @@ EVENTSUB_EVENT_MAP: dict[str, str] = {
     "channel.subscribe": "sub",
     "channel.subscription.gift": "gift_sub",
 }
+EVENTSUB_CONDUIT_CHAT_TYPE = "channel.chat.message"
 
 BOT_MESSAGE_LEVEL_DETAILS: list[dict[str, str]] = [
     {
@@ -790,6 +791,12 @@ def ensure_eventsub_subscriptions(request: FastAPIRequest, channel_pk: int, db: 
             )
         db.commit()
 
+    if get_chat_ingress_mode() == "webhook_conduit" or get_chat_ingress_shadow_mode():
+        try:
+            reconcile_eventsub_conduit_subscriptions(request, db)
+        except Exception:
+            logger.warning("Conduit reconciliation failed after webhook subscription ensure", exc_info=True)
+
 
 def _verify_eventsub_signature(secret: str, message_id: str, timestamp: str, body: bytes, provided: str) -> bool:
     """Validate the HMAC signature on an EventSub webhook payload.
@@ -899,6 +906,348 @@ def _fetch_remote_eventsubs(channel: ActiveChannel) -> list[dict[str, Any]]:
     except Exception:
         logger.warning("Failed to fetch remote EventSub subscriptions for %s", channel.channel_name, exc_info=True)
         return []
+
+
+def _upsert_conduit_row(db: Session, conduit_id: str, status: str, synced_at: datetime) -> TwitchConduit:
+    """Persist the current Twitch conduit identity and sync status.
+
+    Dependencies: Uses SQLAlchemy ``Session`` writes against ``TwitchConduit``.
+    Code customers: Conduit reconciliation and health reporting paths.
+    Used variables/origin: ``conduit_id`` and ``status`` originate from Helix
+    conduit payloads; ``synced_at`` is generated at reconciliation time.
+    """
+
+    row = db.query(TwitchConduit).order_by(TwitchConduit.id.asc()).first()
+    if not row:
+        row = TwitchConduit(conduit_id=conduit_id)
+        db.add(row)
+    row.conduit_id = conduit_id
+    row.status = status or "enabled"
+    row.last_sync_at = synced_at
+    return row
+
+
+def _ensure_twitch_conduit(
+    headers: Mapping[str, str], shard_count: int, db: Session, now: datetime
+) -> tuple[Optional[TwitchConduit], list[str]]:
+    """Create or reuse a single Twitch conduit sized for current channel load.
+
+    Dependencies: Calls Twitch Helix conduit list/create APIs and persists to
+    ``TwitchConduit`` through SQLAlchemy.
+    Code customers: EventSub conduit reconciliation workflows.
+    Used variables/origin: ``headers`` come from ``_eventsub_headers`` using a
+    channel owner token; ``shard_count`` is derived from active channels.
+    """
+
+    errors: list[str] = []
+    selected: Optional[dict[str, Any]] = None
+    try:
+        resp = requests.get("https://api.twitch.tv/helix/eventsub/conduits", headers=headers, timeout=8)
+        resp.raise_for_status()
+        existing = (resp.json().get("data") or [])
+        if existing:
+            selected = existing[0]
+    except Exception as exc:
+        errors.append(f"conduit.list_failed: {exc}")
+    if not selected:
+        try:
+            create_resp = requests.post(
+                "https://api.twitch.tv/helix/eventsub/conduits",
+                json={"shard_count": max(1, shard_count)},
+                headers=headers,
+                timeout=8,
+            )
+            create_resp.raise_for_status()
+            selected = (create_resp.json().get("data") or [None])[0]
+        except Exception as exc:
+            errors.append(f"conduit.create_failed: {exc}")
+            return None, errors
+    if not selected:
+        errors.append("conduit.empty_response")
+        return None, errors
+    conduit_id = selected.get("id")
+    if not conduit_id:
+        errors.append("conduit.missing_id")
+        return None, errors
+    persisted = _upsert_conduit_row(db, conduit_id, selected.get("status") or "enabled", now)
+    db.flush()
+    return persisted, errors
+
+
+def _reconcile_twitch_conduit_shards(
+    headers: Mapping[str, str],
+    conduit_row: TwitchConduit,
+    callback: str,
+    target_shard_count: int,
+    db: Session,
+    now: datetime,
+) -> tuple[dict[str, str], list[str]]:
+    """Patch remote conduit shards and persist shard status/callback metadata.
+
+    Dependencies: Uses Twitch Helix conduit shard list/update APIs and
+    SQLAlchemy persistence via ``TwitchConduitShard``.
+    Code customers: Conduit reconciliation and eventsub health coverage checks.
+    Used variables/origin: shard IDs come from Helix payloads and fallback to a
+    local range when Twitch omits data; callback originates from API route URL.
+    """
+
+    errors: list[str] = []
+    desired_ids = [str(index) for index in range(max(1, target_shard_count))]
+    secret = secrets.token_urlsafe(32)
+    shards_payload = [
+        {
+            "id": shard_id,
+            "transport": {"method": "webhook", "callback": callback, "secret": secret},
+        }
+        for shard_id in desired_ids
+    ]
+    try:
+        patch_resp = requests.patch(
+            "https://api.twitch.tv/helix/eventsub/conduits/shards",
+            json={"conduit_id": conduit_row.conduit_id, "shards": shards_payload},
+            headers=headers,
+            timeout=8,
+        )
+        patch_resp.raise_for_status()
+        patch_data = patch_resp.json().get("data") or []
+    except Exception as exc:
+        errors.append(f"conduit.shards_patch_failed: {exc}")
+        patch_data = []
+    try:
+        get_resp = requests.get(
+            "https://api.twitch.tv/helix/eventsub/conduits/shards",
+            params={"conduit_id": conduit_row.conduit_id},
+            headers=headers,
+            timeout=8,
+        )
+        get_resp.raise_for_status()
+        remote_shards = get_resp.json().get("data") or patch_data
+    except Exception as exc:
+        errors.append(f"conduit.shards_list_failed: {exc}")
+        remote_shards = patch_data
+
+    assignment: dict[str, str] = {}
+    known_ids: set[str] = set()
+    for shard in remote_shards:
+        shard_id = str(shard.get("id")) if shard.get("id") is not None else None
+        if not shard_id:
+            continue
+        known_ids.add(shard_id)
+        assignment[shard_id] = shard.get("status") or "enabled"
+        row = (
+            db.query(TwitchConduitShard)
+            .filter(
+                TwitchConduitShard.conduit_fk == conduit_row.id,
+                TwitchConduitShard.shard_id == shard_id,
+            )
+            .one_or_none()
+        )
+        if not row:
+            row = TwitchConduitShard(conduit_fk=conduit_row.id, shard_id=shard_id)
+            db.add(row)
+        transport = shard.get("transport") or {}
+        row.transport_callback = transport.get("callback") or callback
+        row.status = shard.get("status") or "enabled"
+        row.last_sync_at = now
+
+    for shard_id in desired_ids:
+        if shard_id in known_ids:
+            continue
+        assignment.setdefault(shard_id, "pending")
+        row = (
+            db.query(TwitchConduitShard)
+            .filter(
+                TwitchConduitShard.conduit_fk == conduit_row.id,
+                TwitchConduitShard.shard_id == shard_id,
+            )
+            .one_or_none()
+        )
+        if not row:
+            row = TwitchConduitShard(conduit_fk=conduit_row.id, shard_id=shard_id)
+            db.add(row)
+        row.transport_callback = callback
+        row.status = "pending"
+        row.last_sync_at = now
+    return assignment, errors
+
+
+def reconcile_eventsub_conduit_subscriptions(request: FastAPIRequest, db: Session) -> dict[str, Any]:
+    """Reconcile conduit + shards + chat subscriptions for every active channel.
+
+    Dependencies: Uses channel-owner tokens via ``_eventsub_headers`` and Twitch
+    Helix conduit/subscription APIs, persisting into ``TwitchConduit``,
+    ``TwitchConduitShard``, and ``EventSubscription``.
+    Code customers: Health routes and onboarding setup call this to surface
+    conduit alignment status without disabling websocket subscriptions.
+    Used variables/origin: channel list comes from ``ActiveChannel`` rows and
+    callback URL resolves from ``eventsub_callback`` route on ``request``.
+    """
+
+    channels = db.query(ActiveChannel).order_by(ActiveChannel.id.asc()).all()
+    owner_channel_pairs = [(ch, ch.owner) for ch in channels if ch.owner and ch.owner.access_token]
+    result: dict[str, Any] = {
+        "run_at": datetime.utcnow().isoformat() + "Z",
+        "channels_total": len(channels),
+        "channels_with_owner_tokens": len(owner_channel_pairs),
+        "conduit": None,
+        "shards": [],
+        "subscriptions": [],
+        "errors": [],
+    }
+    if not owner_channel_pairs:
+        result["errors"].append("no_channels_with_owner_tokens")
+        return result
+
+    now = datetime.utcnow()
+    callback = str(request.url_for("eventsub_callback"))
+    primary_owner = owner_channel_pairs[0][1]
+    try:
+        headers = _eventsub_headers(primary_owner.access_token)
+    except RuntimeError as exc:
+        result["errors"].append(f"headers_unavailable: {exc}")
+        return result
+
+    conduit_row, conduit_errors = _ensure_twitch_conduit(headers, len(owner_channel_pairs), db, now)
+    result["errors"].extend(conduit_errors)
+    if not conduit_row:
+        return result
+    result["conduit"] = {"id": conduit_row.conduit_id, "status": conduit_row.status}
+    assignment, shard_errors = _reconcile_twitch_conduit_shards(
+        headers, conduit_row, callback, len(owner_channel_pairs), db, now
+    )
+    result["errors"].extend(shard_errors)
+    result["shards"] = [{"id": shard_id, "status": status} for shard_id, status in sorted(assignment.items())]
+    shard_ids = sorted(assignment.keys()) or ["0"]
+
+    for index, (channel, owner) in enumerate(owner_channel_pairs):
+        channel_result: dict[str, Any] = {
+            "channel": channel.channel_name,
+            "channel_id": channel.channel_id,
+            "subscription_type": EVENTSUB_CONDUIT_CHAT_TYPE,
+            "status": "pending",
+            "shard_id": None,
+        }
+        if not owner.twitch_id or not channel.channel_id:
+            channel_result["status"] = "skipped_missing_condition_values"
+            result["subscriptions"].append(channel_result)
+            continue
+        shard_id = shard_ids[index % len(shard_ids)]
+        channel_result["shard_id"] = shard_id
+        try:
+            owner_headers = _eventsub_headers(owner.access_token)
+            remote_resp = requests.get(
+                "https://api.twitch.tv/helix/eventsub/subscriptions",
+                headers=owner_headers,
+                timeout=8,
+            )
+            remote_resp.raise_for_status()
+            remote_subs = remote_resp.json().get("data") or []
+        except Exception as exc:
+            result["errors"].append(f"subscriptions.list_failed.{channel.channel_name}: {exc}")
+            remote_subs = []
+
+        desired_condition = {
+            "broadcaster_user_id": channel.channel_id,
+            "user_id": owner.twitch_id,
+        }
+        remote_match = next(
+            (
+                row
+                for row in remote_subs
+                if row.get("type") == EVENTSUB_CONDUIT_CHAT_TYPE
+                and (row.get("condition") or {}).get("broadcaster_user_id") == channel.channel_id
+                and (row.get("transport") or {}).get("method") == "conduit"
+                and (row.get("transport") or {}).get("conduit_id") == conduit_row.conduit_id
+            ),
+            None,
+        )
+        existing = (
+            db.query(EventSubscription)
+            .filter(
+                EventSubscription.channel_id == channel.id,
+                EventSubscription.type == EVENTSUB_CONDUIT_CHAT_TYPE,
+            )
+            .one_or_none()
+        )
+        twitch_id = (remote_match or {}).get("id")
+        status = (remote_match or {}).get("status") or "pending"
+        if not twitch_id:
+            payload = {
+                "type": EVENTSUB_CONDUIT_CHAT_TYPE,
+                "version": "1",
+                "condition": desired_condition,
+                "transport": {"method": "conduit", "conduit_id": conduit_row.conduit_id},
+            }
+            try:
+                create_resp = requests.post(
+                    "https://api.twitch.tv/helix/eventsub/subscriptions",
+                    json=payload,
+                    headers=owner_headers,
+                    timeout=8,
+                )
+                create_resp.raise_for_status()
+                created = (create_resp.json().get("data") or [None])[0] or {}
+                twitch_id = created.get("id")
+                status = created.get("status") or status
+            except Exception as exc:
+                result["errors"].append(f"subscriptions.create_failed.{channel.channel_name}: {exc}")
+                channel_result["status"] = "create_failed"
+                channel_result["error"] = str(exc)
+                if existing:
+                    existing.status = "error"
+                    existing.meta = json.dumps({"condition": desired_condition, "error": str(exc)})
+                    existing.conduit_id = conduit_row.conduit_id
+                    existing.shard_id = shard_id
+                    existing.updated_at = now
+                result["subscriptions"].append(channel_result)
+                continue
+
+        if not twitch_id:
+            channel_result["status"] = "missing_subscription_id"
+            result["errors"].append(f"subscriptions.missing_id.{channel.channel_name}")
+            result["subscriptions"].append(channel_result)
+            continue
+        secret = existing.secret if existing and existing.secret else secrets.token_urlsafe(32)
+        meta_payload = {
+            "condition": desired_condition,
+            "transport": {"method": "conduit", "conduit_id": conduit_row.conduit_id},
+            "shard_id": shard_id,
+            "reconciled_at": now.isoformat() + "Z",
+        }
+        if existing:
+            existing.twitch_subscription_id = twitch_id
+            existing.status = status
+            existing.secret = secret
+            existing.callback = callback
+            existing.transport = "conduit"
+            existing.conduit_id = conduit_row.conduit_id
+            existing.shard_id = shard_id
+            existing.meta = json.dumps(meta_payload)
+            if status == "enabled":
+                existing.last_verified_at = now
+        else:
+            db.add(
+                EventSubscription(
+                    channel_id=channel.id,
+                    twitch_subscription_id=twitch_id,
+                    type=EVENTSUB_CONDUIT_CHAT_TYPE,
+                    status=status,
+                    secret=secret,
+                    callback=callback,
+                    transport="conduit",
+                    conduit_id=conduit_row.conduit_id,
+                    shard_id=shard_id,
+                    meta=json.dumps(meta_payload),
+                    last_verified_at=now if status == "enabled" else None,
+                )
+            )
+        channel_result["status"] = status
+        result["subscriptions"].append(channel_result)
+
+    conduit_row.last_sync_at = now
+    conduit_row.status = "enabled" if not result["errors"] else "degraded"
+    db.commit()
+    return result
 
 
 def get_ytmusic_client() -> YTMusic:
@@ -4510,11 +4859,61 @@ def update_system_config(
 
 
 @app.get("/system/health")
-def health():
+def health(request: FastAPIRequest, db: Session = Depends(get_db)):
+    """Return global service health including EventSub conduit coverage details.
+
+    Dependencies: Checks SQL connectivity via ``engine.connect`` and reads
+    EventSub persistence tables through SQLAlchemy ``Session``.
+    Code customers: Infra uptime probes and admin diagnostics dashboards.
+    Used variables/origin: derives active-channel coverage from
+    ``ActiveChannel`` and ``EventSubscription`` rows plus persisted conduit and
+    shard rows for webhook/conduit rollout readiness.
+    """
+
     try:
         with engine.connect() as _:
             pass
-        return {"status": "ok"}
+        channels_total = db.query(ActiveChannel).count()
+        conduit_channels = (
+            db.query(EventSubscription.channel_id)
+            .filter(EventSubscription.type == EVENTSUB_CONDUIT_CHAT_TYPE)
+            .distinct()
+            .count()
+        )
+        conduit_row = db.query(TwitchConduit).order_by(TwitchConduit.id.asc()).first()
+        shard_rows = (
+            db.query(TwitchConduitShard)
+            .filter(TwitchConduitShard.conduit_fk == conduit_row.id)
+            .order_by(TwitchConduitShard.shard_id.asc())
+            .all()
+            if conduit_row
+            else []
+        )
+        coverage = (conduit_channels / channels_total) if channels_total else 1.0
+        return {
+            "status": "ok",
+            "eventsub": {
+                "chat_ingress_mode": get_chat_ingress_mode(),
+                "chat_ingress_shadow_mode": get_chat_ingress_shadow_mode(),
+                "active_channels": channels_total,
+                "conduit_subscription_channels": conduit_channels,
+                "conduit_assignment_coverage": coverage,
+                "conduit": {
+                    "id": conduit_row.conduit_id if conduit_row else None,
+                    "status": conduit_row.status if conduit_row else "missing",
+                    "last_sync_at": conduit_row.last_sync_at if conduit_row else None,
+                },
+                "shards": [
+                    {
+                        "id": shard.shard_id,
+                        "status": shard.status,
+                        "callback": shard.transport_callback,
+                        "last_sync_at": shard.last_sync_at,
+                    }
+                    for shard in shard_rows
+                ],
+            },
+        }
     except Exception as e:
         raise HTTPException(500, detail=str(e))
 
@@ -7181,7 +7580,12 @@ def list_events(channel: str, type: Optional[str] = None, since: Optional[str] =
 
 
 @app.get("/channels/{channel}/eventsub/health", response_model=Dict[str, Any], dependencies=[Depends(require_token)])
-def eventsub_health(channel: str, db: Session = Depends(get_db)):
+def eventsub_health(
+    channel: str,
+    request: FastAPIRequest,
+    reconcile: bool = Query(False),
+    db: Session = Depends(get_db),
+):
     """Summarize EventSub subscription state for diagnostics.
 
     Dependencies: Enforces admin/OAuth access via ``require_token`` and uses the
@@ -7205,13 +7609,59 @@ def eventsub_health(channel: str, db: Session = Depends(get_db)):
             "last_verified_at": sub.last_verified_at,
             "last_notified_at": sub.last_notified_at,
             "callback": sub.callback,
+            "transport": sub.transport,
+            "conduit_id": sub.conduit_id,
+            "shard_id": sub.shard_id,
+            "meta": sub.meta,
         }
         for sub in db.query(EventSubscription).filter(EventSubscription.channel_id == channel_pk)
     ]
     remote = _fetch_remote_eventsubs(channel_obj)
     if not remote:
         logger.info("Remote EventSub data unavailable for %s; check token/scopes", channel)
-    return {"local": local, "remote": remote}
+    conduit_row = db.query(TwitchConduit).order_by(TwitchConduit.id.asc()).first()
+    shards = (
+        db.query(TwitchConduitShard)
+        .filter(TwitchConduitShard.conduit_fk == conduit_row.id)
+        .order_by(TwitchConduitShard.shard_id.asc())
+        .all()
+        if conduit_row
+        else []
+    )
+    channel_chat_sub = next((sub for sub in local if sub["type"] == EVENTSUB_CONDUIT_CHAT_TYPE), None)
+    shard_ids = {row.shard_id for row in shards}
+    assignment_ok = bool(channel_chat_sub and channel_chat_sub.get("shard_id") in shard_ids)
+    reconcile_state: Optional[dict[str, Any]] = None
+    if reconcile:
+        try:
+            reconcile_state = reconcile_eventsub_conduit_subscriptions(request, db)
+        except Exception as exc:
+            reconcile_state = {"errors": [str(exc)], "status": "failed"}
+
+    return {
+        "local": local,
+        "remote": remote,
+        "conduit": {
+            "id": conduit_row.conduit_id if conduit_row else None,
+            "status": conduit_row.status if conduit_row else "missing",
+            "last_sync_at": conduit_row.last_sync_at if conduit_row else None,
+        },
+        "shards": [
+            {
+                "id": row.shard_id,
+                "status": row.status,
+                "callback": row.transport_callback,
+                "last_sync_at": row.last_sync_at,
+            }
+            for row in shards
+        ],
+        "coverage": {
+            "channel_chat_subscription_present": bool(channel_chat_sub),
+            "channel_shard_assignment_ok": assignment_ok,
+            "known_shard_ids": sorted(shard_ids),
+        },
+        "reconciliation": reconcile_state,
+    }
 
 # =====================================
 # Routes: Streams
