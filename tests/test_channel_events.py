@@ -115,6 +115,62 @@ def _setup_channel() -> Dict[str, int]:
         db.close()
 
 
+def _create_chat_conduit_subscription(
+    channel_pk: int,
+    *,
+    subscription_id: str,
+    conduit_id: str,
+    shard_id: str,
+    secret: str,
+) -> None:
+    """Persist a conduit-backed chat subscription fixture for callback tests.
+
+    Dependencies: EventSub conduit ORM rows and ``EventSubscription`` storage.
+    Code customers: EventSub chat callback tests validating authoritative versus
+    shadow behavior. Used variables/origin: identifiers and secrets are supplied
+    per test to isolate signed payload fixtures.
+    """
+
+    db = backend_app.SessionLocal()
+    try:
+        conduit = backend_app.TwitchConduit(conduit_id=conduit_id, status="enabled")
+        db.add(conduit)
+        db.commit()
+        db.refresh(conduit)
+        db.add(
+            backend_app.TwitchConduitShard(
+                conduit_fk=conduit.id,
+                shard_id=shard_id,
+                transport_callback="https://example/callback",
+                transport_secret=secret,
+                status="enabled",
+            )
+        )
+        db.add(
+            backend_app.EventSubscription(
+                channel_id=channel_pk,
+                twitch_subscription_id=subscription_id,
+                type="channel.chat.message",
+                status="enabled",
+                secret="legacy-subscription-secret",
+                callback="https://example/callback",
+                transport="conduit",
+                conduit_id=conduit_id,
+                shard_id=shard_id,
+                meta=json.dumps(
+                    {
+                        "transport": {"method": "conduit", "conduit_id": conduit_id},
+                        "conduit_shard": {"conduit_id": conduit_id, "shard_id": shard_id},
+                        "shard_id": shard_id,
+                    }
+                ),
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+
 class ChannelEventTests(unittest.TestCase):
     def setUp(self) -> None:
         _wipe_db()
@@ -779,6 +835,187 @@ class ChannelEventTests(unittest.TestCase):
             )
             self.assertIsNotNone(sub_row.last_notified_at)
             self.assertEqual(db.query(backend_app.Event).filter(backend_app.Event.channel_id == details["channel_pk"]).count(), 0)
+        finally:
+            db.close()
+
+    def test_eventsub_chat_notification_authoritative_request_mutates_queue(self) -> None:
+        """Execute authoritative webhook request command and persist queue mutation."""
+
+        details = _setup_channel()
+        secret = "chatsecret-authoritative"
+        conduit_id = "conduit-chat-authoritative"
+        shard_id = "3"
+        subscription_id = "sub-chat-authoritative"
+        db = backend_app.SessionLocal()
+        try:
+            backend_app.set_settings(db, {"chat_ingress_mode": "webhook_conduit", "chat_ingress_shadow_mode": "0"})
+        finally:
+            db.close()
+        _create_chat_conduit_subscription(
+            details["channel_pk"],
+            subscription_id=subscription_id,
+            conduit_id=conduit_id,
+            shard_id=shard_id,
+            secret=secret,
+        )
+
+        body = {
+            "subscription": {
+                "id": subscription_id,
+                "type": "channel.chat.message",
+                "status": "enabled",
+                "version": "1",
+                "condition": {"broadcaster_user_id": "cid"},
+                "transport": {"method": "conduit", "conduit_id": conduit_id},
+            },
+            "event": {
+                "chatter_user_id": "webhook-user-1",
+                "chatter_user_login": "webhookuser",
+                "message": {"text": "!request Artist C - Song Three"},
+            },
+        }
+        raw = json.dumps(body).encode()
+        message_id = "msg-chat-authoritative"
+        timestamp = "2023-01-01T00:00:00Z"
+        signature = hmac.new(secret.encode(), msg=(message_id + timestamp).encode() + raw, digestmod=hashlib.sha256)
+        response = self.client.post(
+            "/twitch/eventsub/callback",
+            data=raw,
+            headers={
+                "Twitch-Eventsub-Message-Id": message_id,
+                "Twitch-Eventsub-Message-Timestamp": timestamp,
+                "Twitch-Eventsub-Message-Signature": f"sha256={signature.hexdigest()}",
+                "Twitch-Eventsub-Message-Type": "notification",
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+
+        db = backend_app.SessionLocal()
+        try:
+            rows = db.query(backend_app.Request).filter(backend_app.Request.channel_id == details["channel_pk"]).all()
+            self.assertEqual(len(rows), 1)
+            song = db.get(backend_app.Song, rows[0].song_id)
+            self.assertIsNotNone(song)
+            self.assertEqual(song.artist, "Artist C")
+            self.assertEqual(song.title, "Song Three")
+        finally:
+            db.close()
+
+    def test_eventsub_chat_notification_shadow_mode_request_does_not_mutate_queue(self) -> None:
+        """Keep webhook chat commands parse-only when shadow mode is enabled."""
+
+        details = _setup_channel()
+        secret = "chatsecret-shadow-no-mutate"
+        conduit_id = "conduit-chat-shadow-no-mutate"
+        shard_id = "4"
+        subscription_id = "sub-chat-shadow-no-mutate"
+        db = backend_app.SessionLocal()
+        try:
+            backend_app.set_settings(db, {"chat_ingress_mode": "webhook_conduit", "chat_ingress_shadow_mode": "1"})
+        finally:
+            db.close()
+        _create_chat_conduit_subscription(
+            details["channel_pk"],
+            subscription_id=subscription_id,
+            conduit_id=conduit_id,
+            shard_id=shard_id,
+            secret=secret,
+        )
+
+        body = {
+            "subscription": {
+                "id": subscription_id,
+                "type": "channel.chat.message",
+                "status": "enabled",
+                "version": "1",
+                "condition": {"broadcaster_user_id": "cid"},
+                "transport": {"method": "conduit", "conduit_id": conduit_id},
+            },
+            "event": {
+                "chatter_user_id": "webhook-user-2",
+                "chatter_user_login": "webhookuser2",
+                "message": {"text": "!request Artist D - Song Four"},
+            },
+        }
+        raw = json.dumps(body).encode()
+        message_id = "msg-chat-shadow-no-mutate"
+        timestamp = "2023-01-01T00:00:00Z"
+        signature = hmac.new(secret.encode(), msg=(message_id + timestamp).encode() + raw, digestmod=hashlib.sha256)
+        response = self.client.post(
+            "/twitch/eventsub/callback",
+            data=raw,
+            headers={
+                "Twitch-Eventsub-Message-Id": message_id,
+                "Twitch-Eventsub-Message-Timestamp": timestamp,
+                "Twitch-Eventsub-Message-Signature": f"sha256={signature.hexdigest()}",
+                "Twitch-Eventsub-Message-Type": "notification",
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+
+        db = backend_app.SessionLocal()
+        try:
+            rows = db.query(backend_app.Request).filter(backend_app.Request.channel_id == details["channel_pk"]).all()
+            self.assertEqual(len(rows), 0)
+        finally:
+            db.close()
+
+    def test_eventsub_chat_notification_non_command_is_ignored(self) -> None:
+        """Ignore non-command chat lines and keep queue state unchanged."""
+
+        details = _setup_channel()
+        secret = "chatsecret-non-command"
+        conduit_id = "conduit-chat-non-command"
+        shard_id = "5"
+        subscription_id = "sub-chat-non-command"
+        db = backend_app.SessionLocal()
+        try:
+            backend_app.set_settings(db, {"chat_ingress_mode": "webhook_conduit", "chat_ingress_shadow_mode": "0"})
+        finally:
+            db.close()
+        _create_chat_conduit_subscription(
+            details["channel_pk"],
+            subscription_id=subscription_id,
+            conduit_id=conduit_id,
+            shard_id=shard_id,
+            secret=secret,
+        )
+
+        body = {
+            "subscription": {
+                "id": subscription_id,
+                "type": "channel.chat.message",
+                "status": "enabled",
+                "version": "1",
+                "condition": {"broadcaster_user_id": "cid"},
+                "transport": {"method": "conduit", "conduit_id": conduit_id},
+            },
+            "event": {
+                "chatter_user_id": "webhook-user-3",
+                "chatter_user_login": "webhookuser3",
+                "message": {"text": "hello chat"},
+            },
+        }
+        raw = json.dumps(body).encode()
+        message_id = "msg-chat-non-command"
+        timestamp = "2023-01-01T00:00:00Z"
+        signature = hmac.new(secret.encode(), msg=(message_id + timestamp).encode() + raw, digestmod=hashlib.sha256)
+        response = self.client.post(
+            "/twitch/eventsub/callback",
+            data=raw,
+            headers={
+                "Twitch-Eventsub-Message-Id": message_id,
+                "Twitch-Eventsub-Message-Timestamp": timestamp,
+                "Twitch-Eventsub-Message-Signature": f"sha256={signature.hexdigest()}",
+                "Twitch-Eventsub-Message-Type": "notification",
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+
+        db = backend_app.SessionLocal()
+        try:
+            rows = db.query(backend_app.Request).filter(backend_app.Request.channel_id == details["channel_pk"]).all()
+            self.assertEqual(len(rows), 0)
         finally:
             db.close()
 
