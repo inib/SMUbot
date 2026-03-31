@@ -171,6 +171,24 @@ def _create_chat_conduit_subscription(
         db.close()
 
 
+def _signed_eventsub_headers(secret: str, message_id: str, timestamp: str, raw_payload: bytes) -> Dict[str, str]:
+    """Build Twitch EventSub callback headers with a valid HMAC signature.
+
+    Dependencies: standard ``hashlib``/``hmac`` helpers.
+    Code customers: webhook callback integration tests.
+    Used variables/origin: per-test secret/message identifiers and serialized
+    request body bytes.
+    """
+
+    digest = hmac.new(secret.encode(), msg=(message_id + timestamp).encode() + raw_payload, digestmod=hashlib.sha256)
+    return {
+        "Twitch-Eventsub-Message-Id": message_id,
+        "Twitch-Eventsub-Message-Timestamp": timestamp,
+        "Twitch-Eventsub-Message-Signature": f"sha256={digest.hexdigest()}",
+        "Twitch-Eventsub-Message-Type": "notification",
+    }
+
+
 class ChannelEventTests(unittest.TestCase):
     def setUp(self) -> None:
         _wipe_db()
@@ -923,6 +941,103 @@ class ChannelEventTests(unittest.TestCase):
             backend_app.set_settings(db, {"chat_ingress_mode": "webhook_conduit", "chat_ingress_shadow_mode": "1"})
         finally:
             db.close()
+        _create_chat_conduit_subscription(
+            details["channel_pk"],
+            subscription_id=subscription_id,
+            conduit_id=conduit_id,
+            shard_id=shard_id,
+            secret=secret,
+        )
+        body = {
+            "subscription": {
+                "id": subscription_id,
+                "type": "channel.chat.message",
+                "status": "enabled",
+                "version": "1",
+                "condition": {"broadcaster_user_id": "cid"},
+                "transport": {"method": "conduit", "conduit_id": conduit_id},
+            },
+            "event": {
+                "chatter_user_id": "webhook-user-shadow",
+                "chatter_user_login": "webhookshadow",
+                "message": {"text": "!request Artist D - Song Four"},
+            },
+        }
+        raw = json.dumps(body).encode()
+        response = self.client.post(
+            "/twitch/eventsub/callback",
+            data=raw,
+            headers=_signed_eventsub_headers(secret, "msg-chat-shadow-no-mutate", "2023-01-01T00:00:00Z", raw),
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+
+        db = backend_app.SessionLocal()
+        try:
+            rows = db.query(backend_app.Request).filter(backend_app.Request.channel_id == details["channel_pk"]).all()
+            self.assertEqual(len(rows), 0)
+        finally:
+            db.close()
+
+    def test_eventsub_chat_notification_authoritative_points_sends_reply(self) -> None:
+        """Reply to ``!points`` in authoritative mode without mutating the queue."""
+
+        details = _setup_channel()
+        secret = "chatsecret-points"
+        conduit_id = "conduit-chat-points"
+        shard_id = "8"
+        subscription_id = "sub-chat-points"
+        _create_chat_conduit_subscription(
+            details["channel_pk"],
+            subscription_id=subscription_id,
+            conduit_id=conduit_id,
+            shard_id=shard_id,
+            secret=secret,
+        )
+        db = backend_app.SessionLocal()
+        try:
+            backend_app.set_settings(db, {"chat_ingress_mode": "webhook_conduit", "chat_ingress_shadow_mode": "0"})
+            db.add(
+                backend_app.User(
+                    channel_id=details["channel_pk"],
+                    twitch_id="webhook-user-points",
+                    username="pointsuser",
+                    prio_points=7,
+                )
+            )
+            db.commit()
+        finally:
+            db.close()
+        body = {
+            "subscription": {
+                "id": subscription_id,
+                "type": "channel.chat.message",
+                "status": "enabled",
+                "version": "1",
+                "condition": {"broadcaster_user_id": "cid"},
+                "transport": {"method": "conduit", "conduit_id": conduit_id},
+            },
+            "event": {
+                "chatter_user_id": "webhook-user-points",
+                "chatter_user_login": "pointsuser",
+                "message": {"text": "!points"},
+            },
+        }
+        raw = json.dumps(body).encode()
+        with mock.patch.object(backend_app, "get_bot_user_id", return_value="bot-user-1"), mock.patch.object(
+            backend_app, "_eventsub_bot_headers", return_value={"Authorization": "Bearer token", "Client-Id": "cid"}
+        ), mock.patch("backend_app.requests.post") as mock_send:
+            mock_send.return_value.raise_for_status.return_value = None
+            response = self.client.post(
+                "/twitch/eventsub/callback",
+                data=raw,
+                headers=_signed_eventsub_headers(secret, "msg-chat-points", "2023-01-01T00:00:00Z", raw),
+            )
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(mock_send.call_count, 1)
+            self.assertEqual(
+                mock_send.call_args.kwargs["json"]["message"],
+                "pointsuser has 7 points",
+            )
 
     def test_eventsub_chat_notification_authoritative_reply_respects_mute_policy(self) -> None:
         """Suppress webhook reply sends when the channel bot message level is mute."""
@@ -1041,6 +1156,12 @@ class ChannelEventTests(unittest.TestCase):
             self.assertEqual(first.status_code, 200, first.text)
             self.assertEqual(second.status_code, 200, second.text)
             self.assertEqual(mock_send.call_count, 1)
+        db = backend_app.SessionLocal()
+        try:
+            requests_for_channel = db.query(backend_app.Request).filter(backend_app.Request.channel_id == details["channel_pk"]).count()
+            self.assertEqual(requests_for_channel, 1)
+        finally:
+            db.close()
 
     def test_eventsub_chat_notification_non_command_is_ignored(self) -> None:
         """Ignore non-command chat lines and keep queue state unchanged."""

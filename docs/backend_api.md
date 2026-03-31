@@ -457,11 +457,14 @@ Certain events award priority points and are fed by EventSub subscriptions creat
 - **Notification routing**:
   - Reward events (`follow`, `raid`, `bits`, `sub`, `gift_sub`) continue through existing event persistence/reward logic.
   - `channel.chat.message` notifications route to the dedicated webhook chat ingress handler.
-  - In authoritative mode, webhook chat ingress now dispatches canonical commands to backend execution routines (queue mutations + existing queue/event notifications) and records structured outcomes: `executed`, `rejected`, or `error` with per-command reason codes (`invalid_args`, `not_found`, `permission_denied`, etc.).
+  - In authoritative mode, webhook chat ingress now dispatches canonical commands to backend execution routines (queue mutations + existing queue/event notifications) and records structured outcomes: `executed`, `rejected`, or `error` with per-command reason codes (`parse_*`, `auth_*`, `business_rule_*`, `send_*`).
+  - Canonical webhook execution now covers `request`, `playlist_request`, `prioritize`, `remove`, and `points` with queue mutation and reply semantics aligned to the prior websocket flow.
+  - Explicit no-op buckets are tracked for non-command chat lines, unknown aliases, policy-suppressed replies, and shadow-mode observe-only dispatch.
   - Authoritative webhook execution now produces chat replies through Twitch Send Chat Message API (`POST /helix/chat/messages`) with a stable reply contract (`status=success|error`, `template_key`, `template_vars`, optional `visibility` level).
   - Reply rendering uses the same message-catalog template semantics as websocket bot command responses.
   - Channel `bot_message_level` thresholds still gate webhook replies exactly like bot/websocket mode (`mute` suppresses all, `normal`/`verbose`/`debug` thresholds allow <= level).
-  - In `chat_ingress_shadow_mode=true`, webhook command notifications stay observe-only and do not send chat replies.
+  - In `chat_ingress_shadow_mode=true`, webhook command notifications stay observe-only and do not send chat replies or mutate queue state.
+  - `random_request` remains a websocket-only execution path for now and is marked as a cleanup candidate to remove once authoritative migration completes.
   - Legacy comparison-only command branches are marked deprecated/unused and reported with explicit reason codes until migrated.
 - **Ingress authority behavior**:
   - `chat_ingress_mode=websocket` keeps websocket authoritative.
