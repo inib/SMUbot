@@ -7965,18 +7965,40 @@ async def eventsub_callback(request: FastAPIRequest, db: Session = Depends(get_d
     timestamp = headers.get("Twitch-Eventsub-Message-Timestamp") or ""
     signature = headers.get("Twitch-Eventsub-Message-Signature") or ""
     message_type = headers.get("Twitch-Eventsub-Message-Type") or ""
+    logger.debug(
+        "Incoming EventSub callback message_type=%s message_id=%s",
+        message_type or "<missing>",
+        message_id or "<missing>",
+    )
 
     if not message_id or not timestamp or not signature:
+        logger.warning(
+            "EventSub callback rejected: missing signature headers; has_message_id=%s has_timestamp=%s has_signature=%s",
+            bool(message_id),
+            bool(timestamp),
+            bool(signature),
+        )
         raise HTTPException(status_code=400, detail="missing signature headers")
 
     try:
         payload = await request.json()
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            "EventSub callback rejected: invalid JSON decode; message_id=%s error_type=%s",
+            message_id,
+            type(exc).__name__,
+        )
         raise HTTPException(status_code=400, detail="invalid JSON")
 
     sub_info = payload.get("subscription") or {}
     sub_id = sub_info.get("id")
     if not sub_id:
+        logger.warning(
+            "EventSub callback rejected: subscription id missing; message_id=%s message_type=%s payload_has_subscription=%s",
+            message_id,
+            message_type or "<missing>",
+            bool(payload.get("subscription")),
+        )
         raise HTTPException(status_code=400, detail="subscription id missing")
 
     subscription = (
