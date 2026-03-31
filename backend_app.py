@@ -1353,7 +1353,7 @@ def _extract_eventsub_chat_command(message_text: str) -> dict[str, Optional[str]
 
     text_content = (message_text or "").strip()
     if not text_content.startswith("!"):
-        return {"alias": None, "canonical": None, "args": None}
+        return {"alias": None, "canonical": None, "args": None, "parse_reason": "non_command_message"}
     command_blob = text_content[1:]
     command_token, _, remainder = command_blob.partition(" ")
     alias = command_token.strip().lower()
@@ -1368,7 +1368,8 @@ def _extract_eventsub_chat_command(message_text: str) -> dict[str, Optional[str]
         "archive": {"archive"},
     }
     canonical = next((name for name, alias_set in aliases.items() if alias in alias_set), None)
-    return {"alias": alias or None, "canonical": canonical, "args": args}
+    parse_reason = "ok" if canonical else "unknown_alias"
+    return {"alias": alias or None, "canonical": canonical, "args": args, "parse_reason": parse_reason}
 
 
 def _eventsub_outcome(
@@ -1531,6 +1532,7 @@ def _eventsub_execute_request_command(
     chatter_user_id: str,
     chatter_login: str,
     args: str,
+    actor: Optional[dict[str, bool]] = None,
 ) -> dict[str, Any]:
     """Execute canonical ``request`` command for authoritative EventSub ingress.
 
@@ -1597,6 +1599,7 @@ def _eventsub_execute_request_command(
         song = Song(channel_id=channel_pk, artist=artist_name, title=title_name, youtube_link=None)
         db.add(song)
         db.flush()
+    actor_ctx = actor or {}
     is_priority, priority_source = _apply_priority_to_new_request(
         db,
         settings,
@@ -1604,8 +1607,8 @@ def _eventsub_execute_request_command(
         stream_id,
         want_priority=False,
         prefer_sub_free=True,
-        is_subscriber=False,
-        is_mod=False,
+        is_subscriber=bool(actor_ctx.get("is_subscriber")),
+        is_mod=bool(actor_ctx.get("is_mod") or actor_ctx.get("is_broadcaster")),
     )
     req = _create_request_entry(db, channel_pk, user.id, song.id, bumped=False)
     req.is_priority = is_priority
@@ -1622,6 +1625,7 @@ def _eventsub_execute_request_command(
         command="request",
         reason_code="ok",
         metadata={
+            "mutated": True,
             "request_id": req.id,
             "song_id": song.id,
             "response": _eventsub_response_contract(
@@ -1722,12 +1726,283 @@ def _eventsub_execute_playlist_request_command(
         command="playlist_request",
         reason_code="ok",
         metadata={
+            "mutated": True,
             "request_id": response.request_id,
             "playlist_item_id": response.playlist_item_id,
             "response": _eventsub_response_contract(
                 "success",
                 template_key="playlist_request_added",
                 template_vars={"artist": response.song.artist, "title": response.song.title},
+                visibility="normal",
+            ),
+        },
+    )
+
+
+def _eventsub_actor_context(event_payload: dict[str, Any], channel: ActiveChannel) -> dict[str, bool]:
+    """Normalize EventSub chatter permission flags for command rule parity.
+
+    Dependencies: reads EventSub message fields plus optional badge metadata.
+    Code customers: webhook command executors using subscriber/moderator checks.
+    Used variables/origin: values come from ``channel.chat.message`` event
+    payload and channel owner identity.
+    """
+
+    badges = event_payload.get("badges") or event_payload.get("chatter_badges") or []
+    badge_set = set()
+    if isinstance(badges, list):
+        for item in badges:
+            if isinstance(item, dict):
+                set_id = str(item.get("set_id") or item.get("id") or "").strip().lower()
+                if set_id:
+                    badge_set.add(set_id)
+            elif isinstance(item, str):
+                badge_set.add(item.strip().lower())
+    chatter_user_id = str(event_payload.get("chatter_user_id") or "").strip()
+    is_broadcaster = bool(
+        _env_flag(str(event_payload.get("chatter_is_broadcaster", "0")))
+        or chatter_user_id == str(channel.channel_id)
+        or "broadcaster" in badge_set
+    )
+    is_mod = bool(
+        _env_flag(str(event_payload.get("chatter_is_moderator", "0")))
+        or _env_flag(str(event_payload.get("chatter_is_mod", "0")))
+        or "moderator" in badge_set
+        or is_broadcaster
+    )
+    is_subscriber = bool(
+        _env_flag(str(event_payload.get("chatter_is_subscriber", "0")))
+        or "subscriber" in badge_set
+    )
+    return {
+        "is_broadcaster": is_broadcaster,
+        "is_mod": is_mod,
+        "is_subscriber": is_subscriber,
+    }
+
+
+def _eventsub_execute_points_command(
+    db: Session,
+    channel: ActiveChannel,
+    *,
+    chatter_user_id: str,
+    chatter_login: str,
+) -> dict[str, Any]:
+    """Execute canonical ``points`` command using webhook authoritative context.
+
+    Dependencies: user identity provisioning via ``_get_or_create_channel_user``.
+    Code customers: ``_dispatch_eventsub_chat_command``.
+    Used variables/origin: chatter identity is sourced from EventSub payload.
+    """
+
+    user = _get_or_create_channel_user(db, channel.id, chatter_user_id, chatter_login)
+    db.flush()
+    return _eventsub_outcome(
+        "executed",
+        command="points",
+        reason_code="ok",
+        metadata={
+            "response": _eventsub_response_contract(
+                "success",
+                template_key="points",
+                template_vars={
+                    "username": chatter_login,
+                    "points": int(user.prio_points or 0),
+                    "currency_plural": "points",
+                },
+                visibility="normal",
+            )
+        },
+    )
+
+
+def _eventsub_execute_remove_command(
+    db: Session,
+    channel: ActiveChannel,
+    *,
+    chatter_user_id: str,
+    chatter_login: str,
+) -> dict[str, Any]:
+    """Execute canonical ``remove`` command by deleting requester newest pending row.
+
+    Dependencies: current stream lookup, queue row queries, and queue publishers.
+    Code customers: ``_dispatch_eventsub_chat_command``.
+    Used variables/origin: requester identity is from EventSub chatter fields.
+    """
+
+    user = _get_or_create_channel_user(db, channel.id, chatter_user_id, chatter_login)
+    db.flush()
+    stream_id = current_stream(db, channel.id)
+    target = (
+        db.query(Request)
+        .filter(
+            Request.channel_id == channel.id,
+            Request.stream_id == stream_id,
+            Request.user_id == user.id,
+            Request.played == 0,
+        )
+        .order_by(Request.position.desc(), Request.request_time.desc(), Request.id.desc())
+        .first()
+    )
+    if not target:
+        return _eventsub_outcome(
+            "rejected",
+            command="remove",
+            reason_code="business_rule_no_pending",
+            metadata={
+                "response": _eventsub_response_contract(
+                    "error",
+                    template_key="remove_no_pending",
+                    template_vars={},
+                    visibility="normal",
+                )
+            },
+        )
+    request_id = target.id
+    db.delete(target)
+    db.commit()
+    publish_queue_changed(channel.id)
+    return _eventsub_outcome(
+        "executed",
+        command="remove",
+        reason_code="ok",
+        metadata={
+            "mutated": True,
+            "request_id": request_id,
+            "response": _eventsub_response_contract(
+                "success",
+                template_key="remove_success",
+                template_vars={"request_id": request_id},
+                visibility="normal",
+            ),
+        },
+    )
+
+
+def _eventsub_execute_prioritize_command(
+    db: Session,
+    channel: ActiveChannel,
+    *,
+    chatter_user_id: str,
+    chatter_login: str,
+    args: str,
+    actor: dict[str, bool],
+) -> dict[str, Any]:
+    """Execute canonical ``prioritize`` command with websocket-equivalent rules.
+
+    Dependencies: queue limits, priority allocation helper, queue publishers,
+    and request storage models.
+    Code customers: ``_dispatch_eventsub_chat_command``.
+    Used variables/origin: optional ``args`` request id is parsed from chat
+    command text and actor flags come from EventSub metadata.
+    """
+
+    user = _get_or_create_channel_user(db, channel.id, chatter_user_id, chatter_login)
+    db.flush()
+    stream_id = current_stream(db, channel.id)
+    my_prio_count = (
+        db.query(Request)
+        .filter(
+            Request.channel_id == channel.id,
+            Request.stream_id == stream_id,
+            Request.user_id == user.id,
+            Request.played == 0,
+            Request.is_priority == 1,
+        )
+        .count()
+    )
+    if my_prio_count >= 3:
+        return _eventsub_outcome(
+            "rejected",
+            command="prioritize",
+            reason_code="business_rule_limit_reached",
+            metadata={
+                "response": _eventsub_response_contract(
+                    "error",
+                    template_key="prioritize_limit",
+                    template_vars={},
+                    visibility="normal",
+                )
+            },
+        )
+
+    arg_text = (args or "").strip()
+    target: Optional[Request] = None
+    if arg_text.isdigit():
+        target = (
+            db.query(Request)
+            .filter(
+                Request.channel_id == channel.id,
+                Request.stream_id == stream_id,
+                Request.user_id == user.id,
+                Request.id == int(arg_text),
+                Request.played == 0,
+            )
+            .first()
+        )
+    if not target:
+        target = (
+            db.query(Request)
+            .filter(
+                Request.channel_id == channel.id,
+                Request.stream_id == stream_id,
+                Request.user_id == user.id,
+                Request.played == 0,
+                Request.is_priority == 0,
+            )
+            .order_by(Request.position.asc(), Request.request_time.asc(), Request.id.asc())
+            .all()
+        )
+        target = target[-1] if target else None
+    if not target:
+        return _eventsub_outcome(
+            "rejected",
+            command="prioritize",
+            reason_code="business_rule_no_target",
+            metadata={
+                "response": _eventsub_response_contract(
+                    "error",
+                    template_key="prioritize_no_target",
+                    template_vars={},
+                    visibility="normal",
+                )
+            },
+        )
+
+    settings = get_or_create_settings(db, channel.id)
+    is_priority, priority_source = _apply_priority_to_new_request(
+        db,
+        settings,
+        user.id,
+        stream_id,
+        want_priority=True,
+        prefer_sub_free=True,
+        is_subscriber=bool(actor.get("is_subscriber")),
+        is_mod=bool(actor.get("is_mod") or actor.get("is_broadcaster")),
+    )
+    new_request = _create_request_entry(db, channel.id, user.id, target.song_id, bumped=False)
+    new_request.is_priority = is_priority
+    new_request.priority_source = priority_source
+    replaced_request_id = target.id
+    db.delete(target)
+    db.commit()
+    db.refresh(new_request)
+    event_payload = _serialize_request_event(db, new_request)
+    publish_channel_event(channel.id, "request.added", event_payload)
+    if new_request.is_priority or new_request.bumped:
+        publish_channel_event(channel.id, "request.bumped", event_payload)
+    publish_queue_changed(channel.id)
+    return _eventsub_outcome(
+        "executed",
+        command="prioritize",
+        reason_code="ok",
+        metadata={
+            "mutated": True,
+            "request_id": replaced_request_id,
+            "response": _eventsub_response_contract(
+                "success",
+                template_key="prioritize_success",
+                template_vars={"request_id": replaced_request_id},
                 visibility="normal",
             ),
         },
@@ -1757,10 +2032,11 @@ def _dispatch_eventsub_chat_command(
     chatter_login = (
         str(event_payload.get("chatter_user_login") or event_payload.get("chatter_user_name") or "").strip()
     )
+    actor = _eventsub_actor_context(event_payload, channel)
     if not canonical:
-        return _eventsub_outcome("rejected", command=None, reason_code="non_command")
+        return _eventsub_outcome("rejected", command=None, reason_code="parse_non_command")
     if not chatter_user_id or not chatter_login:
-        return _eventsub_outcome("rejected", command=canonical, reason_code="invalid_identity", detail="missing chatter identity")
+        return _eventsub_outcome("rejected", command=canonical, reason_code="auth_missing_identity", detail="missing chatter identity")
 
     dispatch_map = {
         "request": lambda: _eventsub_execute_request_command(
@@ -1769,21 +2045,39 @@ def _dispatch_eventsub_chat_command(
             chatter_user_id=chatter_user_id,
             chatter_login=chatter_login,
             args=args,
+            actor=actor,
         ),
         "playlist_request": lambda: _eventsub_execute_playlist_request_command(
             db,
             channel,
             args=args,
         ),
-        "prioritize": lambda: _eventsub_outcome("rejected", command="prioritize", reason_code="deprecated_webhook_comparison_only", detail="TODO: migrate websocket-only command routine"),
-        "points": lambda: _eventsub_outcome("rejected", command="points", reason_code="read_only_not_mutating", detail="points query remains websocket-owned"),
-        "remove": lambda: _eventsub_outcome("rejected", command="remove", reason_code="deprecated_webhook_comparison_only", detail="TODO: migrate websocket-only command routine"),
+        "prioritize": lambda: _eventsub_execute_prioritize_command(
+            db,
+            channel,
+            chatter_user_id=chatter_user_id,
+            chatter_login=chatter_login,
+            args=args,
+            actor=actor,
+        ),
+        "points": lambda: _eventsub_execute_points_command(
+            db,
+            channel,
+            chatter_user_id=chatter_user_id,
+            chatter_login=chatter_login,
+        ),
+        "remove": lambda: _eventsub_execute_remove_command(
+            db,
+            channel,
+            chatter_user_id=chatter_user_id,
+            chatter_login=chatter_login,
+        ),
         "archive": lambda: _eventsub_outcome("rejected", command="archive", reason_code="permission_denied", detail="archive requires moderator authorization"),
-        "random_request": lambda: _eventsub_outcome("rejected", command="random_request", reason_code="deprecated_webhook_comparison_only", detail="TODO: migrate websocket-only command routine"),
+        "random_request": lambda: _eventsub_outcome("rejected", command="random_request", reason_code="legacy_websocket_only", detail="cleanup_candidate: migrate websocket-only random request routine"),
     }
     handler = dispatch_map.get(canonical)
     if not handler:
-        return _eventsub_outcome("rejected", command=canonical, reason_code="unsupported_command")
+        return _eventsub_outcome("rejected", command=canonical, reason_code="parse_unknown_alias")
     return handler()
 
 
@@ -1827,24 +2121,40 @@ def _process_eventsub_chat_notification(
     ingress_mode = get_chat_ingress_mode()
     shadow_mode = get_chat_ingress_shadow_mode()
     webhook_authoritative = ingress_mode == "webhook_conduit" and not shadow_mode
+    parse_reason = str(parsed.get("parse_reason") or "")
     if not parsed.get("canonical"):
-        outcome = _eventsub_outcome("rejected", command=None, reason_code="non_command")
-        webhook_result = "ignored_non_command"
+        if parse_reason == "unknown_alias":
+            outcome = _eventsub_outcome("rejected", command=None, reason_code="parse_unknown_alias")
+            webhook_result = "ignored_unknown_alias"
+        else:
+            outcome = _eventsub_outcome("rejected", command=None, reason_code="parse_non_command")
+            webhook_result = "ignored_non_command"
     elif webhook_authoritative:
         try:
             outcome = _dispatch_eventsub_chat_command(db, channel, parsed=parsed, event_payload=event_payload)
-            if outcome.get("status") == "executed":
-                _record_ingress_metric("command_executed")
             reply_contract = ((outcome.get("metadata") or {}).get("response") if isinstance(outcome.get("metadata"), dict) else None)
+            reply_sent = False
             if isinstance(reply_contract, dict) and not shadow_mode:
-                _send_eventsub_chat_reply(
+                reply_sent = _send_eventsub_chat_reply(
                     db,
                     channel,
                     reply_contract,
                     reply_parent_message_id=message_id,
                 )
-            if outcome["status"] == "executed":
+            mutated = bool((outcome.get("metadata") or {}).get("mutated")) if isinstance(outcome.get("metadata"), dict) else False
+            executed_authoritative = outcome.get("status") == "executed" and (mutated or reply_sent)
+            if executed_authoritative:
+                _record_ingress_metric("command_executed")
                 webhook_result = "executed_authoritative"
+            elif outcome.get("status") == "executed":
+                outcome = _eventsub_outcome(
+                    "error",
+                    command=outcome.get("command"),
+                    reason_code="send_failed_no_side_effect",
+                    detail="command completed but neither mutation nor reply succeeded",
+                    metadata=outcome.get("metadata") if isinstance(outcome.get("metadata"), dict) else None,
+                )
+                webhook_result = "error_send_failure"
             elif outcome["status"] == "rejected":
                 webhook_result = "rejected_authoritative"
             else:
@@ -1854,7 +2164,7 @@ def _process_eventsub_chat_notification(
             outcome = _eventsub_outcome(
                 "rejected",
                 command=parsed.get("canonical"),
-                reason_code="http_error",
+                reason_code="business_rule_http_error",
                 detail=str(exc.detail),
                 metadata={"status_code": exc.status_code},
             )
@@ -1868,7 +2178,7 @@ def _process_eventsub_chat_notification(
             outcome = _eventsub_outcome(
                 "error",
                 command=parsed.get("canonical"),
-                reason_code="unhandled_exception",
+                reason_code="business_rule_unhandled_exception",
             )
             webhook_result = "error_authoritative"
             logger.exception(
@@ -1876,7 +2186,6 @@ def _process_eventsub_chat_notification(
                 extra={"eventsub_message_id": message_id, "channel": channel.channel_name, "parsed": parsed},
             )
     else:
-        # Deprecated comparison-only behavior retained for shadow diagnostics.
         outcome = _eventsub_outcome(
             "rejected",
             command=parsed.get("canonical"),
