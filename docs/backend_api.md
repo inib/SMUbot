@@ -418,7 +418,9 @@ Certain events award priority points and are fed by EventSub subscriptions creat
   - `Twitch-Eventsub-Message-Type`
 - **Signature verification**:
   - The backend computes `HMAC_SHA256(secret, message_id + timestamp + raw_body)` and rejects mismatches with `403`.
-  - For classic payloads (`verification_shape=subscription` and normal notifications), the `secret` is taken from `event_subscriptions.secret` via `subscription.id`.
+  - For classic webhook payloads, the `secret` is taken from `event_subscriptions.secret` via `subscription.id`.
+  - For conduit chat notifications (`subscription.type=channel.chat.message` and/or `subscription.transport.method=conduit`), the `secret` is resolved from `twitch_conduit_shards.transport_secret` using the persisted `(conduit_id, shard_id)` linkage from `event_subscriptions` columns/metadata/transport data.
+  - If a conduit notification cannot resolve shard secret material, the callback returns explicit diagnostics with reason code (for example `missing_conduit_shard_secret`) and uses `503` for missing secret state so operators can distinguish config drift from invalid signatures.
   - For conduit verification payloads (`verification_shape=conduit_shard`), the `secret` is taken from `twitch_conduit_shards.transport_secret` using the persisted `(conduit_shard.conduit_id, conduit_shard.shard)` pair.
 - **Verification payload variants**:
   - Classic webhook verification payloads with `subscription` are supported.

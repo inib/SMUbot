@@ -1520,6 +1520,74 @@ def _resolve_conduit_verification_secret(
     return rows[0].transport_secret, conduit_id, shard_id, None
 
 
+def _resolve_conduit_notification_secret(
+    subscription: EventSubscription,
+    payload: Mapping[str, Any],
+    db: Session,
+) -> tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
+    """Resolve conduit shard secret for ``notification`` callback signature checks.
+
+    Dependencies: Uses ``json`` for persisted ``EventSubscription.meta`` parsing
+    and ``TwitchConduit``/``TwitchConduitShard`` tables for secret lookup.
+    Code customers: ``eventsub_callback`` notification branch for
+    conduit-delivered chat messages.
+    Used variables/origin: Reads conduit identity from subscription columns,
+    subscription metadata, and payload transport fields; shard identity comes
+    from subscription column/metadata.
+    """
+
+    sub_info = payload.get("subscription") or {}
+    sub_transport = sub_info.get("transport") or {}
+    meta_payload: dict[str, Any] = {}
+    if subscription.meta:
+        try:
+            parsed_meta = json.loads(subscription.meta)
+            if isinstance(parsed_meta, dict):
+                meta_payload = parsed_meta
+        except Exception:
+            meta_payload = {}
+    meta_transport = meta_payload.get("transport") if isinstance(meta_payload.get("transport"), dict) else {}
+    conduit_meta = meta_payload.get("conduit_shard") if isinstance(meta_payload.get("conduit_shard"), dict) else {}
+
+    conduit_id = (
+        subscription.conduit_id
+        or meta_payload.get("conduit_id")
+        or conduit_meta.get("conduit_id")
+        or meta_transport.get("conduit_id")
+        or sub_transport.get("conduit_id")
+    )
+    if conduit_id is not None:
+        conduit_id = str(conduit_id)
+    if not conduit_id:
+        return None, None, None, "missing_conduit_shard_field_conduit_id"
+
+    shard_id = (
+        subscription.shard_id
+        or meta_payload.get("shard_id")
+        or conduit_meta.get("shard_id")
+        or conduit_meta.get("shard")
+    )
+    if shard_id is not None:
+        shard_id = str(shard_id)
+    if not shard_id:
+        return None, conduit_id, None, "missing_conduit_shard_field_shard"
+
+    shard_row = (
+        db.query(TwitchConduitShard)
+        .join(TwitchConduit, TwitchConduitShard.conduit_fk == TwitchConduit.id)
+        .filter(
+            TwitchConduit.conduit_id == conduit_id,
+            TwitchConduitShard.shard_id == shard_id,
+        )
+        .one_or_none()
+    )
+    if not shard_row:
+        return None, conduit_id, shard_id, "unknown_conduit_shard"
+    if not shard_row.transport_secret:
+        return None, conduit_id, shard_id, "missing_conduit_shard_secret"
+    return shard_row.transport_secret, conduit_id, shard_id, None
+
+
 def _format_eventsub_http_error(exc: Exception, auth_mode: str) -> str:
     """Build a safe compact EventSub HTTP error summary for operator triage.
 
@@ -1729,6 +1797,7 @@ def reconcile_eventsub_conduit_subscriptions(request: FastAPIRequest, db: Sessio
         meta_payload = {
             "condition": desired_condition,
             "transport": {"method": "conduit", "conduit_id": conduit_row.conduit_id},
+            "conduit_shard": {"conduit_id": conduit_row.conduit_id, "shard_id": shard_id},
             "shard_id": shard_id,
             "reconciled_at": now.isoformat() + "Z",
         }
@@ -8171,13 +8240,60 @@ async def eventsub_callback(request: FastAPIRequest, db: Session = Depends(get_d
         )
         return JSONResponse(status_code=202, content={"detail": "unknown subscription"})
 
-    if not _verify_eventsub_signature(subscription.secret, message_id, timestamp, body, signature):
-        logger.warning(
-            "EventSub callback rejected: reason_code=invalid_signature message_id=%s message_type=%s subscription_id=%s",
-            message_id,
-            message_type or "<missing>",
-            sub_id,
+    sub_payload_type = sub_info.get("type")
+    sub_payload_transport = (sub_info.get("transport") or {}).get("method")
+    is_conduit_chat_notification = (
+        message_type == "notification"
+        and (subscription.type == EVENTSUB_CONDUIT_CHAT_TYPE or sub_payload_type == EVENTSUB_CONDUIT_CHAT_TYPE)
+        and (subscription.transport == "conduit" or sub_payload_transport == "conduit")
+    )
+
+    verification_secret = subscription.secret
+    conduit_id: Optional[str] = None
+    shard_id: Optional[str] = None
+    if is_conduit_chat_notification:
+        verification_secret, conduit_id, shard_id, resolve_error = _resolve_conduit_notification_secret(
+            subscription, payload, db
         )
+        if resolve_error or not verification_secret:
+            status_code = 503 if resolve_error == "missing_conduit_shard_secret" else 403
+            logger.warning(
+                "EventSub callback rejected: reason_code=%s message_id=%s message_type=%s subscription_id=%s conduit_id=%s shard_id=%s diagnostics=conduit_notification_secret_resolution_failed",
+                resolve_error or "unknown_conduit_secret_resolution_error",
+                message_id,
+                message_type or "<missing>",
+                sub_id,
+                conduit_id or "<missing>",
+                shard_id or "<missing>",
+            )
+            raise HTTPException(
+                status_code=status_code,
+                detail={
+                    "reason_code": resolve_error or "conduit_notification_secret_unavailable",
+                    "message": "Conduit shard secret unavailable for notification verification.",
+                    "conduit_id": conduit_id,
+                    "shard_id": shard_id,
+                    "subscription_id": sub_id,
+                },
+            )
+
+    if not _verify_eventsub_signature(verification_secret, message_id, timestamp, body, signature):
+        if is_conduit_chat_notification:
+            logger.warning(
+                "EventSub callback rejected: reason_code=invalid_signature message_id=%s message_type=%s subscription_id=%s conduit_id=%s shard_id=%s signature_mode=conduit_shard_secret",
+                message_id,
+                message_type or "<missing>",
+                sub_id,
+                conduit_id or "<missing>",
+                shard_id or "<missing>",
+            )
+        else:
+            logger.warning(
+                "EventSub callback rejected: reason_code=invalid_signature message_id=%s message_type=%s subscription_id=%s signature_mode=legacy_subscription_secret",
+                message_id,
+                message_type or "<missing>",
+                sub_id,
+            )
         raise HTTPException(status_code=403, detail="invalid signature")
 
     subscription.status = sub_info.get("status") or subscription.status
