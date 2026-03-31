@@ -456,11 +456,13 @@ Certain events award priority points and are fed by EventSub subscriptions creat
   - Duplicate retries are acknowledged with success and skipped to prevent duplicate command/event execution.
 - **Notification routing**:
   - Reward events (`follow`, `raid`, `bits`, `sub`, `gift_sub`) continue through existing event persistence/reward logic.
-  - `channel.chat.message` notifications route to the dedicated webhook chat ingress handler, which emits structured comparison logs for webhook vs websocket parsing/execution state.
+  - `channel.chat.message` notifications route to the dedicated webhook chat ingress handler.
+  - In authoritative mode, webhook chat ingress now dispatches canonical commands to backend execution routines (queue mutations + existing queue/event notifications) and records structured outcomes: `executed`, `rejected`, or `error` with per-command reason codes (`invalid_args`, `not_found`, `permission_denied`, etc.).
+  - Legacy comparison-only command branches are marked deprecated/unused and reported with explicit reason codes until migrated.
 - **Ingress authority behavior**:
   - `chat_ingress_mode=websocket` keeps websocket authoritative.
   - `chat_ingress_mode=webhook_conduit` makes webhook authoritative for chat ingress.
-  - `chat_ingress_shadow_mode=true` forces webhook into non-authoritative shadow execution (parse/observe + structured comparison logs) while websocket remains authoritative.
+  - `chat_ingress_shadow_mode=true` forces webhook into shadow mode (parse + observe only): no queue/request mutation occurs, and logs include what would have executed.
 
 ### EventSub callback runbook
 

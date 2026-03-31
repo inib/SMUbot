@@ -171,13 +171,17 @@ unlocks the API for the bot, queue manager, and public web frontend.
   - `notification` retries are deduplicated via `eventsub_message_dedupe` to
     avoid replaying queue commands/reward logic.
   - `channel.chat.message` webhook notifications now route through a dedicated
-    chat ingress handler that emits structured websocket-vs-webhook comparison
-    logs for rollout verification.
+    chat ingress handler that can execute canonical commands when webhook is
+    authoritative. Outcomes are structured (`executed`, `rejected`, `error`)
+    with reason codes for diagnostics.
+  - Historical comparison-only webhook command code paths are now deprecated
+    and explicitly marked in outcome reason codes until fully removed.
 - Shadow mode behavior:
   - With `chat_ingress_shadow_mode=true`, webhook chat ingress runs in
-    non-authoritative observe/compare mode while websocket remains authoritative.
+    non-authoritative observe/compare mode (no queue mutations), while websocket
+    remains authoritative.
   - With `chat_ingress_mode=webhook_conduit` and shadow mode disabled, webhook
-    ingress is authoritative.
+    ingress is authoritative and performs real command execution/persistence.
 
 ### EventSub HTTPS callback pre-cutover check
 Use this before enabling `chat_ingress_mode=webhook_conduit` in production:
