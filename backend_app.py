@@ -1247,6 +1247,34 @@ def _reconcile_twitch_conduit_shards(
     return assignment, errors
 
 
+def _format_eventsub_http_error(exc: Exception, auth_mode: str) -> str:
+    """Build a safe compact EventSub HTTP error summary for operator triage.
+
+    Dependencies: Reads ``requests`` exception attributes when present and does
+    local string normalization/truncation only (no network or persistence).
+    Code customers: EventSub reconcile list/create exception branches append the
+    returned summary to ``result['errors']`` and ``channel_result['error']``.
+    Used variables/origin: ``exc`` originates from a failed Helix API request;
+    ``auth_mode`` is the static label for the header strategy in use.
+    """
+
+    status_code = "unknown"
+    response_excerpt = "none"
+    response_obj = getattr(exc, "response", None)
+    if response_obj is not None:
+        code = getattr(response_obj, "status_code", None)
+        if code is not None:
+            status_code = str(code)
+        text = getattr(response_obj, "text", "") or ""
+        compact = " ".join(text.split())
+        if compact:
+            response_excerpt = compact[:240]
+    return (
+        f"{exc} | auth_mode={auth_mode} | status_code={status_code} | "
+        f"response_excerpt={response_excerpt}"
+    )
+
+
 def reconcile_eventsub_conduit_subscriptions(request: FastAPIRequest, db: Session) -> dict[str, Any]:
     """Reconcile conduit + shards + chat subscriptions for every active channel.
 
@@ -1327,7 +1355,9 @@ def reconcile_eventsub_conduit_subscriptions(request: FastAPIRequest, db: Sessio
             remote_resp.raise_for_status()
             remote_subs = remote_resp.json().get("data") or []
         except Exception as exc:
-            result["errors"].append(f"subscriptions.list_failed.{channel.channel_name}: {exc}")
+            error_detail = _format_eventsub_http_error(exc, auth_mode="app_token")
+            result["errors"].append(f"subscriptions.list_failed.{channel.channel_name}: {error_detail}")
+            channel_result["error"] = error_detail
             remote_subs = []
 
         desired_condition = {
@@ -1374,12 +1404,13 @@ def reconcile_eventsub_conduit_subscriptions(request: FastAPIRequest, db: Sessio
                 twitch_id = created.get("id")
                 status = created.get("status") or status
             except Exception as exc:
-                result["errors"].append(f"subscriptions.create_failed.{channel.channel_name}: {exc}")
+                error_detail = _format_eventsub_http_error(exc, auth_mode="app_token")
+                result["errors"].append(f"subscriptions.create_failed.{channel.channel_name}: {error_detail}")
                 channel_result["status"] = "create_failed"
-                channel_result["error"] = str(exc)
+                channel_result["error"] = error_detail
                 if existing:
                     existing.status = "error"
-                    existing.meta = json.dumps({"condition": desired_condition, "error": str(exc)})
+                    existing.meta = json.dumps({"condition": desired_condition, "error": error_detail})
                     existing.conduit_id = conduit_row.conduit_id
                     existing.shard_id = shard_id
                     existing.updated_at = now
