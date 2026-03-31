@@ -147,8 +147,13 @@ unlocks the API for the bot, queue manager, and public web frontend.
     (non-HTTPS, wrong path, or internal/private host).
   - `301` redirecting `http://...` to `https://...` is not a supported
     substitute for reliable Twitch callback registration.
-  - Signatures are validated against the persisted per-subscription secret
-    before processing.
+  - Signatures are validated before processing. Classic webhook callbacks use
+    `event_subscriptions.secret`; conduit chat callbacks use
+    `twitch_conduit_shards.transport_secret` resolved via persisted conduit
+    linkage (`conduit_id`, `shard_id`, transport metadata).
+  - For conduit rows, `event_subscriptions.secret` is a non-authoritative
+    compatibility placeholder; legacy/random values on existing rows are
+    ignored for conduit notification verification.
   - `notification` retries are deduplicated via `eventsub_message_dedupe` to
     avoid replaying queue commands/reward logic.
   - `channel.chat.message` webhook notifications now route through a dedicated

@@ -114,6 +114,7 @@ EVENTSUB_EVENT_MAP: dict[str, str] = {
     "channel.subscription.gift": "gift_sub",
 }
 EVENTSUB_CONDUIT_CHAT_TYPE = "channel.chat.message"
+EVENTSUB_CONDUIT_SECRET_PLACEHOLDER = "__conduit_secret_unused__"
 
 BOT_MESSAGE_LEVEL_DETAILS: list[dict[str, str]] = [
     {
@@ -1588,6 +1589,21 @@ def _resolve_conduit_notification_secret(
     return shard_row.transport_secret, conduit_id, shard_id, None
 
 
+def _persist_conduit_subscription_secret_placeholder(existing_secret: Optional[str]) -> str:
+    """Return compatibility placeholder for conduit subscription ``secret`` column.
+
+    Dependencies: Uses ``EVENTSUB_CONDUIT_SECRET_PLACEHOLDER`` to satisfy the
+    current non-null schema contract on ``EventSubscription.secret``.
+    Code customers: ``reconcile_eventsub_conduit_subscriptions`` persists this
+    placeholder for conduit rows while ``twitch_conduit_shards.transport_secret``
+    remains authoritative for signature verification.
+    Used variables/origin: ``existing_secret`` is read from prior row state and
+    intentionally ignored so legacy random values are not treated as canonical.
+    """
+
+    return EVENTSUB_CONDUIT_SECRET_PLACEHOLDER
+
+
 def _format_eventsub_http_error(exc: Exception, auth_mode: str) -> str:
     """Build a safe compact EventSub HTTP error summary for operator triage.
 
@@ -1793,12 +1809,13 @@ def reconcile_eventsub_conduit_subscriptions(request: FastAPIRequest, db: Sessio
             result["errors"].append(f"subscriptions.missing_id.{channel.channel_name}")
             result["subscriptions"].append(channel_result)
             continue
-        secret = existing.secret if existing and existing.secret else secrets.token_urlsafe(32)
+        secret = _persist_conduit_subscription_secret_placeholder(existing.secret if existing else None)
         meta_payload = {
             "condition": desired_condition,
             "transport": {"method": "conduit", "conduit_id": conduit_row.conduit_id},
             "conduit_shard": {"conduit_id": conduit_row.conduit_id, "shard_id": shard_id},
             "shard_id": shard_id,
+            "signature_secret_source": "twitch_conduit_shards.transport_secret",
             "reconciled_at": now.isoformat() + "Z",
         }
         if existing:
