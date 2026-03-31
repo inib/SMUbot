@@ -693,10 +693,15 @@ def _eventsub_bot_headers(db: Session) -> dict[str, str]:
 
     Dependencies: Reads ``BotConfig.access_token`` from the provided database
     session and combines it with ``get_twitch_client_id``.
-    Code customers: Conduit mode EventSub chat subscription list/create calls
-    require bot-auth headers so Twitch accepts ``condition.user_id`` for bot.
+    Code customers: Reserved for future bot-user Helix calls that require
+    explicit bot OAuth context outside conduit reconciliation.
     Used variables/origin: ``access_token`` originates in bot OAuth callback
     persistence; ``client_id`` originates from app-level Twitch configuration.
+
+    Note: Conduit reconciliation intentionally uses ``_eventsub_app_headers``
+    for EventSub list/create APIs after the app-auth migration. Keep this
+    helper available for future bot-auth endpoints to avoid re-implementing
+    header assembly.
     """
 
     client_id = get_twitch_client_id()
@@ -1288,6 +1293,10 @@ def reconcile_eventsub_conduit_subscriptions(request: FastAPIRequest, db: Sessio
     callback URL resolves from ``eventsub_callback`` route on ``request``;
     chat ``condition.user_id`` is sourced from the bot account instead of
     per-channel owner identity.
+
+    Auth note: This flow no longer uses ``_eventsub_bot_headers`` for
+    subscription list/create calls; Twitch app-auth is authoritative for
+    conduit APIs in this reconciliation path.
     """
 
     channels = db.query(ActiveChannel).order_by(ActiveChannel.id.asc()).all()
@@ -1308,6 +1317,7 @@ def reconcile_eventsub_conduit_subscriptions(request: FastAPIRequest, db: Sessio
     now = datetime.utcnow()
     callback = str(request.url_for("eventsub_callback"))
     try:
+        # Conduit/EventSub reconciliation is app-auth only (no bot OAuth headers).
         headers = _eventsub_app_headers()
     except RuntimeError as exc:
         result["errors"].append(f"headers_unavailable: {exc}")
