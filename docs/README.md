@@ -79,6 +79,9 @@ unlocks the API for the bot, queue manager, and public web frontend.
   replay/conduit tables (`eventsub_message_dedupe`, `twitch_conduits`,
   `twitch_conduit_shards`) plus conduit linkage columns on
   `event_subscriptions`.
+- Conduit shard metadata now persists `twitch_conduit_shards.transport_secret`
+  so callback verification can validate Twitch conduit-shard challenges without
+  requiring `subscription.id`.
 - Startup now includes a compatibility patch for the same tables/columns so
   staggered deploys on legacy SQLite/prod databases continue booting safely.
 - EventSub health endpoints now include conduit + shard coverage summaries:
@@ -123,6 +126,13 @@ unlocks the API for the bot, queue manager, and public web frontend.
     `eventsub_callback_override` to avoid stale env drift.
   - Callback source precedence is: `eventsub_callback_override` >
     `public_backend_origin` > `request_url` fallback.
+  - Callback verification supports both payload variants:
+    - classic verification payloads (`subscription` shape),
+    - conduit shard verification payloads (`conduit_shard` shape with no
+      `subscription`).
+  - Legacy `subscription id missing` errors for conduit verification were caused
+    by an older global subscription-id assumption; this is fixed by routing
+    verification shape before subscription lookup.
   - Reconciliation warning output now includes callback source metadata:
     `eventsub_callback_override`, `public_backend_origin`, or `request_url`.
   - Invalid callback candidates degrade reconciliation status with explicit

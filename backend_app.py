@@ -349,6 +349,7 @@ def ensure_eventsub_conduit_schema() -> None:
                         conduit_fk INTEGER NOT NULL REFERENCES twitch_conduits(id) ON DELETE CASCADE,
                         shard_id VARCHAR NOT NULL,
                         transport_callback TEXT,
+                        transport_secret TEXT,
                         status VARCHAR NOT NULL DEFAULT 'pending',
                         last_sync_at DATETIME,
                         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -358,6 +359,10 @@ def ensure_eventsub_conduit_schema() -> None:
                     """
                 )
             )
+        else:
+            shard_columns = {col["name"] for col in inspector.get_columns("twitch_conduit_shards")}
+            if "transport_secret" not in shard_columns:
+                conn.execute(text("ALTER TABLE twitch_conduit_shards ADD COLUMN transport_secret TEXT"))
 
 
 def backfill_missing_channel_keys() -> None:
@@ -1385,11 +1390,23 @@ def _reconcile_twitch_conduit_shards(
 
     errors: list[str] = []
     desired_ids = [str(index) for index in range(max(1, target_shard_count))]
-    secret = secrets.token_urlsafe(32)
+    secret_by_shard: dict[str, str] = {}
+    for shard_id in desired_ids:
+        existing = (
+            db.query(TwitchConduitShard)
+            .filter(
+                TwitchConduitShard.conduit_fk == conduit_row.id,
+                TwitchConduitShard.shard_id == shard_id,
+            )
+            .one_or_none()
+        )
+        secret_by_shard[shard_id] = (
+            existing.transport_secret if existing and existing.transport_secret else secrets.token_urlsafe(32)
+        )
     shards_payload = [
         {
             "id": shard_id,
-            "transport": {"method": "webhook", "callback": callback, "secret": secret},
+            "transport": {"method": "webhook", "callback": callback, "secret": secret_by_shard[shard_id]},
         }
         for shard_id in desired_ids
     ]
@@ -1439,6 +1456,7 @@ def _reconcile_twitch_conduit_shards(
             db.add(row)
         transport = shard.get("transport") or {}
         row.transport_callback = transport.get("callback") or callback
+        row.transport_secret = secret_by_shard.get(shard_id) or row.transport_secret
         row.status = shard.get("status") or "enabled"
         row.last_sync_at = now
 
@@ -1458,9 +1476,46 @@ def _reconcile_twitch_conduit_shards(
             row = TwitchConduitShard(conduit_fk=conduit_row.id, shard_id=shard_id)
             db.add(row)
         row.transport_callback = callback
+        row.transport_secret = secret_by_shard.get(shard_id) or row.transport_secret
         row.status = "pending"
         row.last_sync_at = now
     return assignment, errors
+
+
+def _resolve_conduit_verification_secret(
+    payload: Mapping[str, Any],
+    db: Session,
+) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """Resolve webhook secret for conduit-shard callback verification payloads.
+
+    Dependencies: Uses ``TwitchConduit`` + ``TwitchConduitShard`` persistence.
+    Code customers: ``eventsub_callback`` verification branch for
+    ``verification_shape=conduit_shard``.
+    Used variables/origin: Reads ``conduit_shard.id`` and optional
+    ``conduit_shard.conduit_id`` or ``subscription.transport.conduit_id`` from
+    EventSub verification payloads.
+    """
+
+    conduit_shard = payload.get("conduit_shard") or {}
+    shard_id = str(conduit_shard.get("id")) if conduit_shard.get("id") is not None else None
+    if not shard_id:
+        return None, None, "missing_conduit_shard_id"
+    conduit_id = conduit_shard.get("conduit_id")
+    if not conduit_id:
+        transport = (payload.get("subscription") or {}).get("transport") or {}
+        conduit_id = transport.get("conduit_id")
+    query = db.query(TwitchConduitShard).join(TwitchConduit, TwitchConduitShard.conduit_fk == TwitchConduit.id)
+    query = query.filter(TwitchConduitShard.shard_id == shard_id)
+    if conduit_id:
+        query = query.filter(TwitchConduit.conduit_id == conduit_id)
+    rows = query.limit(2).all()
+    if not rows:
+        return None, shard_id, "unknown_conduit_shard"
+    if len(rows) > 1 and not conduit_id:
+        return None, shard_id, "ambiguous_conduit_shard"
+    if not rows[0].transport_secret:
+        return None, shard_id, "missing_conduit_shard_secret"
+    return rows[0].transport_secret, shard_id, None
 
 
 def _format_eventsub_http_error(exc: Exception, auth_mode: str) -> str:
@@ -1932,6 +1987,7 @@ class TwitchConduitShard(Base):
     conduit_fk = Column(Integer, ForeignKey("twitch_conduits.id", ondelete="CASCADE"), nullable=False)
     shard_id = Column(String, nullable=False)
     transport_callback = Column(Text)
+    transport_secret = Column(Text)
     status = Column(String, nullable=False, default="pending")
     last_sync_at = Column(DateTime)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
@@ -7973,7 +8029,7 @@ async def eventsub_callback(request: FastAPIRequest, db: Session = Depends(get_d
 
     if not message_id or not timestamp or not signature:
         logger.warning(
-            "EventSub callback rejected: missing signature headers; has_message_id=%s has_timestamp=%s has_signature=%s",
+            "EventSub callback rejected: reason_code=missing_signature_headers has_message_id=%s has_timestamp=%s has_signature=%s",
             bool(message_id),
             bool(timestamp),
             bool(signature),
@@ -7984,20 +8040,102 @@ async def eventsub_callback(request: FastAPIRequest, db: Session = Depends(get_d
         payload = await request.json()
     except Exception as exc:
         logger.warning(
-            "EventSub callback rejected: invalid JSON decode; message_id=%s error_type=%s",
+            "EventSub callback rejected: reason_code=invalid_json message_id=%s error_type=%s",
             message_id,
             type(exc).__name__,
         )
         raise HTTPException(status_code=400, detail="invalid JSON")
 
+    if message_type == "webhook_callback_verification":
+        sub_info = payload.get("subscription") or {}
+        conduit_shard = payload.get("conduit_shard") or {}
+        verification_shape = "subscription" if sub_info else "conduit_shard" if conduit_shard else "unknown"
+        logger.info(
+            "EventSub verification callback received message_type=%s message_id=%s verification_shape=%s",
+            message_type,
+            message_id,
+            verification_shape,
+        )
+        if verification_shape == "subscription":
+            sub_id = sub_info.get("id")
+            if not sub_id:
+                logger.warning(
+                    "EventSub callback rejected: reason_code=missing_subscription_id message_id=%s message_type=%s verification_shape=%s",
+                    message_id,
+                    message_type,
+                    verification_shape,
+                )
+                raise HTTPException(status_code=400, detail="subscription id missing")
+            subscription = (
+                db.query(EventSubscription)
+                .filter(EventSubscription.twitch_subscription_id == sub_id)
+                .one_or_none()
+            )
+            if not subscription:
+                logger.warning(
+                    "EventSub callback ignored: reason_code=unknown_subscription message_id=%s message_type=%s verification_shape=%s subscription_id=%s",
+                    message_id,
+                    message_type,
+                    verification_shape,
+                    sub_id,
+                )
+                return JSONResponse(status_code=202, content={"detail": "unknown subscription"})
+            secret = subscription.secret
+            if not _verify_eventsub_signature(secret, message_id, timestamp, body, signature):
+                logger.warning(
+                    "EventSub callback rejected: reason_code=invalid_signature message_id=%s message_type=%s verification_shape=%s",
+                    message_id,
+                    message_type,
+                    verification_shape,
+                )
+                raise HTTPException(status_code=403, detail="invalid signature")
+            subscription.status = sub_info.get("status") or subscription.status
+            subscription.last_verified_at = datetime.utcnow()
+            subscription.updated_at = datetime.utcnow()
+            db.commit()
+        elif verification_shape == "conduit_shard":
+            secret, shard_id, resolve_error = _resolve_conduit_verification_secret(payload, db)
+            if resolve_error or not secret:
+                logger.warning(
+                    "EventSub callback rejected: reason_code=%s message_id=%s message_type=%s verification_shape=%s shard_id=%s",
+                    resolve_error or "unknown_secret_resolution_error",
+                    message_id,
+                    message_type,
+                    verification_shape,
+                    shard_id or "<missing>",
+                )
+                raise HTTPException(status_code=400, detail="conduit shard secret unavailable")
+            if not _verify_eventsub_signature(secret, message_id, timestamp, body, signature):
+                logger.warning(
+                    "EventSub callback rejected: reason_code=invalid_signature message_id=%s message_type=%s verification_shape=%s shard_id=%s",
+                    message_id,
+                    message_type,
+                    verification_shape,
+                    shard_id or "<missing>",
+                )
+                raise HTTPException(status_code=403, detail="invalid signature")
+        else:
+            logger.warning(
+                "EventSub callback rejected: reason_code=unsupported_verification_shape message_id=%s message_type=%s",
+                message_id,
+                message_type,
+            )
+            raise HTTPException(status_code=400, detail="unsupported verification payload shape")
+        challenge = payload.get("challenge") or ""
+        return Response(content=challenge, media_type="text/plain")
+
+    # Deprecated/removed assumption note:
+    # historically this callback required subscription.id for every message
+    # type, which broke conduit-shard verification payloads that omit
+    # ``subscription``. Keep subscription lookup scoped to message types that
+    # process EventSubscription rows.
     sub_info = payload.get("subscription") or {}
     sub_id = sub_info.get("id")
     if not sub_id:
         logger.warning(
-            "EventSub callback rejected: subscription id missing; message_id=%s message_type=%s payload_has_subscription=%s",
+            "EventSub callback rejected: reason_code=missing_subscription_id message_id=%s message_type=%s",
             message_id,
             message_type or "<missing>",
-            bool(payload.get("subscription")),
         )
         raise HTTPException(status_code=400, detail="subscription id missing")
 
@@ -8007,22 +8145,26 @@ async def eventsub_callback(request: FastAPIRequest, db: Session = Depends(get_d
         .one_or_none()
     )
     if not subscription:
-        logger.warning("Ignoring callback for unknown EventSub %s", sub_id)
+        logger.warning(
+            "EventSub callback ignored: reason_code=unknown_subscription message_id=%s message_type=%s subscription_id=%s",
+            message_id,
+            message_type or "<missing>",
+            sub_id,
+        )
         return JSONResponse(status_code=202, content={"detail": "unknown subscription"})
 
     if not _verify_eventsub_signature(subscription.secret, message_id, timestamp, body, signature):
-        logger.warning("EventSub signature mismatch for %s", sub_id)
+        logger.warning(
+            "EventSub callback rejected: reason_code=invalid_signature message_id=%s message_type=%s subscription_id=%s",
+            message_id,
+            message_type or "<missing>",
+            sub_id,
+        )
         raise HTTPException(status_code=403, detail="invalid signature")
 
     subscription.status = sub_info.get("status") or subscription.status
     subscription.updated_at = datetime.utcnow()
     db.flush()
-
-    if message_type == "webhook_callback_verification":
-        subscription.last_verified_at = datetime.utcnow()
-        db.commit()
-        challenge = payload.get("challenge") or ""
-        return Response(content=challenge, media_type="text/plain")
 
     if message_type == "notification":
         if not _record_eventsub_notification_dedupe(db, message_id):

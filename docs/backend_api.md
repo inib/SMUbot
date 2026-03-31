@@ -418,7 +418,12 @@ Certain events award priority points and are fed by EventSub subscriptions creat
   - `Twitch-Eventsub-Message-Type`
 - **Signature verification**:
   - The backend computes `HMAC_SHA256(secret, message_id + timestamp + raw_body)` and rejects mismatches with `403`.
-  - The `secret` is taken from the stored `event_subscriptions.secret` value for the incoming subscription id.
+  - For classic payloads (`verification_shape=subscription` and normal notifications), the `secret` is taken from `event_subscriptions.secret` via `subscription.id`.
+  - For conduit verification payloads (`verification_shape=conduit_shard`), the `secret` is taken from `twitch_conduit_shards.transport_secret` using `conduit_shard.id` plus `conduit_id` context when provided.
+- **Verification payload variants**:
+  - Classic webhook verification payloads with `subscription` are supported.
+  - Conduit shard verification payloads with `conduit_shard` and no `subscription` are supported.
+  - Legacy behavior that globally required `subscription.id` has been removed for verification callbacks.
 - **Idempotency / retries**:
   - `notification` deliveries are inserted into `eventsub_message_dedupe` keyed by `message_id` before processing.
   - Duplicate retries are acknowledged with success and skipped to prevent duplicate command/event execution.
@@ -438,6 +443,7 @@ Certain events award priority points and are fed by EventSub subscriptions creat
 4. Monitor callback logs for:
    - signature failures,
    - unknown subscription IDs,
+   - conduit shard secret resolution failures (`missing_conduit_shard_secret`, `unknown_conduit_shard`, `ambiguous_conduit_shard`),
    - dedupe hits (retry storms),
    - webhook/websocket comparison deltas while shadow mode is enabled.
 5. During cutover:
@@ -447,6 +453,8 @@ Certain events award priority points and are fed by EventSub subscriptions creat
 6. Operator verification endpoints:
    - Call `GET /system/health` and confirm global conduit/shard coverage reports healthy.
    - Call `GET /channels/{channel}/eventsub/health?reconcile=true` and confirm per-channel subscriptions/conduit/shard coverage reconcile successfully.
+7. Legacy bug note:
+   - If you previously saw `subscription id missing` on valid conduit verification callbacks, upgrade to this patch level; the callback now branches verification shape before subscription lookup.
 
 ### Channel event stream
 

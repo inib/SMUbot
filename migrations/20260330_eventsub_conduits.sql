@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS twitch_conduit_shards (
     conduit_fk INTEGER NOT NULL REFERENCES twitch_conduits(id) ON DELETE CASCADE,
     shard_id VARCHAR NOT NULL,
     transport_callback TEXT,
+    transport_secret TEXT,
     status VARCHAR NOT NULL DEFAULT 'pending',
     last_sync_at DATETIME,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
