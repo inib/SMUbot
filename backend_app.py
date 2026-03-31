@@ -13,6 +13,7 @@ import re
 import secrets
 import html
 import random
+import ipaddress
 from urllib.parse import quote, urlparse, urlunparse, parse_qs
 from datetime import datetime, timedelta
 import asyncio
@@ -568,8 +569,9 @@ def get_eventsub_callback_override() -> Optional[str]:
     Code customers: ``_public_eventsub_callback_url`` prefers this override for
     Twitch EventSub subscription and reconciliation callback registration.
     Used variables/origin: Pulls ``eventsub_callback_override`` from
-    ``app_settings``, requires an absolute HTTPS URL, and normalizes path/query/
-    fragment to ``/twitch/eventsub/callback``.
+    ``app_settings`` and requires an absolute URL. HTTPS/path/hostname safety
+    checks are deferred to ``_public_eventsub_callback_url`` so reconciliation
+    output can include source-specific warnings.
     """
 
     value = get_setting("eventsub_callback_override")
@@ -584,45 +586,116 @@ def get_eventsub_callback_override() -> Optional[str]:
     if not parsed.scheme or not parsed.hostname:
         logger.warning("Ignoring non-absolute eventsub_callback_override setting", extra={"value": raw})
         return None
-    if parsed.scheme.lower() != "https":
-        logger.warning("Ignoring non-HTTPS eventsub_callback_override setting", extra={"value": raw})
-        return None
-    return str(parsed.replace(path="/twitch/eventsub/callback", query="", fragment=""))
+    return str(parsed.replace(query="", fragment=""))
 
 
-def _public_eventsub_callback_url(request: FastAPIRequest) -> tuple[Optional[str], Optional[str]]:
-    """Build the webhook callback URL Twitch should register for EventSub.
+def _eventsub_callback_hostname_issue(hostname: Optional[str]) -> Optional[str]:
+    """Return an issue code when callback host is internal/private-only.
 
-    Dependencies: Reads ``eventsub_callback_override`` via
-    ``get_eventsub_callback_override``, then ``public_backend_origin`` via
-    ``get_public_backend_origin``, and falls back to route URLs from
-    ``request.url_for`` when already HTTPS.
-    Code customers: EventSub subscription ensure/reconciliation and conduit
-    shard reconciliation setup paths.
-    Used variables/origin: Uses configured ``app_settings`` override URL first,
-    then configured public origin, and finally derives from the
-    ``eventsub_callback`` route URL on the inbound request.
+    Dependencies: Uses ``ipaddress.ip_address`` for IP classification.
+    Code customers: ``_public_eventsub_callback_url`` host safety validation.
+    Used variables/origin: Accepts URL hostname values parsed by Starlette.
     """
 
+    if not hostname:
+        return "missing_hostname"
+    host = hostname.strip().lower().rstrip(".")
+    if not host:
+        return "missing_hostname"
+    if host in {"backend", "api", "localhost"}:
+        return "blocked_internal_hostname"
+    if host.endswith(".localhost"):
+        return "blocked_localhost_hostname"
+    if host.endswith((".local", ".internal", ".lan", ".home", ".svc", ".cluster.local")):
+        return "blocked_private_dns_suffix"
+    try:
+        parsed_ip = ipaddress.ip_address(host)
+    except ValueError:
+        parsed_ip = None
+    if parsed_ip:
+        if (
+            parsed_ip.is_private
+            or parsed_ip.is_loopback
+            or parsed_ip.is_link_local
+            or parsed_ip.is_reserved
+            or parsed_ip.is_unspecified
+        ):
+            return "blocked_private_ip"
+        return None
+    if "." not in host:
+        return "blocked_private_only_hostname"
+    return None
+
+
+def _public_eventsub_callback_url(request: FastAPIRequest) -> tuple[Optional[str], Optional[str], dict[str, Any]]:
+    """Build the webhook callback URL Twitch should register for EventSub.
+
+    Dependencies: Reads settings via ``get_eventsub_callback_override`` and
+    ``get_public_backend_origin``, then falls back to ``request.url_for``.
+    Validates candidates using Starlette ``URL`` and
+    ``_eventsub_callback_hostname_issue``.
+    Code customers: EventSub subscription ensure/reconciliation and conduit
+    shard reconciliation setup paths.
+    Used variables/origin: Tries ``eventsub_callback_override`` first (exact
+    callback path required), then ``public_backend_origin`` with the canonical
+    path appended, and finally the request-derived callback URL. Returns
+    structured warnings with source metadata for degraded reconciliation output.
+    """
+    details: dict[str, Any] = {"source": None, "warnings": []}
+
+    def _warn(source: str, code: str, message: str, candidate: str) -> None:
+        details["warnings"].append(
+            {"source": source, "code": code, "message": message, "candidate": candidate}
+        )
+
     callback_override = get_eventsub_callback_override()
+    configured_origin = get_public_backend_origin()
+    candidates: list[tuple[str, str]] = []
     if callback_override:
-        callback_url = callback_override
-    else:
-        configured_origin = get_public_backend_origin()
-        if configured_origin:
-            base = URL(configured_origin)
-            callback_url = str(base.replace(path="/twitch/eventsub/callback", query="", fragment=""))
-        else:
-            # Deprecated fallback: request-derived callback origins are fragile
-            # behind proxies and should be removed after all environments set
-            # ``public_backend_origin`` or ``eventsub_callback_override``.
-            route_url = URL(str(request.url_for("eventsub_callback")))
-            if (route_url.scheme or "").lower() != "https":
-                return None, "callback_url_not_https"
-            callback_url = str(route_url.replace(path="/twitch/eventsub/callback", query="", fragment=""))
-    if not callback_url.startswith("https://"):
-        return None, "callback_url_not_https"
-    return callback_url, None
+        candidates.append(("eventsub_callback_override", callback_override))
+    if configured_origin:
+        base = URL(configured_origin)
+        candidates.append(
+            (
+                "public_backend_origin",
+                str(base.replace(path="/twitch/eventsub/callback", query="", fragment="")),
+            )
+        )
+    route_url = URL(str(request.url_for("eventsub_callback")))
+    candidates.append(("request_url", str(route_url.replace(query="", fragment=""))))
+
+    for source, candidate in candidates:
+        try:
+            parsed = URL(candidate)
+        except Exception:
+            _warn(source, "invalid_url", "Candidate callback URL could not be parsed.", candidate)
+            continue
+        if (parsed.scheme or "").lower() != "https":
+            _warn(source, "callback_url_not_https", "Callback URL must use https://.", candidate)
+            continue
+        if parsed.path != "/twitch/eventsub/callback":
+            _warn(
+                source,
+                "callback_url_path_invalid",
+                "Callback URL path must be exactly /twitch/eventsub/callback.",
+                candidate,
+            )
+            continue
+        host_issue = _eventsub_callback_hostname_issue(parsed.hostname)
+        if host_issue:
+            _warn(
+                source,
+                host_issue,
+                "Callback URL hostname is internal/private-only; configure a public DNS name.",
+                candidate,
+            )
+            continue
+        callback_url = str(parsed.replace(query="", fragment=""))
+        details["source"] = source
+        return callback_url, None, details
+
+    error = details["warnings"][-1]["code"] if details["warnings"] else "callback_url_unresolved"
+    return None, error, details
 
 
 def get_twitch_scopes() -> list[str]:
@@ -853,11 +926,15 @@ def ensure_eventsub_subscriptions(request: FastAPIRequest, channel_pk: int, db: 
         logger.warning("Skipping EventSub setup for %s: %s", channel.channel_name, exc)
         return
 
-    callback, callback_error = _public_eventsub_callback_url(request)
+    callback, callback_error, callback_meta = _public_eventsub_callback_url(request)
     if callback_error or not callback:
         logger.error(
             "EventSub registration skipped due to invalid callback URL",
-            extra={"error": callback_error or "callback_url_unresolved", "channel_id": channel_pk},
+            extra={
+                "error": callback_error or "callback_url_unresolved",
+                "channel_id": channel_pk,
+                "callback_warnings": callback_meta.get("warnings", []),
+            },
         )
         return
     broadcaster_id = channel.channel_id
@@ -1405,9 +1482,12 @@ def reconcile_eventsub_conduit_subscriptions(request: FastAPIRequest, db: Sessio
         "run_at": datetime.utcnow().isoformat() + "Z",
         "channels_total": len(channels),
         "channels_with_owner_tokens": len(channels_with_owner_tokens),
+        "status": "ok",
+        "degraded": False,
         "conduit": None,
         "shards": [],
         "subscriptions": [],
+        "warnings": [],
         "errors": [],
     }
     if not channels_with_owner_tokens:
@@ -1415,12 +1495,27 @@ def reconcile_eventsub_conduit_subscriptions(request: FastAPIRequest, db: Sessio
         return result
 
     now = datetime.utcnow()
-    callback, callback_error = _public_eventsub_callback_url(request)
+    callback, callback_error, callback_meta = _public_eventsub_callback_url(request)
+    result["callback"] = {"source": callback_meta.get("source"), "url": callback}
+    if callback_meta.get("warnings"):
+        result["warnings"].extend(callback_meta["warnings"])
+        result["degraded"] = True
+        result["status"] = "degraded"
     if callback_error or not callback:
         result["errors"].append(callback_error or "callback_url_unresolved")
+        result["degraded"] = True
+        result["status"] = "degraded"
+        result["remediation"] = (
+            "Set eventsub_callback_override to an HTTPS URL with path "
+            "/twitch/eventsub/callback on a public DNS hostname, or set "
+            "public_backend_origin to an HTTPS public origin."
+        )
         logger.error(
-            "Conduit reconciliation stopped because callback URL is not HTTPS",
-            extra={"error": callback_error or "callback_url_unresolved"},
+            "Conduit reconciliation stopped because callback URL is invalid",
+            extra={
+                "error": callback_error or "callback_url_unresolved",
+                "callback_warnings": callback_meta.get("warnings", []),
+            },
         )
         return result
     try:

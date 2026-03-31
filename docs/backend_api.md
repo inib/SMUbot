@@ -23,10 +23,22 @@ This document summarizes the REST endpoints exposed by `backend_app.py`.
 
 ### EventSub callback URL reliability requirements
 - Twitch EventSub webhook registration must use a **publicly reachable HTTPS callback URL**.
-- The backend normalizes callback registration to exactly:
-  - `https://<public-backend-origin>/twitch/eventsub/callback`
+- Callback validation enforces:
+  - `https://` scheme.
+  - Exact path `/twitch/eventsub/callback`.
+- Callback source priority is:
+  1. `eventsub_callback_override`
+  2. `public_backend_origin`
+  3. `request_url` fallback
+- Reconciliation output now includes structured callback warnings with source
+  metadata so operators can see which source failed validation and why.
+- Internal/private-only callback hostnames are rejected (examples:
+  `backend`, `api`, `localhost`, private/loopback IPs, and bare private-only
+  hostnames without public DNS suffixes).
 - HTTP callback URLs are rejected during registration/reconciliation with:
   - `callback_url_not_https`
+- Invalid callback configuration marks reconciliation as `degraded` and
+  includes a remediation string describing how to fix the callback source.
 - **Important**: relying on a `301` redirect from `http://...` to `https://...` is **not** considered a reliable or supported substitute for EventSub callback registration.
 
 ### EventSub pre-cutover operational verification
