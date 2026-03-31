@@ -435,7 +435,7 @@ class ChannelEventTests(unittest.TestCase):
         Dependencies: Persists conduit + shard metadata including
         ``transport_secret`` and calls callback route.
         Code customers: Twitch conduit shard verification callbacks.
-        Used variables/origin: Uses payload ``conduit_shard.id`` and
+        Used variables/origin: Uses payload ``conduit_shard.shard`` and
         ``conduit_shard.conduit_id`` context.
         """
 
@@ -460,7 +460,7 @@ class ChannelEventTests(unittest.TestCase):
             db.close()
 
         body = {
-            "conduit_shard": {"id": "0", "conduit_id": "conduit-1"},
+            "conduit_shard": {"shard": "0", "conduit_id": "conduit-1"},
             "challenge": "challenge-conduit",
         }
         raw = json.dumps(body).encode()
@@ -479,6 +479,53 @@ class ChannelEventTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.text, "challenge-conduit")
+
+    def test_eventsub_verification_rejects_missing_conduit_shard_field_shard(self) -> None:
+        """Reject conduit verification payloads that omit ``conduit_shard.shard``.
+
+        Dependencies: Persists conduit + shard metadata and calls callback route.
+        Code customers: Twitch conduit shard verification payload validation.
+        Used variables/origin: Sends a conduit payload with only
+        ``conduit_shard.conduit_id`` to assert reason-code enforcement.
+        """
+
+        shard_secret = "verify-conduit-secret"
+        db = backend_app.SessionLocal()
+        try:
+            conduit = backend_app.TwitchConduit(conduit_id="conduit-2", status="enabled")
+            db.add(conduit)
+            db.commit()
+            db.refresh(conduit)
+            db.add(
+                backend_app.TwitchConduitShard(
+                    conduit_fk=conduit.id,
+                    shard_id="7",
+                    transport_callback="https://example/callback",
+                    transport_secret=shard_secret,
+                    status="enabled",
+                )
+            )
+            db.commit()
+        finally:
+            db.close()
+
+        body = {"conduit_shard": {"conduit_id": "conduit-2"}, "challenge": "challenge-missing-shard"}
+        raw = json.dumps(body).encode()
+        message_id = "msg-verify-missing-shard"
+        timestamp = "2023-01-01T00:00:00Z"
+        digest = hmac.new(shard_secret.encode(), msg=(message_id + timestamp).encode() + raw, digestmod=hashlib.sha256)
+        response = self.client.post(
+            "/twitch/eventsub/callback",
+            data=raw,
+            headers={
+                "Twitch-Eventsub-Message-Id": message_id,
+                "Twitch-Eventsub-Message-Timestamp": timestamp,
+                "Twitch-Eventsub-Message-Signature": f"sha256={digest.hexdigest()}",
+                "Twitch-Eventsub-Message-Type": "webhook_callback_verification",
+            },
+        )
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertEqual(response.json(), {"detail": "missing_conduit_shard_field_shard"})
 
     def test_eventsub_verification_rejects_invalid_signature_for_subscription_and_conduit(self) -> None:
         """Ensure invalid signatures are rejected for both verification shapes.
@@ -538,7 +585,7 @@ class ChannelEventTests(unittest.TestCase):
         )
         self.assertEqual(sub_resp.status_code, 403, sub_resp.text)
 
-        conduit_body = {"conduit_shard": {"id": "1", "conduit_id": "conduit-bad"}, "challenge": "y"}
+        conduit_body = {"conduit_shard": {"shard": "1", "conduit_id": "conduit-bad"}, "challenge": "y"}
         conduit_raw = json.dumps(conduit_body).encode()
         conduit_digest = hmac.new(
             b"wrong-conduit-secret",

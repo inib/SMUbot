@@ -130,9 +130,14 @@ unlocks the API for the bot, queue manager, and public web frontend.
     - classic verification payloads (`subscription` shape),
     - conduit shard verification payloads (`conduit_shard` shape with no
       `subscription`).
+  - Conduit shard verification now reads `conduit_shard.shard` (not legacy
+    `conduit_shard.id`) alongside `conduit_shard.conduit_id` for secret lookup.
   - Legacy `subscription id missing` errors for conduit verification were caused
     by an older global subscription-id assumption; this is fixed by routing
     verification shape before subscription lookup.
+  - Legacy `missing_conduit_shard_id` failures were fixed by switching callback
+    validation to Twitch's current conduit payload fields and explicit missing
+    field reason codes.
   - Reconciliation warning output now includes callback source metadata:
     `eventsub_callback_override`, `public_backend_origin`, or `request_url`.
   - Invalid callback candidates degrade reconciliation status with explicit

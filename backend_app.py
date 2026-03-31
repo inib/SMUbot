@@ -1485,37 +1485,39 @@ def _reconcile_twitch_conduit_shards(
 def _resolve_conduit_verification_secret(
     payload: Mapping[str, Any],
     db: Session,
-) -> tuple[Optional[str], Optional[str], Optional[str]]:
+) -> tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
     """Resolve webhook secret for conduit-shard callback verification payloads.
 
     Dependencies: Uses ``TwitchConduit`` + ``TwitchConduitShard`` persistence.
     Code customers: ``eventsub_callback`` verification branch for
     ``verification_shape=conduit_shard``.
-    Used variables/origin: Reads ``conduit_shard.id`` and optional
-    ``conduit_shard.conduit_id`` or ``subscription.transport.conduit_id`` from
-    EventSub verification payloads.
+    Used variables/origin: Reads ``conduit_shard.conduit_id`` and
+    ``conduit_shard.shard`` from EventSub verification payloads.
     """
 
     conduit_shard = payload.get("conduit_shard") or {}
-    shard_id = str(conduit_shard.get("id")) if conduit_shard.get("id") is not None else None
-    if not shard_id:
-        return None, None, "missing_conduit_shard_id"
-    conduit_id = conduit_shard.get("conduit_id")
+    conduit_id = str(conduit_shard.get("conduit_id")) if conduit_shard.get("conduit_id") is not None else None
     if not conduit_id:
-        transport = (payload.get("subscription") or {}).get("transport") or {}
-        conduit_id = transport.get("conduit_id")
+        return None, None, None, "missing_conduit_shard_field_conduit_id"
+    shard_id = str(conduit_shard.get("shard")) if conduit_shard.get("shard") is not None else None
+    if not shard_id:
+        return None, conduit_id, None, "missing_conduit_shard_field_shard"
+    # Old ``conduit_shard.id`` payload parsing intentionally removed to prevent
+    # regressions: Twitch conduit verification payload uses ``shard``.
     query = db.query(TwitchConduitShard).join(TwitchConduit, TwitchConduitShard.conduit_fk == TwitchConduit.id)
-    query = query.filter(TwitchConduitShard.shard_id == shard_id)
-    if conduit_id:
-        query = query.filter(TwitchConduit.conduit_id == conduit_id)
-    rows = query.limit(2).all()
+    rows = (
+        query.filter(
+            TwitchConduit.conduit_id == conduit_id,
+            TwitchConduitShard.shard_id == shard_id,
+        )
+        .limit(1)
+        .all()
+    )
     if not rows:
-        return None, shard_id, "unknown_conduit_shard"
-    if len(rows) > 1 and not conduit_id:
-        return None, shard_id, "ambiguous_conduit_shard"
+        return None, conduit_id, shard_id, "unknown_conduit_shard"
     if not rows[0].transport_secret:
-        return None, shard_id, "missing_conduit_shard_secret"
-    return rows[0].transport_secret, shard_id, None
+        return None, conduit_id, shard_id, "missing_conduit_shard_secret"
+    return rows[0].transport_secret, conduit_id, shard_id, None
 
 
 def _format_eventsub_http_error(exc: Exception, auth_mode: str) -> str:
@@ -8094,26 +8096,42 @@ async def eventsub_callback(request: FastAPIRequest, db: Session = Depends(get_d
             subscription.updated_at = datetime.utcnow()
             db.commit()
         elif verification_shape == "conduit_shard":
-            secret, shard_id, resolve_error = _resolve_conduit_verification_secret(payload, db)
+            secret, conduit_id, shard_id, resolve_error = _resolve_conduit_verification_secret(payload, db)
+            logger.info(
+                "EventSub conduit verification received verification_shape=%s conduit_id=%s shard_id=%s message_id=%s",
+                verification_shape,
+                conduit_id or "<missing>",
+                shard_id or "<missing>",
+                message_id,
+            )
             if resolve_error or not secret:
                 logger.warning(
-                    "EventSub callback rejected: reason_code=%s message_id=%s message_type=%s verification_shape=%s shard_id=%s",
+                    "EventSub callback rejected: reason_code=%s message_id=%s message_type=%s verification_shape=%s conduit_id=%s shard_id=%s",
                     resolve_error or "unknown_secret_resolution_error",
                     message_id,
                     message_type,
                     verification_shape,
+                    conduit_id or "<missing>",
                     shard_id or "<missing>",
                 )
-                raise HTTPException(status_code=400, detail="conduit shard secret unavailable")
+                raise HTTPException(status_code=400, detail=resolve_error or "conduit_shard_secret_unavailable")
             if not _verify_eventsub_signature(secret, message_id, timestamp, body, signature):
                 logger.warning(
-                    "EventSub callback rejected: reason_code=invalid_signature message_id=%s message_type=%s verification_shape=%s shard_id=%s",
+                    "EventSub callback rejected: reason_code=invalid_signature message_id=%s message_type=%s verification_shape=%s conduit_id=%s shard_id=%s",
                     message_id,
                     message_type,
                     verification_shape,
+                    conduit_id or "<missing>",
                     shard_id or "<missing>",
                 )
                 raise HTTPException(status_code=403, detail="invalid signature")
+            logger.info(
+                "EventSub conduit verification accepted verification_shape=%s conduit_id=%s shard_id=%s message_id=%s",
+                verification_shape,
+                conduit_id,
+                shard_id,
+                message_id,
+            )
         else:
             logger.warning(
                 "EventSub callback rejected: reason_code=unsupported_verification_shape message_id=%s message_type=%s",
