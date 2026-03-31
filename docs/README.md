@@ -71,10 +71,19 @@ unlocks the API for the bot, queue manager, and public web frontend.
 
 ### Chat ingress defaults and staged rollout flags
 - `/system/config` now exposes `chat_ingress_mode` with:
-  - `websocket` (default)
-  - `webhook_conduit`
+  - `webhook_conduit` (default, authoritative)
+  - `websocket` (legacy fallback only)
 - `/system/config` also exposes `chat_ingress_shadow_mode` (default `false`) so
   operators can run dual-path validation before a full ingress cutover.
+- Legacy rollback is explicit through `chat_websocket_fallback_legacy_enabled`.
+  Websocket EventSub chat subscriptions are suppressed in bot runtime when
+  `chat_ingress_mode=webhook_conduit` and this rollback flag is `false`.
+- Startup/runtime ingress guard now evaluates conduit health with high-severity
+  alerts and optional auto-fallback (`chat_ingress_guard_auto_fallback_enabled`)
+  when:
+  - healthy conduit shards drop below `chat_ingress_guard_min_healthy_shards`,
+  - callback 4xx/5xx volume in `chat_ingress_guard_window_seconds` exceeds
+    `chat_ingress_guard_callback_error_threshold`.
 - Migration `migrations/20260330_eventsub_conduits.sql` adds additive EventSub
   replay/conduit tables (`eventsub_message_dedupe`, `twitch_conduits`,
   `twitch_conduit_shards`) plus conduit linkage columns on
@@ -86,6 +95,11 @@ unlocks the API for the bot, queue manager, and public web frontend.
   staggered deploys on legacy SQLite/prod databases continue booting safely.
 - EventSub health endpoints now include conduit + shard coverage summaries:
   - `GET /system/health` reports global conduit assignment coverage.
+  - `GET /system/health.eventsub.ingress_summary` adds compact runtime counters:
+    callback 2xx/4xx/5xx, signature failures, dedupe hits, per-channel command
+    dispatch outcomes, shard status transitions, and last error timestamps.
+  - `GET /system/health.eventsub.authoritative_guard` reports degradation
+    reasons and whether auto-fallback was applied.
   - `GET /channels/{channel}/eventsub/health` reports per-channel shard
     assignment state and can trigger reconcile with `?reconcile=true`, which
     refreshes local/conduit/shard/coverage fields after reconciliation.
@@ -176,6 +190,30 @@ Expected:
 - `public_backend_origin` is an `https://` origin.
 - Derived EventSub callback format is:
   `https://<public-backend-origin>/twitch/eventsub/callback`.
+
+### Rollback + triage playbook
+1. Confirm current mode and guard state:
+   - `GET /system/config`
+   - `GET /system/health` and inspect `eventsub.ingress_summary` +
+     `eventsub.authoritative_guard`.
+2. If degraded (`missing_healthy_shards` / `callback_errors_spike`), run:
+   - `GET /channels/{channel}/eventsub/health?reconcile=true`
+   - validate callback URL config + shard statuses.
+3. Emergency rollback:
+   - set `chat_websocket_fallback_legacy_enabled=true`,
+   - optionally switch `chat_ingress_mode=websocket` if operator policy
+     requires immediate handoff.
+4. After stabilization, disable rollback flag again and restore
+   `chat_ingress_mode=webhook_conduit`.
+
+### Maintenance checklist
+- Verify bot/app token refreshes complete successfully each day.
+- Reconcile conduit shards on a fixed cadence (recommended: every 15 minutes or
+  after channel topology changes).
+- Validate callback URL remains public HTTPS with exact
+  `/twitch/eventsub/callback` path.
+- Review `ingress_summary` counters for signature failures, dedupe spikes, and
+  shard status churn.
 
 ## Running with Docker
 1. Copy `example.env` to `stack.env` and adjust values such as `ADMIN_TOKEN`,

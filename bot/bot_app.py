@@ -171,6 +171,18 @@ class Backend:
     async def get_channels(self):
         return await self._req('GET', "/channels")
 
+    async def get_system_config(self) -> dict:
+        """Return backend system config used for ingress runtime gating.
+
+        Dependencies: calls the backend ``/system/config`` endpoint.
+        Code customers: ``SongBot.sync_channels`` websocket fallback decisions.
+        Used variables/origin: uses admin-authenticated API response fields such
+        as ``chat_ingress_mode`` and ``chat_websocket_fallback_legacy_enabled``.
+        """
+
+        payload = await self._req('GET', "/system/config")
+        return payload if isinstance(payload, dict) else {}
+
     async def add_channel(self, channel_name: str, channel_id: str, join_active: int = 1):
         return await self._req('POST', "/channels", {
             'channel_name': channel_name,
@@ -535,6 +547,7 @@ class SongBot(commands.Bot):
         self._subscription_ids: Dict[str, str] = {}
         self._update_locks: Dict[str, asyncio.Lock] = {}
         self._refresher_task: Optional[asyncio.Task] = None
+        self._websocket_ingress_enabled = True
 
     @property
     def configured_login(self) -> Optional[str]:
@@ -647,6 +660,12 @@ class SongBot(commands.Bot):
             await self._disable_all_channels()
             return
         async with self._sync_lock:
+            config = await backend.get_system_config()
+            ingress_mode = str(config.get("chat_ingress_mode") or "").strip().lower()
+            rollback_enabled = bool(config.get("chat_websocket_fallback_legacy_enabled"))
+            self._websocket_ingress_enabled = ingress_mode != "webhook_conduit" or rollback_enabled
+            if ingress_mode == "webhook_conduit" and not rollback_enabled:
+                logger.info("Websocket EventSub chat subscription is disabled by authoritative webhook_conduit mode")
             rows = await backend.get_channels()
             allowed: Dict[str, Dict] = {}
             for row in rows:
@@ -758,6 +777,8 @@ class SongBot(commands.Bot):
         return None
 
     async def _find_existing_subscription_id(self, broadcaster_id: str) -> Optional[str]:
+        # TODO(cleanup): This websocket helper is a legacy fallback path once
+        # webhook-conduit ingress has passed the stabilization window.
         for existing_id, details in self.websocket_subscriptions().items():
             condition = getattr(details, 'condition', {}) or {}
             sub_type = getattr(details, 'type', None)
@@ -788,8 +809,22 @@ class SongBot(commands.Bot):
         return None
 
     async def _subscribe_for_channel(self, broadcaster_id: str) -> None:
+        """Create/reuse websocket chat subscriptions unless authoritative mode disables them.
+
+        Dependencies: uses backend-provided ingress policy computed in
+        ``sync_channels`` and TwitchIO websocket EventSub APIs.
+        Code customers: channel-sync subscription lifecycle.
+        Used variables/origin: ``self._websocket_ingress_enabled`` reflects
+        ``chat_ingress_mode`` plus rollback flag from backend system config.
+        """
+
         if not broadcaster_id:
             raise RuntimeError('Channel missing broadcaster id')
+        if not self._websocket_ingress_enabled:
+            # Deprecated fallback note:
+            # websocket chat subscriptions remain available only when explicit
+            # rollback flag ``chat_websocket_fallback_legacy_enabled`` is true.
+            return
         if broadcaster_id in self._subscription_ids:
             return
         existing_id = await self._find_existing_subscription_id(broadcaster_id)

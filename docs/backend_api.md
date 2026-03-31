@@ -5,7 +5,7 @@ This document summarizes the REST endpoints exposed by `backend_app.py`.
 ## System
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/system/health` | Health check that verifies database connectivity plus global EventSub webhook/conduit coverage and shard state. |
+| GET | `/system/health` | Health check that verifies database connectivity plus global EventSub webhook/conduit coverage, shard state, and ingress guard telemetry. |
 | GET | `/system/config` | Read deployment configuration defaults and ingress mode toggles. |
 | PUT | `/system/config` | Update deployment configuration, scopes, and ingress mode toggles (admin token required). |
 
@@ -14,14 +14,31 @@ This document summarizes the REST endpoints exposed by `backend_app.py`.
   - Existing setup/OAuth fields (`setup_complete`, client IDs/secrets, redirect URIs, scopes).
   - `eventsub_callback_override`: optional admin-managed full callback override URL (example: `https://api.example.com/twitch/eventsub/callback`).
   - `public_backend_origin`: canonical public backend origin used for EventSub callback URL generation (example: `https://api.example.com`).
-  - `chat_ingress_mode`: `websocket` (default) or `webhook_conduit`.
+  - `chat_ingress_mode`: `webhook_conduit` (default authoritative) or `websocket` (legacy fallback).
   - `chat_ingress_shadow_mode`: boolean dual-run switch for validation mode (default `false`).
+  - `chat_websocket_fallback_legacy_enabled`: explicit rollback flag for websocket EventSub chat subscriptions in bot runtime.
+  - `chat_ingress_guard_auto_fallback_enabled`: if `true`, degraded authoritative ingress can auto-switch mode to `websocket`.
 - **PUT payload additions**
   - `eventsub_callback_override?: string`
   - `public_backend_origin?: string`
   - `chat_ingress_mode?: "websocket" | "webhook_conduit"`
   - `chat_ingress_shadow_mode?: boolean`
+  - `chat_websocket_fallback_legacy_enabled?: boolean`
+  - `chat_ingress_guard_auto_fallback_enabled?: boolean`
 - **Compatibility note**: Startup includes additive schema patching for staggered deployments so older SQLite/prod DBs can run until the dedicated migration is applied.
+
+### `/system/health` ingress summary
+- `eventsub.ingress_summary` includes compact operational counters:
+  - callback status buckets (`2xx/4xx/5xx`),
+  - signature failures,
+  - dedupe hits,
+  - per-channel webhook command dispatch outcomes,
+  - conduit shard status transitions,
+  - recent callback throughput + last error timestamps.
+- `eventsub.authoritative_guard` includes degradation reasons (`missing_healthy_shards`, `callback_errors_spike`) and whether fallback was applied.
+- Recommended operator thresholds:
+  - callback error threshold: 5 errors / 5 minutes,
+  - minimum healthy shards: 1 (or expected shard count for larger deployments).
 
 ### EventSub callback URL reliability requirements
 - Twitch EventSub webhook registration must use a **publicly reachable HTTPS callback URL**.
@@ -55,6 +72,10 @@ This document summarizes the REST endpoints exposed by `backend_app.py`.
    ```
 2. Confirm expected callback URL format before enabling conduit ingress:
    - `https://<public-backend-origin>/twitch/eventsub/callback`
+3. Rollback playbook:
+   - Enable `chat_websocket_fallback_legacy_enabled=true` for immediate websocket subscription restore.
+   - If required, switch `chat_ingress_mode=websocket`.
+   - Re-run conduit reconcile + callback validation before returning to authoritative mode.
 
 ## Authentication
 | Method | Path | Description |
