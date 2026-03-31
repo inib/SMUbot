@@ -172,6 +172,26 @@ BOT_MESSAGE_CATALOG: list[dict[str, Any]] = [
     {"id": "token_refreshed", "level": "debug", "group": "lifecycle", "template_key": "token_refreshed", "description": "Token refresh succeeded.", "customizable": True},
     {"id": "action_failed_debug", "level": "debug", "group": "errors", "template_key": "action_failed_debug", "description": "Internal action failure diagnostic.", "customizable": True},
 ]
+BOT_MESSAGE_DEFAULT_TEMPLATES: dict[str, str] = {
+    "channel_not_registered": "Channel not registered in backend",
+    "request_added": "Added: {artist} - {title}",
+    "random_request_added": "Added random: {artist} - {title}",
+    "random_not_found": "No playlist found for \"{keyword}\"",
+    "playlist_request_added": "Added playlist item: {artist} - {title}",
+    "playlist_not_found": "Playlist not found: {identifier}",
+    "playlist_song_missing": "Playlist item #{index} not found in {identifier}",
+    "playlist_usage": "Usage: !playlist <playlist> <index>",
+    "prioritize_limit": "Limit reached: 3 prioritized songs per stream",
+    "prioritize_no_target": "No eligible request to prioritize",
+    "prioritize_success": "Prioritized request #{request_id}",
+    "points": "{username}, {points} points",
+    "remove_no_pending": "You have no pending requests",
+    "remove_success": "Removed your latest request #{request_id}",
+    "archive_success": "Archived current queue and started new stream",
+    "archive_denied": "Only channel owner or moderators can archive the queue",
+    "failed": "Failed: {error}",
+}
+BOT_MESSAGE_LEVEL_RANK: dict[str, int] = {"mute": 0, "normal": 1, "verbose": 2, "debug": 3}
 
 _bot_log_listeners: set[asyncio.Queue[str]] = set()
 _bot_oauth_states: dict[str, Dict[str, Any]] = {}
@@ -184,6 +204,10 @@ _INGRESS_METRICS: dict[str, Any] = {
     "signature_failures": 0,
     "dedupe_hits": 0,
     "command_dispatch_outcomes": {},
+    "command_executed_count": 0,
+    "reply_sent_count": 0,
+    "reply_suppressed_count": 0,
+    "send_api_failure_count": 0,
     "shard_status_transitions": {},
     "last_errors": {
         "signature_failure_at": None,
@@ -884,6 +908,14 @@ def _record_ingress_metric(metric: str, *, key: Optional[str] = None, timestamp:
         elif metric == "command_dispatch_outcome" and key:
             outcomes = _INGRESS_METRICS["command_dispatch_outcomes"]
             outcomes[key] = int(outcomes.get(key, 0)) + 1
+        elif metric == "command_executed":
+            _INGRESS_METRICS["command_executed_count"] = int(_INGRESS_METRICS.get("command_executed_count", 0)) + 1
+        elif metric == "reply_sent":
+            _INGRESS_METRICS["reply_sent_count"] = int(_INGRESS_METRICS.get("reply_sent_count", 0)) + 1
+        elif metric == "reply_suppressed":
+            _INGRESS_METRICS["reply_suppressed_count"] = int(_INGRESS_METRICS.get("reply_suppressed_count", 0)) + 1
+        elif metric == "send_api_failure":
+            _INGRESS_METRICS["send_api_failure_count"] = int(_INGRESS_METRICS.get("send_api_failure_count", 0)) + 1
         elif metric == "shard_status_transition" and key:
             transitions = _INGRESS_METRICS["shard_status_transitions"]
             transitions[key] = int(transitions.get(key, 0)) + 1
@@ -911,6 +943,10 @@ def _ingress_metrics_snapshot(now: datetime) -> dict[str, Any]:
             "signature_failures": int(_INGRESS_METRICS["signature_failures"]),
             "dedupe_hits": int(_INGRESS_METRICS["dedupe_hits"]),
             "command_dispatch_outcomes": dict(_INGRESS_METRICS["command_dispatch_outcomes"]),
+            "command_executed_count": int(_INGRESS_METRICS["command_executed_count"]),
+            "reply_sent_count": int(_INGRESS_METRICS["reply_sent_count"]),
+            "reply_suppressed_count": int(_INGRESS_METRICS["reply_suppressed_count"]),
+            "send_api_failure_count": int(_INGRESS_METRICS["send_api_failure_count"]),
             "shard_status_transitions": dict(_INGRESS_METRICS["shard_status_transitions"]),
             "last_errors": dict(_INGRESS_METRICS["last_errors"]),
             "recent_callback_throughput": {
@@ -1364,6 +1400,130 @@ def _eventsub_outcome(
     return payload
 
 
+def _eventsub_response_contract(
+    status: Literal["success", "error"],
+    *,
+    template_key: str,
+    template_vars: Optional[dict[str, Any]] = None,
+    visibility: Literal["mute", "normal", "verbose", "debug"] = "normal",
+) -> dict[str, Any]:
+    """Return a stable webhook command reply contract payload.
+
+    Dependencies: Pure dictionary construction.
+    Code customers: EventSub command executors return this object so the
+    callback layer can apply message policy and call Twitch Send Chat Message.
+    Used variables/origin: ``template_key`` and ``template_vars`` originate
+    from command execution results; ``visibility`` declares the message level.
+    """
+
+    return {
+        "status": status,
+        "template_key": template_key,
+        "template_vars": template_vars or {},
+        "visibility": visibility,
+    }
+
+
+def _render_eventsub_reply_text(reply: dict[str, Any]) -> str:
+    """Render a webhook command reply contract to final chat text.
+
+    Dependencies: Uses ``BOT_MESSAGE_DEFAULT_TEMPLATES`` defaults.
+    Code customers: ``_send_eventsub_chat_reply``.
+    Used variables/origin: reply payload comes from
+    ``_eventsub_response_contract``.
+    """
+
+    template_key = str(reply.get("template_key") or "").strip()
+    if not template_key:
+        return ""
+    template = BOT_MESSAGE_DEFAULT_TEMPLATES.get(template_key, template_key)
+    template_vars = reply.get("template_vars") or {}
+    if not isinstance(template_vars, dict):
+        template_vars = {}
+    try:
+        return template.format(**template_vars)
+    except Exception:
+        return template
+
+
+def _should_send_eventsub_reply(channel: ActiveChannel, visibility: str) -> bool:
+    """Evaluate channel bot message threshold for webhook replies.
+
+    Dependencies: Reads ``channel.settings.bot_message_level`` and static
+    ``BOT_MESSAGE_LEVEL_RANK`` mapping.
+    Code customers: ``_send_eventsub_chat_reply`` policy gate.
+    Used variables/origin: ``visibility`` comes from command response contract.
+    """
+
+    settings = channel.settings
+    threshold_name = (settings.bot_message_level if settings and settings.bot_message_level else "normal").strip().lower()
+    message_level_name = (visibility or "normal").strip().lower()
+    threshold_rank = BOT_MESSAGE_LEVEL_RANK.get(threshold_name, BOT_MESSAGE_LEVEL_RANK["normal"])
+    message_rank = BOT_MESSAGE_LEVEL_RANK.get(message_level_name, BOT_MESSAGE_LEVEL_RANK["normal"])
+    return threshold_name != "mute" and message_rank <= threshold_rank
+
+
+def _send_eventsub_chat_reply(db: Session, channel: ActiveChannel, reply: dict[str, Any], *, reply_parent_message_id: Optional[str]) -> bool:
+    """Send webhook reply text through Twitch Send Chat Message API with retries.
+
+    Dependencies: Uses ``_eventsub_bot_headers`` for bot OAuth context and
+    ``get_bot_user_id`` for sender id, then POSTs ``/helix/chat/messages``.
+    Code customers: ``_process_eventsub_chat_notification`` authoritative path.
+    Used variables/origin: ``reply`` contract is emitted by command executors;
+    ``reply_parent_message_id`` comes from the inbound EventSub message id.
+    """
+
+    visibility = str(reply.get("visibility") or "normal")
+    if not _should_send_eventsub_reply(channel, visibility):
+        _record_ingress_metric("reply_suppressed")
+        return False
+    text = _render_eventsub_reply_text(reply)
+    if not text:
+        _record_ingress_metric("reply_suppressed")
+        return False
+    sender_id = get_bot_user_id()
+    if not sender_id:
+        _record_ingress_metric("send_api_failure")
+        logger.warning("Webhook reply send skipped: bot_user_id unavailable")
+        return False
+    try:
+        headers = _eventsub_bot_headers(db)
+    except Exception:
+        _record_ingress_metric("send_api_failure")
+        logger.exception("Webhook reply send skipped: bot oauth credentials unavailable")
+        return False
+    payload: dict[str, Any] = {
+        "broadcaster_id": channel.channel_id,
+        "sender_id": sender_id,
+        "message": text,
+    }
+    if reply_parent_message_id:
+        payload["reply_parent_message_id"] = reply_parent_message_id
+    delay_seconds = 0.3
+    for attempt in range(3):
+        try:
+            response = requests.post(
+                "https://api.twitch.tv/helix/chat/messages",
+                headers=headers,
+                json=payload,
+                timeout=8,
+            )
+            response.raise_for_status()
+            _record_ingress_metric("reply_sent")
+            return True
+        except requests.RequestException:
+            _record_ingress_metric("send_api_failure")
+            if attempt == 2:
+                logger.exception(
+                    "Webhook reply send failed after retries",
+                    extra={"channel": channel.channel_name, "template_key": reply.get("template_key")},
+                )
+                return False
+            time.sleep(delay_seconds)
+            delay_seconds *= 2
+    return False
+
+
 def _eventsub_execute_request_command(
     db: Session,
     channel: ActiveChannel,
@@ -1385,12 +1545,38 @@ def _eventsub_execute_request_command(
 
     request_text = (args or "").strip()
     if not request_text:
-        return _eventsub_outcome("rejected", command="request", reason_code="invalid_args", detail="request text required")
+        return _eventsub_outcome(
+            "rejected",
+            command="request",
+            reason_code="invalid_args",
+            detail="request text required",
+            metadata={
+                "response": _eventsub_response_contract(
+                    "error",
+                    template_key="failed",
+                    template_vars={"error": "request text required"},
+                    visibility="normal",
+                )
+            },
+        )
     artist, sep, title = request_text.partition("-")
     artist_name = artist.strip()
     title_name = title.strip() if sep else ""
     if not artist_name or not title_name:
-        return _eventsub_outcome("rejected", command="request", reason_code="invalid_args", detail="expected format: artist - title")
+        return _eventsub_outcome(
+            "rejected",
+            command="request",
+            reason_code="invalid_args",
+            detail="expected format: artist - title",
+            metadata={
+                "response": _eventsub_response_contract(
+                    "error",
+                    template_key="failed",
+                    template_vars={"error": "expected format: artist - title"},
+                    visibility="normal",
+                )
+            },
+        )
 
     channel_pk = channel.id
     user = _get_or_create_channel_user(db, channel_pk, chatter_user_id, chatter_login)
@@ -1435,7 +1621,16 @@ def _eventsub_execute_request_command(
         "executed",
         command="request",
         reason_code="ok",
-        metadata={"request_id": req.id, "song_id": song.id},
+        metadata={
+            "request_id": req.id,
+            "song_id": song.id,
+            "response": _eventsub_response_contract(
+                "success",
+                template_key="request_added",
+                template_vars={"artist": song.artist, "title": song.title},
+                visibility="normal",
+            ),
+        },
     )
 
 
@@ -1457,24 +1652,85 @@ def _eventsub_execute_playlist_request_command(
     raw_args = (args or "").strip()
     name_part, sep, index_part = raw_args.rpartition(" ")
     if not sep or not name_part.strip() or not index_part.strip():
-        return _eventsub_outcome("rejected", command="playlist_request", reason_code="invalid_args", detail="expected format: <playlist> <index>")
+        return _eventsub_outcome(
+            "rejected",
+            command="playlist_request",
+            reason_code="invalid_args",
+            detail="expected format: <playlist> <index>",
+            metadata={
+                "response": _eventsub_response_contract(
+                    "error",
+                    template_key="playlist_usage",
+                    template_vars={},
+                    visibility="normal",
+                )
+            },
+        )
     try:
         index = int(index_part.strip())
     except ValueError:
-        return _eventsub_outcome("rejected", command="playlist_request", reason_code="invalid_args", detail="index must be an integer")
+        return _eventsub_outcome(
+            "rejected",
+            command="playlist_request",
+            reason_code="invalid_args",
+            detail="index must be an integer",
+            metadata={
+                "response": _eventsub_response_contract(
+                    "error",
+                    template_key="failed",
+                    template_vars={"error": "index must be an integer"},
+                    visibility="normal",
+                )
+            },
+        )
     if index < 1:
-        return _eventsub_outcome("rejected", command="playlist_request", reason_code="invalid_args", detail="index must be >= 1")
+        return _eventsub_outcome(
+            "rejected",
+            command="playlist_request",
+            reason_code="invalid_args",
+            detail="index must be >= 1",
+            metadata={
+                "response": _eventsub_response_contract(
+                    "error",
+                    template_key="failed",
+                    template_vars={"error": "index must be >= 1"},
+                    visibility="normal",
+                )
+            },
+        )
     payload = PlaylistRequestIn(identifier=name_part.strip(), index=index)
     try:
         response = request_playlist_item(channel.channel_name, payload, db=db)
     except HTTPException as exc:
         reason = "not_found" if exc.status_code == 404 else "invalid_args"
-        return _eventsub_outcome("rejected", command="playlist_request", reason_code=reason, detail=str(exc.detail))
+        return _eventsub_outcome(
+            "rejected",
+            command="playlist_request",
+            reason_code=reason,
+            detail=str(exc.detail),
+            metadata={
+                "response": _eventsub_response_contract(
+                    "error",
+                    template_key="playlist_not_found" if reason == "not_found" else "failed",
+                    template_vars={"identifier": name_part.strip(), "error": str(exc.detail)},
+                    visibility="normal",
+                )
+            },
+        )
     return _eventsub_outcome(
         "executed",
         command="playlist_request",
         reason_code="ok",
-        metadata={"request_id": response.request_id, "playlist_item_id": response.playlist_item_id},
+        metadata={
+            "request_id": response.request_id,
+            "playlist_item_id": response.playlist_item_id,
+            "response": _eventsub_response_contract(
+                "success",
+                template_key="playlist_request_added",
+                template_vars={"artist": response.song.artist, "title": response.song.title},
+                visibility="normal",
+            ),
+        },
     )
 
 
@@ -1577,6 +1833,16 @@ def _process_eventsub_chat_notification(
     elif webhook_authoritative:
         try:
             outcome = _dispatch_eventsub_chat_command(db, channel, parsed=parsed, event_payload=event_payload)
+            if outcome.get("status") == "executed":
+                _record_ingress_metric("command_executed")
+            reply_contract = ((outcome.get("metadata") or {}).get("response") if isinstance(outcome.get("metadata"), dict) else None)
+            if isinstance(reply_contract, dict) and not shadow_mode:
+                _send_eventsub_chat_reply(
+                    db,
+                    channel,
+                    reply_contract,
+                    reply_parent_message_id=message_id,
+                )
             if outcome["status"] == "executed":
                 webhook_result = "executed_authoritative"
             elif outcome["status"] == "rejected":
