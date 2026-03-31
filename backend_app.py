@@ -1251,10 +1251,9 @@ def reconcile_eventsub_conduit_subscriptions(request: FastAPIRequest, db: Sessio
     """Reconcile conduit + shards + chat subscriptions for every active channel.
 
     Dependencies: Uses app-auth via ``_eventsub_app_headers`` for conduit/shard
-    Helix APIs, plus bot-auth via ``_eventsub_bot_headers`` and bot identity
-    via ``get_bot_user_id`` for per-channel chat subscription list/create APIs;
-    persists into ``TwitchConduit``,
-    ``TwitchConduitShard``, and ``EventSubscription``.
+    and chat-subscription Helix APIs, and bot identity via ``get_bot_user_id``;
+    persists into ``TwitchConduit``, ``TwitchConduitShard``, and
+    ``EventSubscription``.
     Code customers: Health routes and onboarding setup call this to surface
     conduit alignment status without disabling websocket subscriptions.
     Used variables/origin: channel list comes from ``ActiveChannel`` rows and
@@ -1289,7 +1288,6 @@ def reconcile_eventsub_conduit_subscriptions(request: FastAPIRequest, db: Sessio
         bot_user_id = get_bot_user_id()
         if not bot_user_id:
             raise RuntimeError("bot user id is unavailable")
-        bot_headers = _eventsub_bot_headers(db)
     except RuntimeError as exc:
         result["errors"].append(f"bot_identity_unavailable: {exc}")
         return result
@@ -1323,7 +1321,7 @@ def reconcile_eventsub_conduit_subscriptions(request: FastAPIRequest, db: Sessio
         try:
             remote_resp = requests.get(
                 "https://api.twitch.tv/helix/eventsub/subscriptions",
-                headers=bot_headers,
+                headers=headers,
                 timeout=8,
             )
             remote_resp.raise_for_status()
@@ -1368,7 +1366,7 @@ def reconcile_eventsub_conduit_subscriptions(request: FastAPIRequest, db: Sessio
                 create_resp = requests.post(
                     "https://api.twitch.tv/helix/eventsub/subscriptions",
                     json=payload,
-                    headers=bot_headers,
+                    headers=headers,
                     timeout=8,
                 )
                 create_resp.raise_for_status()
