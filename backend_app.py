@@ -70,6 +70,7 @@ SETTINGS_ENV_MAP: Dict[str, str] = {
     "twitch_client_secret": "TWITCH_CLIENT_SECRET",
     "twitch_redirect_uri": "TWITCH_REDIRECT_URI",
     "bot_redirect_uri": "BOT_TWITCH_REDIRECT_URI",
+    "eventsub_callback_override": "TWITCH_EVENTSUB_CALLBACK",
     "public_backend_origin": "PUBLIC_BACKEND_ORIGIN",
     "twitch_scopes": "TWITCH_SCOPES",
     "bot_app_scopes": "BOT_APP_SCOPES",
@@ -559,29 +560,66 @@ def get_public_backend_origin() -> Optional[str]:
     return str(parsed.replace(path="", query="", fragment=""))
 
 
+def get_eventsub_callback_override() -> Optional[str]:
+    """Return the configured absolute EventSub callback override URL.
+
+    Dependencies: Reads persisted settings via ``get_setting`` and parses URLs
+    with ``URL`` from Starlette.
+    Code customers: ``_public_eventsub_callback_url`` prefers this override for
+    Twitch EventSub subscription and reconciliation callback registration.
+    Used variables/origin: Pulls ``eventsub_callback_override`` from
+    ``app_settings``, requires an absolute HTTPS URL, and normalizes path/query/
+    fragment to ``/twitch/eventsub/callback``.
+    """
+
+    value = get_setting("eventsub_callback_override")
+    raw = value.strip() if value else ""
+    if not raw:
+        return None
+    try:
+        parsed = URL(raw)
+    except Exception:
+        logger.warning("Ignoring invalid eventsub_callback_override setting", extra={"value": raw})
+        return None
+    if not parsed.scheme or not parsed.hostname:
+        logger.warning("Ignoring non-absolute eventsub_callback_override setting", extra={"value": raw})
+        return None
+    if parsed.scheme.lower() != "https":
+        logger.warning("Ignoring non-HTTPS eventsub_callback_override setting", extra={"value": raw})
+        return None
+    return str(parsed.replace(path="/twitch/eventsub/callback", query="", fragment=""))
+
+
 def _public_eventsub_callback_url(request: FastAPIRequest) -> tuple[Optional[str], Optional[str]]:
     """Build the webhook callback URL Twitch should register for EventSub.
 
-    Dependencies: Reads ``public_backend_origin`` via ``get_public_backend_origin``
-    and falls back to route URLs from ``request.url_for`` when already HTTPS.
+    Dependencies: Reads ``eventsub_callback_override`` via
+    ``get_eventsub_callback_override``, then ``public_backend_origin`` via
+    ``get_public_backend_origin``, and falls back to route URLs from
+    ``request.url_for`` when already HTTPS.
     Code customers: EventSub subscription ensure/reconciliation and conduit
     shard reconciliation setup paths.
-    Used variables/origin: Uses configured ``app_settings`` when present; if not,
-    derives from the ``eventsub_callback`` route URL on the inbound request.
+    Used variables/origin: Uses configured ``app_settings`` override URL first,
+    then configured public origin, and finally derives from the
+    ``eventsub_callback`` route URL on the inbound request.
     """
 
-    configured_origin = get_public_backend_origin()
-    if configured_origin:
-        base = URL(configured_origin)
-        callback_url = str(base.replace(path="/twitch/eventsub/callback", query="", fragment=""))
+    callback_override = get_eventsub_callback_override()
+    if callback_override:
+        callback_url = callback_override
     else:
-        # Deprecated fallback: request-derived callback origins are fragile behind
-        # proxies and should be removed after all environments set
-        # ``public_backend_origin``.
-        route_url = URL(str(request.url_for("eventsub_callback")))
-        if (route_url.scheme or "").lower() != "https":
-            return None, "callback_url_not_https"
-        callback_url = str(route_url.replace(path="/twitch/eventsub/callback", query="", fragment=""))
+        configured_origin = get_public_backend_origin()
+        if configured_origin:
+            base = URL(configured_origin)
+            callback_url = str(base.replace(path="/twitch/eventsub/callback", query="", fragment=""))
+        else:
+            # Deprecated fallback: request-derived callback origins are fragile
+            # behind proxies and should be removed after all environments set
+            # ``public_backend_origin`` or ``eventsub_callback_override``.
+            route_url = URL(str(request.url_for("eventsub_callback")))
+            if (route_url.scheme or "").lower() != "https":
+                return None, "callback_url_not_https"
+            callback_url = str(route_url.replace(path="/twitch/eventsub/callback", query="", fragment=""))
     if not callback_url.startswith("https://"):
         return None, "callback_url_not_https"
     return callback_url, None
