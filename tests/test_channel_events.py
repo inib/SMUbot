@@ -616,17 +616,41 @@ class ChannelEventTests(unittest.TestCase):
 
         details = _setup_channel()
         secret = "chatsecret"
+        conduit_id = "conduit-chat-shadow"
+        shard_id = "2"
         db = backend_app.SessionLocal()
         try:
             backend_app.set_settings(db, {"chat_ingress_mode": "websocket", "chat_ingress_shadow_mode": "1"})
+            conduit = backend_app.TwitchConduit(conduit_id=conduit_id, status="enabled")
+            db.add(conduit)
+            db.commit()
+            db.refresh(conduit)
+            db.add(
+                backend_app.TwitchConduitShard(
+                    conduit_fk=conduit.id,
+                    shard_id=shard_id,
+                    transport_callback="https://example/callback",
+                    transport_secret=secret,
+                    status="enabled",
+                )
+            )
             chat_sub = backend_app.EventSubscription(
                 channel_id=details["channel_pk"],
                 twitch_subscription_id="sub-chat-shadow",
                 type="channel.chat.message",
                 status="enabled",
-                secret=secret,
+                secret="legacy-subscription-secret",
                 callback="https://example/callback",
                 transport="conduit",
+                conduit_id=conduit_id,
+                shard_id=shard_id,
+                meta=json.dumps(
+                    {
+                        "transport": {"method": "conduit", "conduit_id": conduit_id},
+                        "conduit_shard": {"conduit_id": conduit_id, "shard_id": shard_id},
+                        "shard_id": shard_id,
+                    }
+                ),
             )
             db.add(chat_sub)
             db.commit()
@@ -640,6 +664,7 @@ class ChannelEventTests(unittest.TestCase):
                 "status": "enabled",
                 "version": "1",
                 "condition": {"broadcaster_user_id": "cid"},
+                "transport": {"method": "conduit", "conduit_id": conduit_id},
             },
             "event": {
                 "chatter_user_id": "chat-user-1",
@@ -675,6 +700,86 @@ class ChannelEventTests(unittest.TestCase):
             self.assertEqual(db.query(backend_app.Event).filter(backend_app.Event.channel_id == details["channel_pk"]).count(), 0)
         finally:
             db.close()
+
+    def test_eventsub_conduit_chat_notification_missing_shard_secret_returns_503(self) -> None:
+        """Fail conduit chat notifications when persisted shard secret is missing.
+
+        Dependencies: EventSub callback signature validation, conduit/shard
+        persistence, and HTTP error diagnostics. Code customers: operators
+        diagnosing conduit reconciliation/state drift. Used variables/origin:
+        creates a conduit chat subscription pointing at a shard row without a
+        stored secret.
+        """
+
+        details = _setup_channel()
+        conduit_id = "conduit-missing-secret"
+        shard_id = "7"
+        db = backend_app.SessionLocal()
+        try:
+            conduit = backend_app.TwitchConduit(conduit_id=conduit_id, status="enabled")
+            db.add(conduit)
+            db.commit()
+            db.refresh(conduit)
+            db.add(
+                backend_app.TwitchConduitShard(
+                    conduit_fk=conduit.id,
+                    shard_id=shard_id,
+                    transport_callback="https://example/callback",
+                    transport_secret=None,
+                    status="enabled",
+                )
+            )
+            db.add(
+                backend_app.EventSubscription(
+                    channel_id=details["channel_pk"],
+                    twitch_subscription_id="sub-chat-missing-secret",
+                    type="channel.chat.message",
+                    status="enabled",
+                    secret="legacy-secret-unused",
+                    callback="https://example/callback",
+                    transport="conduit",
+                    conduit_id=conduit_id,
+                    shard_id=shard_id,
+                )
+            )
+            db.commit()
+        finally:
+            db.close()
+
+        body = {
+            "subscription": {
+                "id": "sub-chat-missing-secret",
+                "type": "channel.chat.message",
+                "status": "enabled",
+                "version": "1",
+                "condition": {"broadcaster_user_id": "cid"},
+                "transport": {"method": "conduit", "conduit_id": conduit_id},
+            },
+            "event": {
+                "chatter_user_id": "chat-user-1",
+                "chatter_user_login": "chatuser",
+                "message": {"text": "!request song"},
+            },
+        }
+        raw = json.dumps(body).encode()
+        message_id = "msg-missing-shard-secret"
+        timestamp = "2023-01-01T00:00:00Z"
+        signature = hmac.new(b"legacy-secret-unused", msg=(message_id + timestamp).encode() + raw, digestmod=hashlib.sha256)
+        response = self.client.post(
+            "/twitch/eventsub/callback",
+            data=raw,
+            headers={
+                "Twitch-Eventsub-Message-Id": message_id,
+                "Twitch-Eventsub-Message-Timestamp": timestamp,
+                "Twitch-Eventsub-Message-Signature": f"sha256={signature.hexdigest()}",
+                "Twitch-Eventsub-Message-Type": "notification",
+            },
+        )
+        self.assertEqual(response.status_code, 503, response.text)
+        payload = response.json().get("detail") or {}
+        self.assertEqual(payload.get("reason_code"), "missing_conduit_shard_secret")
+        self.assertEqual(payload.get("conduit_id"), conduit_id)
+        self.assertEqual(payload.get("shard_id"), shard_id)
 
     def test_get_or_create_settings_backfills_queue_caps(self) -> None:
         """Ensure legacy channel settings rows gain default queue caps.
