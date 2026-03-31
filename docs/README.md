@@ -84,7 +84,8 @@ unlocks the API for the bot, queue manager, and public web frontend.
 - EventSub health endpoints now include conduit + shard coverage summaries:
   - `GET /system/health` reports global conduit assignment coverage.
   - `GET /channels/{channel}/eventsub/health` reports per-channel shard
-    assignment state and can trigger reconcile with `?reconcile=true`.
+    assignment state and can trigger reconcile with `?reconcile=true`, which
+    refreshes local/conduit/shard/coverage fields after reconciliation.
 - EventSub callback operations contract:
   - `/twitch/eventsub/callback` must be publicly reachable via HTTPS from
     Twitch (no private-only callback hostnames).
