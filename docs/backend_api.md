@@ -357,7 +357,7 @@ Certain events award priority points and are fed by EventSub subscriptions creat
 - Conduit/subscription metadata is persisted in existing storage:
   - `twitch_conduits`, `twitch_conduit_shards`
   - `event_subscriptions` with `transport="conduit"` for `channel.chat.message`.
-- `GET /channels/{channel}/eventsub/health?reconcile=true` runs reconciliation on-demand and reports any reconciliation errors alongside local/remote state snapshots.
+- `GET /channels/{channel}/eventsub/health?reconcile=true` runs reconciliation on-demand, then recomputes local subscriptions/conduit/shards/coverage before responding so top-level diagnostics match the new reconciliation state.
 
 ### EventSub callback contract (operations)
 

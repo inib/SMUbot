@@ -7815,43 +7815,66 @@ def eventsub_health(
     remote data Twitch returns.
     """
 
+    def _compute_local_eventsub_state() -> tuple[list[dict[str, Any]], Optional[TwitchConduit], list[TwitchConduitShard], set[str], bool, bool]:
+        """Build local EventSub, conduit, shard, and coverage state.
+
+        Dependencies: Uses the enclosing SQLAlchemy ``db`` session plus
+        ``channel_pk`` to pull current rows from ``EventSubscription``,
+        ``TwitchConduit``, and ``TwitchConduitShard``.
+        Code customers: ``eventsub_health`` calls this before and (optionally)
+        after reconciliation so top-level diagnostics stay aligned.
+        Used variables/origin: Reads ``channel_pk`` from the route context and
+        derives ``shard_ids`` and assignment coverage from persisted DB rows.
+        """
+
+        local_state = [
+            {
+                "type": sub.type,
+                "status": sub.status,
+                "last_verified_at": sub.last_verified_at,
+                "last_notified_at": sub.last_notified_at,
+                "callback": sub.callback,
+                "transport": sub.transport,
+                "conduit_id": sub.conduit_id,
+                "shard_id": sub.shard_id,
+                "meta": sub.meta,
+            }
+            for sub in db.query(EventSubscription).filter(EventSubscription.channel_id == channel_pk)
+        ]
+        conduit_state = db.query(TwitchConduit).order_by(TwitchConduit.id.asc()).first()
+        shard_state = (
+            db.query(TwitchConduitShard)
+            .filter(TwitchConduitShard.conduit_fk == conduit_state.id)
+            .order_by(TwitchConduitShard.shard_id.asc())
+            .all()
+            if conduit_state
+            else []
+        )
+        channel_chat_sub = next((sub for sub in local_state if sub["type"] == EVENTSUB_CONDUIT_CHAT_TYPE), None)
+        shard_ids_state = {row.shard_id for row in shard_state}
+        assignment_ok_state = bool(channel_chat_sub and channel_chat_sub.get("shard_id") in shard_ids_state)
+        return (
+            local_state,
+            conduit_state,
+            shard_state,
+            shard_ids_state,
+            bool(channel_chat_sub),
+            assignment_ok_state,
+        )
+
     channel_pk = get_channel_pk(channel, db)
     channel_obj = db.get(ActiveChannel, channel_pk)
     if not channel_obj:
         raise HTTPException(status_code=404, detail="channel not found")
-    local = [
-        {
-            "type": sub.type,
-            "status": sub.status,
-            "last_verified_at": sub.last_verified_at,
-            "last_notified_at": sub.last_notified_at,
-            "callback": sub.callback,
-            "transport": sub.transport,
-            "conduit_id": sub.conduit_id,
-            "shard_id": sub.shard_id,
-            "meta": sub.meta,
-        }
-        for sub in db.query(EventSubscription).filter(EventSubscription.channel_id == channel_pk)
-    ]
+    local, conduit_row, shards, shard_ids, channel_chat_present, assignment_ok = _compute_local_eventsub_state()
     remote = _fetch_remote_eventsubs(channel_obj)
     if not remote:
         logger.info("Remote EventSub data unavailable for %s; check token/scopes", channel)
-    conduit_row = db.query(TwitchConduit).order_by(TwitchConduit.id.asc()).first()
-    shards = (
-        db.query(TwitchConduitShard)
-        .filter(TwitchConduitShard.conduit_fk == conduit_row.id)
-        .order_by(TwitchConduitShard.shard_id.asc())
-        .all()
-        if conduit_row
-        else []
-    )
-    channel_chat_sub = next((sub for sub in local if sub["type"] == EVENTSUB_CONDUIT_CHAT_TYPE), None)
-    shard_ids = {row.shard_id for row in shards}
-    assignment_ok = bool(channel_chat_sub and channel_chat_sub.get("shard_id") in shard_ids)
     reconcile_state: Optional[dict[str, Any]] = None
     if reconcile:
         try:
             reconcile_state = reconcile_eventsub_conduit_subscriptions(request, db)
+            local, conduit_row, shards, shard_ids, channel_chat_present, assignment_ok = _compute_local_eventsub_state()
         except Exception as exc:
             reconcile_state = {"errors": [str(exc)], "status": "failed"}
 
@@ -7873,7 +7896,7 @@ def eventsub_health(
             for row in shards
         ],
         "coverage": {
-            "channel_chat_subscription_present": bool(channel_chat_sub),
+            "channel_chat_subscription_present": channel_chat_present,
             "channel_shard_assignment_ok": assignment_ok,
             "known_shard_ids": sorted(shard_ids),
         },
