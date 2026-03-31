@@ -80,8 +80,13 @@ SETTINGS_ENV_MAP: Dict[str, str] = {
 SETTINGS_DEFAULTS: Dict[str, Optional[str]] = {
     "twitch_scopes": "channel:bot channel:read:subscriptions channel:read:vips bits:read moderator:read:followers",
     "bot_app_scopes": "user:read:chat user:write:chat user:bot",
-    "chat_ingress_mode": "websocket",
+    "chat_ingress_mode": "webhook_conduit",
     "chat_ingress_shadow_mode": "0",
+    "chat_websocket_fallback_legacy_enabled": "0",
+    "chat_ingress_guard_auto_fallback_enabled": "0",
+    "chat_ingress_guard_callback_error_threshold": "5",
+    "chat_ingress_guard_window_seconds": "300",
+    "chat_ingress_guard_min_healthy_shards": "1",
 }
 
 SETUP_REQUIRED_KEYS = ("twitch_client_id", "twitch_client_secret")
@@ -172,6 +177,22 @@ _bot_log_listeners: set[asyncio.Queue[str]] = set()
 _bot_oauth_states: dict[str, Dict[str, Any]] = {}
 
 logger = logging.getLogger(__name__)
+
+_INGRESS_METRICS_LOCK = Lock()
+_INGRESS_METRICS: dict[str, Any] = {
+    "callback_status": {"2xx": 0, "4xx": 0, "5xx": 0},
+    "signature_failures": 0,
+    "dedupe_hits": 0,
+    "command_dispatch_outcomes": {},
+    "shard_status_transitions": {},
+    "last_errors": {
+        "signature_failure_at": None,
+        "callback_4xx_at": None,
+        "callback_5xx_at": None,
+        "guard_degraded_at": None,
+    },
+    "callback_events": [],
+}
 
 engine = create_engine(DB_URL, connect_args={"check_same_thread": False} if DB_URL.startswith("sqlite") else {})
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
@@ -385,6 +406,39 @@ def backfill_missing_channel_keys() -> None:
             db.commit()
     finally:
         db.close()
+
+
+def cleanup_conduit_subscription_secret_semantics() -> None:
+    """Normalize conduit EventSub rows to non-authoritative secret placeholders.
+
+    Dependencies: Uses ``SessionLocal`` and updates ``EventSubscription`` rows.
+    Code customers: Startup migration/cleanup for post-cutover conduit ingress.
+    Used variables/origin: Targets rows where ``transport='conduit'`` and chat
+    ingress type is ``channel.chat.message`` so signature validation depends only
+    on ``twitch_conduit_shards.transport_secret``.
+    """
+
+    db = SessionLocal()
+    try:
+        rows = (
+            db.query(EventSubscription)
+            .filter(
+                EventSubscription.transport == "conduit",
+                EventSubscription.type == EVENTSUB_CONDUIT_CHAT_TYPE,
+                EventSubscription.secret != EVENTSUB_CONDUIT_SECRET_PLACEHOLDER,
+            )
+            .all()
+        )
+        for row in rows:
+            row.secret = EVENTSUB_CONDUIT_SECRET_PLACEHOLDER
+            row.updated_at = datetime.utcnow()
+        if rows:
+            db.commit()
+            logger.info("Normalized %s conduit chat subscription secrets to placeholder semantics", len(rows))
+    finally:
+        db.close()
+
+
 def _load_settings_from_db() -> Dict[str, Optional[str]]:
     db = SessionLocal()
     try:
@@ -785,6 +839,144 @@ def get_chat_ingress_shadow_mode() -> bool:
     return _env_flag(get_setting("chat_ingress_shadow_mode", "0"))
 
 
+def get_chat_websocket_fallback_legacy_enabled() -> bool:
+    """Return whether legacy websocket ingress fallback is explicitly enabled.
+
+    Dependencies: Uses ``get_setting`` and ``_env_flag``.
+    Code customers: Bot runtime subscription gating and ``/system/config``.
+    Used variables/origin: Reads ``chat_websocket_fallback_legacy_enabled`` from
+    app settings to keep rollback explicit and operator-controlled.
+    """
+
+    return _env_flag(get_setting("chat_websocket_fallback_legacy_enabled", "0"))
+
+
+def _ingress_guard_thresholds() -> dict[str, float]:
+    """Return normalized ingress guard thresholds from persisted settings."""
+
+    callback_error_threshold = max(_coerce_int(get_setting("chat_ingress_guard_callback_error_threshold", "5"), default=5), 1)
+    window_seconds = max(_coerce_int(get_setting("chat_ingress_guard_window_seconds", "300"), default=300), 60)
+    min_healthy_shards = max(_coerce_int(get_setting("chat_ingress_guard_min_healthy_shards", "1"), default=1), 1)
+    return {
+        "callback_error_threshold": float(callback_error_threshold),
+        "window_seconds": float(window_seconds),
+        "min_healthy_shards": float(min_healthy_shards),
+    }
+
+
+def _record_ingress_metric(metric: str, *, key: Optional[str] = None, timestamp: Optional[datetime] = None) -> None:
+    """Update in-memory ingress telemetry counters used by health diagnostics."""
+
+    now = timestamp or datetime.utcnow()
+    with _INGRESS_METRICS_LOCK:
+        if metric == "callback_status" and key in {"2xx", "4xx", "5xx"}:
+            _INGRESS_METRICS["callback_status"][key] = int(_INGRESS_METRICS["callback_status"].get(key, 0)) + 1
+            _INGRESS_METRICS["callback_events"].append({"timestamp": now, "class": key})
+            if key == "4xx":
+                _INGRESS_METRICS["last_errors"]["callback_4xx_at"] = now
+            if key == "5xx":
+                _INGRESS_METRICS["last_errors"]["callback_5xx_at"] = now
+        elif metric == "signature_failure":
+            _INGRESS_METRICS["signature_failures"] = int(_INGRESS_METRICS.get("signature_failures", 0)) + 1
+            _INGRESS_METRICS["last_errors"]["signature_failure_at"] = now
+        elif metric == "dedupe_hit":
+            _INGRESS_METRICS["dedupe_hits"] = int(_INGRESS_METRICS.get("dedupe_hits", 0)) + 1
+        elif metric == "command_dispatch_outcome" and key:
+            outcomes = _INGRESS_METRICS["command_dispatch_outcomes"]
+            outcomes[key] = int(outcomes.get(key, 0)) + 1
+        elif metric == "shard_status_transition" and key:
+            transitions = _INGRESS_METRICS["shard_status_transitions"]
+            transitions[key] = int(transitions.get(key, 0)) + 1
+        elif metric == "guard_degraded":
+            _INGRESS_METRICS["last_errors"]["guard_degraded_at"] = now
+        cutoff = now - timedelta(hours=1)
+        _INGRESS_METRICS["callback_events"] = [
+            event for event in _INGRESS_METRICS["callback_events"] if event.get("timestamp") and event["timestamp"] >= cutoff
+        ]
+
+
+def _ingress_metrics_snapshot(now: datetime) -> dict[str, Any]:
+    """Return compact ingress telemetry for ``/system/health`` diagnostics."""
+
+    with _INGRESS_METRICS_LOCK:
+        thresholds = _ingress_guard_thresholds()
+        window = timedelta(seconds=int(thresholds["window_seconds"]))
+        cutoff = now - window
+        recent = [event for event in _INGRESS_METRICS["callback_events"] if event["timestamp"] >= cutoff]
+        recent_total = len(recent)
+        recent_4xx = sum(1 for event in recent if event["class"] == "4xx")
+        recent_5xx = sum(1 for event in recent if event["class"] == "5xx")
+        return {
+            "callback_status": dict(_INGRESS_METRICS["callback_status"]),
+            "signature_failures": int(_INGRESS_METRICS["signature_failures"]),
+            "dedupe_hits": int(_INGRESS_METRICS["dedupe_hits"]),
+            "command_dispatch_outcomes": dict(_INGRESS_METRICS["command_dispatch_outcomes"]),
+            "shard_status_transitions": dict(_INGRESS_METRICS["shard_status_transitions"]),
+            "last_errors": dict(_INGRESS_METRICS["last_errors"]),
+            "recent_callback_throughput": {
+                "window_seconds": int(thresholds["window_seconds"]),
+                "callbacks_total": recent_total,
+                "callbacks_4xx": recent_4xx,
+                "callbacks_5xx": recent_5xx,
+                "callbacks_per_minute": round(recent_total / max(thresholds["window_seconds"] / 60.0, 1.0), 2),
+            },
+        }
+
+
+def _evaluate_ingress_guard(db: Session, now: datetime, *, apply_fallback: bool) -> dict[str, Any]:
+    """Evaluate authoritative webhook-conduit health and optional fallback policy."""
+
+    thresholds = _ingress_guard_thresholds()
+    summary = _ingress_metrics_snapshot(now)
+    shard_rows = db.query(TwitchConduitShard).all()
+    healthy_shards = sum(1 for shard in shard_rows if (shard.status or "").lower() == "enabled")
+    degraded_reasons: list[str] = []
+    if healthy_shards < int(thresholds["min_healthy_shards"]):
+        degraded_reasons.append("missing_healthy_shards")
+    recent = summary["recent_callback_throughput"]
+    callback_errors = int(recent["callbacks_4xx"]) + int(recent["callbacks_5xx"])
+    if callback_errors >= int(thresholds["callback_error_threshold"]):
+        degraded_reasons.append("callback_errors_spike")
+    degraded = bool(degraded_reasons)
+    auto_fallback_enabled = _env_flag(get_setting("chat_ingress_guard_auto_fallback_enabled", "0"))
+    fallback_applied = False
+    if degraded:
+        _record_ingress_metric("guard_degraded", timestamp=now)
+        logger.error(
+            "INGRESS_GUARD_DEGRADED reasons=%s healthy_shards=%s callback_errors=%s",
+            ",".join(degraded_reasons),
+            healthy_shards,
+            callback_errors,
+        )
+        if apply_fallback and auto_fallback_enabled and get_chat_ingress_mode() == "webhook_conduit":
+            set_settings(db, {"chat_ingress_mode": "websocket"})
+            fallback_applied = True
+            logger.error("INGRESS_GUARD_AUTO_FALLBACK applied chat_ingress_mode=websocket")
+    return {
+        "degraded": degraded,
+        "reasons": degraded_reasons,
+        "healthy_shards": healthy_shards,
+        "thresholds": {k: int(v) for k, v in thresholds.items()},
+        "auto_fallback_enabled": auto_fallback_enabled,
+        "auto_fallback_applied": fallback_applied,
+        "legacy_websocket_fallback_enabled": get_chat_websocket_fallback_legacy_enabled(),
+    }
+
+
+def run_ingress_guard_startup_check() -> None:
+    """Run a startup ingress guard check and emit high-severity alerts when degraded."""
+
+    db = SessionLocal()
+    try:
+        if get_chat_ingress_mode() != "webhook_conduit":
+            return
+        _evaluate_ingress_guard(db, datetime.utcnow(), apply_fallback=True)
+    except Exception:
+        logger.exception("Ingress guard startup check failed")
+    finally:
+        db.close()
+
+
 def _system_config_payload() -> Dict[str, Any]:
     return {
         "setup_complete": is_setup_complete(),
@@ -798,6 +990,8 @@ def _system_config_payload() -> Dict[str, Any]:
         "bot_app_scopes": get_bot_app_scopes(),
         "chat_ingress_mode": get_chat_ingress_mode(),
         "chat_ingress_shadow_mode": get_chat_ingress_shadow_mode(),
+        "chat_websocket_fallback_legacy_enabled": get_chat_websocket_fallback_legacy_enabled(),
+        "chat_ingress_guard_auto_fallback_enabled": _env_flag(get_setting("chat_ingress_guard_auto_fallback_enabled", "0")),
     }
 
 
@@ -1105,6 +1299,7 @@ def _record_eventsub_notification_dedupe(db: Session, message_id: str) -> bool:
         return True
     except IntegrityError:
         db.rollback()
+        _record_ingress_metric("dedupe_hit")
         logger.info("Ignoring duplicate EventSub notification retry", extra={"eventsub_message_id": message_id})
         return False
 
@@ -1180,7 +1375,16 @@ def _process_eventsub_chat_notification(
     ingress_mode = get_chat_ingress_mode()
     shadow_mode = get_chat_ingress_shadow_mode()
     webhook_authoritative = ingress_mode == "webhook_conduit" and not shadow_mode
-    webhook_result = "executed_authoritative" if webhook_authoritative else "shadow_observe_only"
+    if not parsed.get("canonical"):
+        webhook_result = "ignored_non_command"
+    elif webhook_authoritative:
+        webhook_result = "executed_authoritative"
+    else:
+        webhook_result = "shadow_observe_only"
+    _record_ingress_metric(
+        "command_dispatch_outcome",
+        key=f"{channel.channel_name}:{webhook_result}",
+    )
 
     logger.info(
         "EventSub chat ingress comparison",
@@ -1458,7 +1662,11 @@ def _reconcile_twitch_conduit_shards(
         transport = shard.get("transport") or {}
         row.transport_callback = transport.get("callback") or callback
         row.transport_secret = secret_by_shard.get(shard_id) or row.transport_secret
-        row.status = shard.get("status") or "enabled"
+        next_status = shard.get("status") or "enabled"
+        prev_status = row.status or "pending"
+        if prev_status != next_status:
+            _record_ingress_metric("shard_status_transition", key=f"{prev_status}->{next_status}")
+        row.status = next_status
         row.last_sync_at = now
 
     for shard_id in desired_ids:
@@ -1478,6 +1686,8 @@ def _reconcile_twitch_conduit_shards(
             db.add(row)
         row.transport_callback = callback
         row.transport_secret = secret_by_shard.get(shard_id) or row.transport_secret
+        if (row.status or "pending") != "pending":
+            _record_ingress_metric("shard_status_transition", key=f"{row.status}->pending")
         row.status = "pending"
         row.last_sync_at = now
     return assignment, errors
@@ -1549,7 +1759,11 @@ def _refresh_conduit_shard_status_from_twitch(
             db.add(row)
         transport = remote.get("transport") or {}
         row.transport_callback = transport.get("callback") or row.transport_callback
-        row.status = remote.get("status") or row.status or "pending"
+        next_status = remote.get("status") or row.status or "pending"
+        prev_status = row.status or "pending"
+        if prev_status != next_status:
+            _record_ingress_metric("shard_status_transition", key=f"{prev_status}->{next_status}")
+        row.status = next_status
         row.last_sync_at = now
         updated = True
     if updated:
@@ -2345,6 +2559,8 @@ ensure_channel_settings_schema()
 _ensure_playlist_schema()
 ensure_eventsub_conduit_schema()
 bootstrap_settings_from_env()
+cleanup_conduit_subscription_secret_semantics()
+run_ingress_guard_startup_check()
 
 # =====================================
 # Schemas
@@ -2548,6 +2764,8 @@ class SystemConfigOut(BaseModel):
     bot_app_scopes: List[str]
     chat_ingress_mode: Literal["websocket", "webhook_conduit"]
     chat_ingress_shadow_mode: bool
+    chat_websocket_fallback_legacy_enabled: bool
+    chat_ingress_guard_auto_fallback_enabled: bool
 
 
 class SystemConfigUpdate(BaseModel):
@@ -2561,6 +2779,8 @@ class SystemConfigUpdate(BaseModel):
     bot_app_scopes: Optional[List[str]] = None
     chat_ingress_mode: Optional[Literal["websocket", "webhook_conduit"]] = None
     chat_ingress_shadow_mode: Optional[bool] = None
+    chat_websocket_fallback_legacy_enabled: Optional[bool] = None
+    chat_ingress_guard_auto_fallback_enabled: Optional[bool] = None
     setup_complete: Optional[bool] = None
 
 
@@ -2958,6 +3178,22 @@ async def enforce_initial_setup(request: FastAPIRequest, call_next):
         return await call_next(request)
 
     return JSONResponse({"detail": "setup incomplete"}, status_code=503)
+
+
+@app.middleware("http")
+async def capture_eventsub_callback_metrics(request: FastAPIRequest, call_next):
+    """Track callback response classes and recent throughput for ingress guarding."""
+
+    response = await call_next(request)
+    if request.url.path == "/twitch/eventsub/callback":
+        status_code = int(getattr(response, "status_code", 0) or 0)
+        if 200 <= status_code < 300:
+            _record_ingress_metric("callback_status", key="2xx")
+        elif 400 <= status_code < 500:
+            _record_ingress_metric("callback_status", key="4xx")
+        elif status_code >= 500:
+            _record_ingress_metric("callback_status", key="5xx")
+    return response
 
 class _ChannelBroker:
     __slots__ = ("channel_pk", "listeners")
@@ -5514,6 +5750,10 @@ def update_system_config(
         updates["chat_ingress_mode"] = payload.chat_ingress_mode
     if payload.chat_ingress_shadow_mode is not None:
         updates["chat_ingress_shadow_mode"] = "1" if payload.chat_ingress_shadow_mode else "0"
+    if payload.chat_websocket_fallback_legacy_enabled is not None:
+        updates["chat_websocket_fallback_legacy_enabled"] = "1" if payload.chat_websocket_fallback_legacy_enabled else "0"
+    if payload.chat_ingress_guard_auto_fallback_enabled is not None:
+        updates["chat_ingress_guard_auto_fallback_enabled"] = "1" if payload.chat_ingress_guard_auto_fallback_enabled else "0"
 
     current = settings_store.snapshot()
     merged: Dict[str, Optional[str]] = dict(current)
@@ -5580,6 +5820,9 @@ def health(request: FastAPIRequest, db: Session = Depends(get_db)):
             else []
         )
         coverage = (conduit_channels / channels_total) if channels_total else 1.0
+        now = datetime.utcnow()
+        ingress_summary = _ingress_metrics_snapshot(now)
+        ingress_guard = _evaluate_ingress_guard(db, now, apply_fallback=False)
         return {
             "status": "ok",
             "eventsub": {
@@ -5602,6 +5845,8 @@ def health(request: FastAPIRequest, db: Session = Depends(get_db)):
                     }
                     for shard in shard_rows
                 ],
+                "ingress_summary": ingress_summary,
+                "authoritative_guard": ingress_guard,
             },
         }
     except Exception as e:
@@ -8244,6 +8489,7 @@ async def eventsub_callback(request: FastAPIRequest, db: Session = Depends(get_d
                 return JSONResponse(status_code=202, content={"detail": "unknown subscription"})
             secret = subscription.secret
             if not _verify_eventsub_signature(secret, message_id, timestamp, body, signature):
+                _record_ingress_metric("signature_failure")
                 logger.warning(
                     "EventSub callback rejected: reason_code=invalid_signature message_id=%s message_type=%s verification_shape=%s",
                     message_id,
@@ -8276,6 +8522,7 @@ async def eventsub_callback(request: FastAPIRequest, db: Session = Depends(get_d
                 )
                 raise HTTPException(status_code=400, detail=resolve_error or "conduit_shard_secret_unavailable")
             if not _verify_eventsub_signature(secret, message_id, timestamp, body, signature):
+                _record_ingress_metric("signature_failure")
                 logger.warning(
                     "EventSub callback rejected: reason_code=invalid_signature message_id=%s message_type=%s verification_shape=%s conduit_id=%s shard_id=%s",
                     message_id,
@@ -8371,6 +8618,7 @@ async def eventsub_callback(request: FastAPIRequest, db: Session = Depends(get_d
             )
 
     if not _verify_eventsub_signature(verification_secret, message_id, timestamp, body, signature):
+        _record_ingress_metric("signature_failure")
         if is_conduit_chat_notification:
             logger.warning(
                 "EventSub callback rejected: reason_code=invalid_signature message_id=%s message_type=%s subscription_id=%s conduit_id=%s shard_id=%s signature_mode=conduit_shard_secret",
@@ -8400,9 +8648,13 @@ async def eventsub_callback(request: FastAPIRequest, db: Session = Depends(get_d
         if is_conduit_chat_notification:
             _refresh_conduit_shard_status_from_twitch(conduit_id, db, datetime.utcnow())
             db.commit()
+        if get_chat_ingress_mode() == "webhook_conduit":
+            _evaluate_ingress_guard(db, datetime.utcnow(), apply_fallback=True)
         return JSONResponse({"success": True})
 
     db.commit()
+    if get_chat_ingress_mode() == "webhook_conduit":
+        _evaluate_ingress_guard(db, datetime.utcnow(), apply_fallback=True)
     return JSONResponse({"detail": "ignored"})
 
 # =====================================

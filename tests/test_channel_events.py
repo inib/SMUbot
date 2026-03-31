@@ -862,6 +862,85 @@ class ChannelEventTests(unittest.TestCase):
         self.assertEqual(payload.get("conduit_id"), conduit_id)
         self.assertEqual(payload.get("shard_id"), shard_id)
 
+    def test_system_health_reports_ingress_summary_metrics(self) -> None:
+        """Expose compact ingress summary with callback throughput and counters."""
+
+        _setup_channel()
+        db = backend_app.SessionLocal()
+        try:
+            backend_app._record_ingress_metric("callback_status", key="2xx")
+            backend_app._record_ingress_metric("callback_status", key="4xx")
+            backend_app._record_ingress_metric("signature_failure")
+        finally:
+            db.close()
+
+        response = self.client.get("/system/health")
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json().get("eventsub") or {}
+        summary = payload.get("ingress_summary") or {}
+        self.assertIn("recent_callback_throughput", summary)
+        self.assertGreaterEqual((summary.get("callback_status") or {}).get("2xx", 0), 1)
+        self.assertGreaterEqual((summary.get("callback_status") or {}).get("4xx", 0), 1)
+        self.assertGreaterEqual(summary.get("signature_failures", 0), 1)
+
+    def test_ingress_guard_degradation_can_auto_fallback_websocket_mode(self) -> None:
+        """Auto-fallback to websocket mode when authoritative ingress is degraded."""
+
+        _setup_channel()
+        db = backend_app.SessionLocal()
+        try:
+            backend_app.set_settings(
+                db,
+                {
+                    "chat_ingress_mode": "webhook_conduit",
+                    "chat_ingress_guard_auto_fallback_enabled": "1",
+                    "chat_ingress_guard_callback_error_threshold": "1",
+                    "chat_ingress_guard_min_healthy_shards": "1",
+                },
+            )
+            backend_app._record_ingress_metric("callback_status", key="5xx")
+            guard = backend_app._evaluate_ingress_guard(db, backend_app.datetime.utcnow(), apply_fallback=True)
+            self.assertTrue(guard["degraded"])
+            self.assertTrue(guard["auto_fallback_applied"])
+            self.assertEqual(backend_app.get_chat_ingress_mode(), "websocket")
+        finally:
+            db.close()
+
+    def test_cleanup_conduit_subscription_secret_semantics_sets_placeholder(self) -> None:
+        """Normalize conduit chat subscription secrets to non-authoritative placeholder."""
+
+        details = _setup_channel()
+        db = backend_app.SessionLocal()
+        try:
+            db.add(
+                backend_app.EventSubscription(
+                    channel_id=details["channel_pk"],
+                    twitch_subscription_id="sub-conduit-cleanup",
+                    type="channel.chat.message",
+                    status="enabled",
+                    secret="legacy-secret",
+                    callback="https://example/callback",
+                    transport="conduit",
+                    conduit_id="conduit-cleanup",
+                    shard_id="0",
+                )
+            )
+            db.commit()
+        finally:
+            db.close()
+
+        backend_app.cleanup_conduit_subscription_secret_semantics()
+        db = backend_app.SessionLocal()
+        try:
+            row = (
+                db.query(backend_app.EventSubscription)
+                .filter(backend_app.EventSubscription.twitch_subscription_id == "sub-conduit-cleanup")
+                .one()
+            )
+            self.assertEqual(row.secret, backend_app.EVENTSUB_CONDUIT_SECRET_PLACEHOLDER)
+        finally:
+            db.close()
+
     def test_get_or_create_settings_backfills_queue_caps(self) -> None:
         """Ensure legacy channel settings rows gain default queue caps.
 

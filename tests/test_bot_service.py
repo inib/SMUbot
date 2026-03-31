@@ -17,6 +17,7 @@ class BotServiceTests(unittest.IsolatedAsyncioTestCase):
         self.backend.push_bot_log = AsyncMock()
         self.backend.get_bot_config = AsyncMock()
         self.backend.set_bot_status = AsyncMock()
+        self.backend.get_system_config = AsyncMock(return_value={"chat_ingress_mode": "websocket"})
         self.backend.list_playlists = AsyncMock()
         self.backend.playlist_request = AsyncMock()
         bot_app.backend = self.backend
@@ -284,6 +285,38 @@ class BotServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("foo", song_bot.joined)
         self.backend.set_bot_status.assert_awaited_once_with("Foo", False, "boom")
         song_bot._announce_joined.assert_not_called()
+
+    async def test_sync_channels_disables_websocket_subscriptions_in_authoritative_mode(self) -> None:
+        song_bot = bot_app.SongBot.__new__(bot_app.SongBot)
+        song_bot.channel_map = {}
+        song_bot.state = {}
+        song_bot.listeners = {}
+        song_bot.joined = set()
+        song_bot._sync_lock = asyncio.Lock()
+        song_bot.enabled = True
+        song_bot._announce_joined = AsyncMock()
+        song_bot._announce_left = AsyncMock()
+        song_bot.listen_backend = AsyncMock(return_value=None)
+        song_bot._subscribe_for_channel = AsyncMock()
+        song_bot._unsubscribe_channel = AsyncMock()
+        song_bot._send_message = AsyncMock()
+
+        self.backend.get_system_config = AsyncMock(
+            return_value={"chat_ingress_mode": "webhook_conduit", "chat_websocket_fallback_legacy_enabled": False}
+        )
+        self.backend.get_channels = AsyncMock(
+            return_value=[{"channel_name": "Foo", "channel_id": "1", "authorized": True, "join_active": 1}]
+        )
+        self.backend.get_queue = AsyncMock(return_value=[])
+
+        def fake_create_task(coro):
+            coro.close()
+            return MagicMock()
+
+        with patch.object(bot_app.asyncio, "create_task", fake_create_task), patch.object(bot_app, "push_console_event", AsyncMock()):
+            await song_bot.sync_channels()
+
+        self.assertFalse(song_bot._websocket_ingress_enabled)
 
     async def test_songbot_does_not_assign_readonly_nick(self) -> None:
         commands_map = {k: ([v] if not isinstance(v, list) else v) for k, v in bot_app.DEFAULT_COMMANDS.items()}
