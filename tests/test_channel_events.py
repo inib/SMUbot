@@ -20,6 +20,8 @@ def _wipe_db() -> None:
             backend_app.Event,
             backend_app.EventSubscription,
             backend_app.EventSubMessageDedupe,
+            backend_app.TwitchConduitShard,
+            backend_app.TwitchConduit,
             backend_app.PlaylistItem,
             backend_app.PlaylistKeyword,
             backend_app.Playlist,
@@ -378,6 +380,182 @@ class ChannelEventTests(unittest.TestCase):
             )
         finally:
             db.close()
+
+    def test_eventsub_verification_accepts_subscription_shape(self) -> None:
+        """Ensure classic verification payloads succeed via subscription secret.
+
+        Dependencies: Persists an ``EventSubscription`` row and exercises
+        ``/twitch/eventsub/callback`` signature validation.
+        Code customers: Twitch classic webhook verification.
+        Used variables/origin: Uses payload ``subscription.id`` and challenge.
+        """
+
+        details = _setup_channel()
+        secret = "verify-sub-secret"
+        db = backend_app.SessionLocal()
+        try:
+            db.add(
+                backend_app.EventSubscription(
+                    channel_id=details["channel_pk"],
+                    twitch_subscription_id="sub-verify-1",
+                    type="channel.follow",
+                    status="enabled",
+                    secret=secret,
+                    callback="https://example/callback",
+                )
+            )
+            db.commit()
+        finally:
+            db.close()
+
+        body = {
+            "subscription": {"id": "sub-verify-1", "status": "enabled", "type": "channel.follow", "version": "1"},
+            "challenge": "challenge-sub",
+        }
+        raw = json.dumps(body).encode()
+        message_id = "msg-verify-sub"
+        timestamp = "2023-01-01T00:00:00Z"
+        digest = hmac.new(secret.encode(), msg=(message_id + timestamp).encode() + raw, digestmod=hashlib.sha256)
+        response = self.client.post(
+            "/twitch/eventsub/callback",
+            data=raw,
+            headers={
+                "Twitch-Eventsub-Message-Id": message_id,
+                "Twitch-Eventsub-Message-Timestamp": timestamp,
+                "Twitch-Eventsub-Message-Signature": f"sha256={digest.hexdigest()}",
+                "Twitch-Eventsub-Message-Type": "webhook_callback_verification",
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.text, "challenge-sub")
+
+    def test_eventsub_verification_accepts_conduit_shard_shape_without_subscription(self) -> None:
+        """Ensure conduit-shard verification works without subscription payload.
+
+        Dependencies: Persists conduit + shard metadata including
+        ``transport_secret`` and calls callback route.
+        Code customers: Twitch conduit shard verification callbacks.
+        Used variables/origin: Uses payload ``conduit_shard.id`` and
+        ``conduit_shard.conduit_id`` context.
+        """
+
+        shard_secret = "verify-conduit-secret"
+        db = backend_app.SessionLocal()
+        try:
+            conduit = backend_app.TwitchConduit(conduit_id="conduit-1", status="enabled")
+            db.add(conduit)
+            db.commit()
+            db.refresh(conduit)
+            db.add(
+                backend_app.TwitchConduitShard(
+                    conduit_fk=conduit.id,
+                    shard_id="0",
+                    transport_callback="https://example/callback",
+                    transport_secret=shard_secret,
+                    status="enabled",
+                )
+            )
+            db.commit()
+        finally:
+            db.close()
+
+        body = {
+            "conduit_shard": {"id": "0", "conduit_id": "conduit-1"},
+            "challenge": "challenge-conduit",
+        }
+        raw = json.dumps(body).encode()
+        message_id = "msg-verify-conduit"
+        timestamp = "2023-01-01T00:00:00Z"
+        digest = hmac.new(shard_secret.encode(), msg=(message_id + timestamp).encode() + raw, digestmod=hashlib.sha256)
+        response = self.client.post(
+            "/twitch/eventsub/callback",
+            data=raw,
+            headers={
+                "Twitch-Eventsub-Message-Id": message_id,
+                "Twitch-Eventsub-Message-Timestamp": timestamp,
+                "Twitch-Eventsub-Message-Signature": f"sha256={digest.hexdigest()}",
+                "Twitch-Eventsub-Message-Type": "webhook_callback_verification",
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.text, "challenge-conduit")
+
+    def test_eventsub_verification_rejects_invalid_signature_for_subscription_and_conduit(self) -> None:
+        """Ensure invalid signatures are rejected for both verification shapes.
+
+        Dependencies: Persists subscription and conduit shard secrets then hits
+        callback route with intentionally mismatched HMAC signatures.
+        Code customers: Signature integrity checks for callback verification.
+        Used variables/origin: Uses wrong local signing secret for each shape.
+        """
+
+        details = _setup_channel()
+        db = backend_app.SessionLocal()
+        try:
+            db.add(
+                backend_app.EventSubscription(
+                    channel_id=details["channel_pk"],
+                    twitch_subscription_id="sub-verify-bad",
+                    type="channel.follow",
+                    status="enabled",
+                    secret="good-sub-secret",
+                    callback="https://example/callback",
+                )
+            )
+            conduit = backend_app.TwitchConduit(conduit_id="conduit-bad", status="enabled")
+            db.add(conduit)
+            db.commit()
+            db.refresh(conduit)
+            db.add(
+                backend_app.TwitchConduitShard(
+                    conduit_fk=conduit.id,
+                    shard_id="1",
+                    transport_callback="https://example/callback",
+                    transport_secret="good-conduit-secret",
+                    status="enabled",
+                )
+            )
+            db.commit()
+        finally:
+            db.close()
+
+        sub_body = {"subscription": {"id": "sub-verify-bad", "type": "channel.follow"}, "challenge": "x"}
+        sub_raw = json.dumps(sub_body).encode()
+        sub_digest = hmac.new(
+            b"wrong-sub-secret",
+            msg=("msg-verify-bad-sub" + "2023-01-01T00:00:00Z").encode() + sub_raw,
+            digestmod=hashlib.sha256,
+        )
+        sub_resp = self.client.post(
+            "/twitch/eventsub/callback",
+            data=sub_raw,
+            headers={
+                "Twitch-Eventsub-Message-Id": "msg-verify-bad-sub",
+                "Twitch-Eventsub-Message-Timestamp": "2023-01-01T00:00:00Z",
+                "Twitch-Eventsub-Message-Signature": f"sha256={sub_digest.hexdigest()}",
+                "Twitch-Eventsub-Message-Type": "webhook_callback_verification",
+            },
+        )
+        self.assertEqual(sub_resp.status_code, 403, sub_resp.text)
+
+        conduit_body = {"conduit_shard": {"id": "1", "conduit_id": "conduit-bad"}, "challenge": "y"}
+        conduit_raw = json.dumps(conduit_body).encode()
+        conduit_digest = hmac.new(
+            b"wrong-conduit-secret",
+            msg=("msg-verify-bad-conduit" + "2023-01-01T00:00:00Z").encode() + conduit_raw,
+            digestmod=hashlib.sha256,
+        )
+        conduit_resp = self.client.post(
+            "/twitch/eventsub/callback",
+            data=conduit_raw,
+            headers={
+                "Twitch-Eventsub-Message-Id": "msg-verify-bad-conduit",
+                "Twitch-Eventsub-Message-Timestamp": "2023-01-01T00:00:00Z",
+                "Twitch-Eventsub-Message-Signature": f"sha256={conduit_digest.hexdigest()}",
+                "Twitch-Eventsub-Message-Type": "webhook_callback_verification",
+            },
+        )
+        self.assertEqual(conduit_resp.status_code, 403, conduit_resp.text)
 
     def test_eventsub_chat_notification_shadow_mode_records_dedupe(self) -> None:
         """Verify chat webhook notifications in shadow mode stay non-authoritative.
