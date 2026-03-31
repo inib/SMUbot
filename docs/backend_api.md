@@ -420,6 +420,8 @@ Certain events award priority points and are fed by EventSub subscriptions creat
   - The backend computes `HMAC_SHA256(secret, message_id + timestamp + raw_body)` and rejects mismatches with `403`.
   - For classic webhook payloads, the `secret` is taken from `event_subscriptions.secret` via `subscription.id`.
   - For conduit chat notifications (`subscription.type=channel.chat.message` and/or `subscription.transport.method=conduit`), the `secret` is resolved from `twitch_conduit_shards.transport_secret` using the persisted `(conduit_id, shard_id)` linkage from `event_subscriptions` columns/metadata/transport data.
+  - Conduit reconciliation stores linkage metadata (`conduit_id`, `shard_id`, and transport details) on `event_subscriptions`; the `event_subscriptions.secret` field for conduit rows is treated as a schema-compatibility placeholder and is not authoritative.
+  - Migration-safe behavior: existing conduit rows that still contain legacy/random `event_subscriptions.secret` values are ignored during conduit notification signature verification.
   - If a conduit notification cannot resolve shard secret material, the callback returns explicit diagnostics with reason code (for example `missing_conduit_shard_secret`) and uses `503` for missing secret state so operators can distinguish config drift from invalid signatures.
   - For conduit verification payloads (`verification_shape=conduit_shard`), the `secret` is taken from `twitch_conduit_shards.transport_secret` using the persisted `(conduit_shard.conduit_id, conduit_shard.shard)` pair.
 - **Verification payload variants**:
