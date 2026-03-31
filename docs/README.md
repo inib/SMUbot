@@ -106,6 +106,13 @@ unlocks the API for the bot, queue manager, and public web frontend.
 - EventSub callback operations contract:
   - `/twitch/eventsub/callback` must be publicly reachable via HTTPS from
     Twitch (no private-only callback hostnames).
+  - Set `/system/config.public_backend_origin` (or environment bootstrap
+    `PUBLIC_BACKEND_ORIGIN`) to the canonical public HTTPS backend origin so
+    registration always uses:
+    `https://<public-backend-origin>/twitch/eventsub/callback`.
+  - HTTP callback registration is blocked with `callback_url_not_https`.
+  - `301` redirecting `http://...` to `https://...` is not a supported
+    substitute for reliable Twitch callback registration.
   - Signatures are validated against the persisted per-subscription secret
     before processing.
   - `notification` retries are deduplicated via `eventsub_message_dedupe` to
@@ -118,6 +125,18 @@ unlocks the API for the bot, queue manager, and public web frontend.
     non-authoritative observe/compare mode while websocket remains authoritative.
   - With `chat_ingress_mode=webhook_conduit` and shadow mode disabled, webhook
     ingress is authoritative.
+
+### EventSub HTTPS callback pre-cutover check
+Use this before enabling `chat_ingress_mode=webhook_conduit` in production:
+
+```bash
+curl -sS http://localhost:7070/system/config | jq '{public_backend_origin, chat_ingress_mode, chat_ingress_shadow_mode}'
+```
+
+Expected:
+- `public_backend_origin` is an `https://` origin.
+- Derived EventSub callback format is:
+  `https://<public-backend-origin>/twitch/eventsub/callback`.
 
 ## Running with Docker
 1. Copy `example.env` to `stack.env` and adjust values such as `ADMIN_TOKEN`,

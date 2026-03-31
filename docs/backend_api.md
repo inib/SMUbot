@@ -12,12 +12,30 @@ This document summarizes the REST endpoints exposed by `backend_app.py`.
 ### `/system/config`
 - **GET response fields**
   - Existing setup/OAuth fields (`setup_complete`, client IDs/secrets, redirect URIs, scopes).
+  - `public_backend_origin`: canonical public backend origin used for EventSub callback URL generation (example: `https://api.example.com`).
   - `chat_ingress_mode`: `websocket` (default) or `webhook_conduit`.
   - `chat_ingress_shadow_mode`: boolean dual-run switch for validation mode (default `false`).
 - **PUT payload additions**
+  - `public_backend_origin?: string`
   - `chat_ingress_mode?: "websocket" | "webhook_conduit"`
   - `chat_ingress_shadow_mode?: boolean`
 - **Compatibility note**: Startup includes additive schema patching for staggered deployments so older SQLite/prod DBs can run until the dedicated migration is applied.
+
+### EventSub callback URL reliability requirements
+- Twitch EventSub webhook registration must use a **publicly reachable HTTPS callback URL**.
+- The backend normalizes callback registration to exactly:
+  - `https://<public-backend-origin>/twitch/eventsub/callback`
+- HTTP callback URLs are rejected during registration/reconciliation with:
+  - `callback_url_not_https`
+- **Important**: relying on a `301` redirect from `http://...` to `https://...` is **not** considered a reliable or supported substitute for EventSub callback registration.
+
+### EventSub pre-cutover operational verification
+1. Confirm `public_backend_origin` is set to an HTTPS origin in system config:
+   ```bash
+   curl -sS http://localhost:7070/system/config | jq '{public_backend_origin, chat_ingress_mode, chat_ingress_shadow_mode}'
+   ```
+2. Confirm expected callback URL format before enabling conduit ingress:
+   - `https://<public-backend-origin>/twitch/eventsub/callback`
 
 ## Authentication
 | Method | Path | Description |
