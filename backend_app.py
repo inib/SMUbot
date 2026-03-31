@@ -70,6 +70,7 @@ SETTINGS_ENV_MAP: Dict[str, str] = {
     "twitch_client_secret": "TWITCH_CLIENT_SECRET",
     "twitch_redirect_uri": "TWITCH_REDIRECT_URI",
     "bot_redirect_uri": "BOT_TWITCH_REDIRECT_URI",
+    "public_backend_origin": "PUBLIC_BACKEND_ORIGIN",
     "twitch_scopes": "TWITCH_SCOPES",
     "bot_app_scopes": "BOT_APP_SCOPES",
 }
@@ -532,6 +533,60 @@ def get_bot_redirect_uri() -> Optional[str]:
     return value.strip() if value else None
 
 
+def get_public_backend_origin() -> Optional[str]:
+    """Return the configured public backend origin for inbound EventSub webhooks.
+
+    Dependencies: Reads persisted settings via ``get_setting`` and parses URLs
+    with ``URL`` from Starlette.
+    Code customers: ``_public_eventsub_callback_url`` and ``/system/config``
+    payload generation.
+    Used variables/origin: Pulls ``public_backend_origin`` from ``app_settings``
+    and normalizes it to an absolute origin containing only scheme/host/port.
+    """
+
+    value = get_setting("public_backend_origin")
+    raw = value.strip() if value else ""
+    if not raw:
+        return None
+    try:
+        parsed = URL(raw)
+    except Exception:
+        logger.warning("Ignoring invalid public_backend_origin setting", extra={"value": raw})
+        return None
+    if not parsed.scheme or not parsed.hostname:
+        logger.warning("Ignoring non-absolute public_backend_origin setting", extra={"value": raw})
+        return None
+    return str(parsed.replace(path="", query="", fragment=""))
+
+
+def _public_eventsub_callback_url(request: FastAPIRequest) -> tuple[Optional[str], Optional[str]]:
+    """Build the webhook callback URL Twitch should register for EventSub.
+
+    Dependencies: Reads ``public_backend_origin`` via ``get_public_backend_origin``
+    and falls back to route URLs from ``request.url_for`` when already HTTPS.
+    Code customers: EventSub subscription ensure/reconciliation and conduit
+    shard reconciliation setup paths.
+    Used variables/origin: Uses configured ``app_settings`` when present; if not,
+    derives from the ``eventsub_callback`` route URL on the inbound request.
+    """
+
+    configured_origin = get_public_backend_origin()
+    if configured_origin:
+        base = URL(configured_origin)
+        callback_url = str(base.replace(path="/twitch/eventsub/callback", query="", fragment=""))
+    else:
+        # Deprecated fallback: request-derived callback origins are fragile behind
+        # proxies and should be removed after all environments set
+        # ``public_backend_origin``.
+        route_url = URL(str(request.url_for("eventsub_callback")))
+        if (route_url.scheme or "").lower() != "https":
+            return None, "callback_url_not_https"
+        callback_url = str(route_url.replace(path="/twitch/eventsub/callback", query="", fragment=""))
+    if not callback_url.startswith("https://"):
+        return None, "callback_url_not_https"
+    return callback_url, None
+
+
 def get_twitch_scopes() -> list[str]:
     """
     Return the channel-level Twitch OAuth scopes required by the Queue Manager.
@@ -587,6 +642,7 @@ def _system_config_payload() -> Dict[str, Any]:
         "twitch_client_secret_set": bool(get_twitch_client_secret()),
         "twitch_redirect_uri": get_twitch_redirect_uri(),
         "bot_redirect_uri": get_bot_redirect_uri(),
+        "public_backend_origin": get_public_backend_origin(),
         "twitch_scopes": get_twitch_scopes(),
         "bot_app_scopes": get_bot_app_scopes(),
         "chat_ingress_mode": get_chat_ingress_mode(),
@@ -739,10 +795,10 @@ def ensure_eventsub_subscriptions(request: FastAPIRequest, channel_pk: int, db: 
     provided SQLAlchemy ``Session``.
     Code customers: The Twitch OAuth callback invokes this to keep pricing
     events flowing automatically without extra setup.
-    Used variables/origin: ``channel_pk`` resolves the broadcaster row; the
-    callback URL derives from ``request.url_for('eventsub_callback')`` and the
-    function records the Twitch subscription identifiers plus HMAC secrets in
-    ``EventSubscription`` rows.
+    Used variables/origin: ``channel_pk`` resolves the broadcaster row; callback
+    URL derives from ``_public_eventsub_callback_url`` (configured public origin
+    preferred) and the function records Twitch subscription IDs plus HMAC
+    secrets in ``EventSubscription`` rows.
     """
 
     channel = db.get(ActiveChannel, channel_pk)
@@ -759,7 +815,13 @@ def ensure_eventsub_subscriptions(request: FastAPIRequest, channel_pk: int, db: 
         logger.warning("Skipping EventSub setup for %s: %s", channel.channel_name, exc)
         return
 
-    callback = str(request.url_for("eventsub_callback"))
+    callback, callback_error = _public_eventsub_callback_url(request)
+    if callback_error or not callback:
+        logger.error(
+            "EventSub registration skipped due to invalid callback URL",
+            extra={"error": callback_error or "callback_url_unresolved", "channel_id": channel_pk},
+        )
+        return
     broadcaster_id = channel.channel_id
     moderator_id = owner.twitch_id
     desired: list[tuple[str, dict[str, str]]] = [
@@ -1290,9 +1352,9 @@ def reconcile_eventsub_conduit_subscriptions(request: FastAPIRequest, db: Sessio
     Code customers: Health routes and onboarding setup call this to surface
     conduit alignment status without disabling websocket subscriptions.
     Used variables/origin: channel list comes from ``ActiveChannel`` rows and
-    callback URL resolves from ``eventsub_callback`` route on ``request``;
-    chat ``condition.user_id`` is sourced from the bot account instead of
-    per-channel owner identity.
+    callback URL resolves from ``_public_eventsub_callback_url``; chat
+    ``condition.user_id`` is sourced from the bot account instead of per-channel
+    owner identity.
 
     Auth note: This flow no longer uses ``_eventsub_bot_headers`` for
     subscription list/create calls; Twitch app-auth is authoritative for
@@ -1315,7 +1377,14 @@ def reconcile_eventsub_conduit_subscriptions(request: FastAPIRequest, db: Sessio
         return result
 
     now = datetime.utcnow()
-    callback = str(request.url_for("eventsub_callback"))
+    callback, callback_error = _public_eventsub_callback_url(request)
+    if callback_error or not callback:
+        result["errors"].append(callback_error or "callback_url_unresolved")
+        logger.error(
+            "Conduit reconciliation stopped because callback URL is not HTTPS",
+            extra={"error": callback_error or "callback_url_unresolved"},
+        )
+        return result
     try:
         # Conduit/EventSub reconciliation is app-auth only (no bot OAuth headers).
         headers = _eventsub_app_headers()
@@ -2088,6 +2157,7 @@ class SystemConfigOut(BaseModel):
     twitch_client_secret_set: bool
     twitch_redirect_uri: Optional[str]
     bot_redirect_uri: Optional[str]
+    public_backend_origin: Optional[str]
     twitch_scopes: List[str]
     bot_app_scopes: List[str]
     chat_ingress_mode: Literal["websocket", "webhook_conduit"]
@@ -2099,6 +2169,7 @@ class SystemConfigUpdate(BaseModel):
     twitch_client_secret: Optional[str] = None
     twitch_redirect_uri: Optional[str] = None
     bot_redirect_uri: Optional[str] = None
+    public_backend_origin: Optional[str] = None
     twitch_scopes: Optional[List[str]] = None
     bot_app_scopes: Optional[List[str]] = None
     chat_ingress_mode: Optional[Literal["websocket", "webhook_conduit"]] = None
@@ -5039,6 +5110,8 @@ def update_system_config(
         updates["twitch_redirect_uri"] = payload.twitch_redirect_uri.strip() or None
     if payload.bot_redirect_uri is not None:
         updates["bot_redirect_uri"] = payload.bot_redirect_uri.strip() or None
+    if payload.public_backend_origin is not None:
+        updates["public_backend_origin"] = payload.public_backend_origin.strip() or None
     if payload.twitch_scopes is not None:
         normalized_scopes = _normalize_scope_list(payload.twitch_scopes)
         updates["twitch_scopes"] = " ".join(normalized_scopes) if normalized_scopes else None
