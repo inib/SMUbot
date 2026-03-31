@@ -458,6 +458,10 @@ Certain events award priority points and are fed by EventSub subscriptions creat
   - Reward events (`follow`, `raid`, `bits`, `sub`, `gift_sub`) continue through existing event persistence/reward logic.
   - `channel.chat.message` notifications route to the dedicated webhook chat ingress handler.
   - In authoritative mode, webhook chat ingress now dispatches canonical commands to backend execution routines (queue mutations + existing queue/event notifications) and records structured outcomes: `executed`, `rejected`, or `error` with per-command reason codes (`invalid_args`, `not_found`, `permission_denied`, etc.).
+  - Authoritative webhook execution now produces chat replies through Twitch Send Chat Message API (`POST /helix/chat/messages`) with a stable reply contract (`status=success|error`, `template_key`, `template_vars`, optional `visibility` level).
+  - Reply rendering uses the same message-catalog template semantics as websocket bot command responses.
+  - Channel `bot_message_level` thresholds still gate webhook replies exactly like bot/websocket mode (`mute` suppresses all, `normal`/`verbose`/`debug` thresholds allow <= level).
+  - In `chat_ingress_shadow_mode=true`, webhook command notifications stay observe-only and do not send chat replies.
   - Legacy comparison-only command branches are marked deprecated/unused and reported with explicit reason codes until migrated.
 - **Ingress authority behavior**:
   - `chat_ingress_mode=websocket` keeps websocket authoritative.
@@ -474,6 +478,7 @@ Certain events award priority points and are fed by EventSub subscriptions creat
    - unknown subscription IDs,
    - conduit shard secret resolution failures (`missing_conduit_shard_field_conduit_id`, `missing_conduit_shard_field_shard`, `missing_conduit_shard_secret`, `unknown_conduit_shard`),
    - dedupe hits (retry storms),
+   - reply send failures / suppressions (`send_api_failure_count`, `reply_suppressed_count`),
    - webhook/websocket comparison deltas while shadow mode is enabled.
 5. During cutover:
    - enable `chat_ingress_shadow_mode=true` first and confirm comparison logs are stable,

@@ -174,6 +174,17 @@ unlocks the API for the bot, queue manager, and public web frontend.
     chat ingress handler that can execute canonical commands when webhook is
     authoritative. Outcomes are structured (`executed`, `rejected`, `error`)
     with reason codes for diagnostics.
+  - Authoritative webhook command execution now also emits user-facing chat
+    replies through Twitch `POST /helix/chat/messages` using a stable reply
+    contract (`status`, `template_key`, `template_vars`, `visibility`) so
+    webhook responses match websocket/bot catalog semantics.
+  - Reply visibility still honors per-channel `bot_message_level` thresholds,
+    so muted/normal/verbose/debug suppression behavior is unchanged.
+  - Shadow mode remains non-sending for webhook chat replies even when command
+    parsing/execution diagnostics run.
+  - Ingress telemetry now includes reply observability counters:
+    `command_executed_count`, `reply_sent_count`, `reply_suppressed_count`,
+    and `send_api_failure_count`.
   - Historical comparison-only webhook command code paths are now deprecated
     and explicitly marked in outcome reason codes until fully removed.
 - Shadow mode behavior:
