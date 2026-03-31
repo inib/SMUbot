@@ -1483,6 +1483,80 @@ def _reconcile_twitch_conduit_shards(
     return assignment, errors
 
 
+def _refresh_conduit_shard_status_from_twitch(
+    conduit_id: Optional[str],
+    db: Session,
+    now: datetime,
+) -> bool:
+    """Refresh persisted conduit shard status/callback fields from Twitch.
+
+    Dependencies: Uses ``_eventsub_app_headers`` for app-auth Helix access and
+    reads/writes ``TwitchConduit`` + ``TwitchConduitShard`` rows through the
+    provided SQLAlchemy ``Session``.
+    Code customers: EventSub callback verification/notification flows call this
+    after successful signature validation so health output reflects current
+    shard states without waiting for a full reconciliation cycle.
+    Used variables/origin: ``conduit_id`` is sourced from EventSub payload
+    transport metadata; ``now`` originates from the caller for coherent
+    timestamping across callback-side state updates.
+    """
+
+    if not conduit_id:
+        return False
+    conduit_row = db.query(TwitchConduit).filter(TwitchConduit.conduit_id == conduit_id).one_or_none()
+    if not conduit_row:
+        return False
+    try:
+        headers = _eventsub_app_headers()
+    except RuntimeError:
+        logger.debug(
+            "Skipping conduit shard status refresh; app headers unavailable",
+            extra={"conduit_id": conduit_id},
+        )
+        return False
+    try:
+        resp = requests.get(
+            "https://api.twitch.tv/helix/eventsub/conduits/shards",
+            params={"conduit_id": conduit_id},
+            headers=headers,
+            timeout=8,
+        )
+        resp.raise_for_status()
+        remote_shards = resp.json().get("data") or []
+    except Exception:
+        logger.warning(
+            "Failed to refresh conduit shard status from Twitch",
+            extra={"conduit_id": conduit_id},
+            exc_info=True,
+        )
+        return False
+
+    updated = False
+    for remote in remote_shards:
+        shard_id = str(remote.get("id")) if remote.get("id") is not None else None
+        if not shard_id:
+            continue
+        row = (
+            db.query(TwitchConduitShard)
+            .filter(
+                TwitchConduitShard.conduit_fk == conduit_row.id,
+                TwitchConduitShard.shard_id == shard_id,
+            )
+            .one_or_none()
+        )
+        if not row:
+            row = TwitchConduitShard(conduit_fk=conduit_row.id, shard_id=shard_id)
+            db.add(row)
+        transport = remote.get("transport") or {}
+        row.transport_callback = transport.get("callback") or row.transport_callback
+        row.status = remote.get("status") or row.status or "pending"
+        row.last_sync_at = now
+        updated = True
+    if updated:
+        conduit_row.last_sync_at = now
+    return updated
+
+
 def _resolve_conduit_verification_secret(
     payload: Mapping[str, Any],
     db: Session,
@@ -8218,6 +8292,8 @@ async def eventsub_callback(request: FastAPIRequest, db: Session = Depends(get_d
                 shard_id,
                 message_id,
             )
+            _refresh_conduit_shard_status_from_twitch(conduit_id, db, datetime.utcnow())
+            db.commit()
         else:
             logger.warning(
                 "EventSub callback rejected: reason_code=unsupported_verification_shape message_id=%s message_type=%s",
@@ -8321,6 +8397,9 @@ async def eventsub_callback(request: FastAPIRequest, db: Session = Depends(get_d
         if not _record_eventsub_notification_dedupe(db, message_id):
             return JSONResponse({"success": True, "deduped": True})
         _process_eventsub_notification(db, subscription, payload, message_id=message_id)
+        if is_conduit_chat_notification:
+            _refresh_conduit_shard_status_from_twitch(conduit_id, db, datetime.utcnow())
+            db.commit()
         return JSONResponse({"success": True})
 
     db.commit()
