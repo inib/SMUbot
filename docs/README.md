@@ -86,6 +86,23 @@ unlocks the API for the bot, queue manager, and public web frontend.
   - `GET /channels/{channel}/eventsub/health` reports per-channel shard
     assignment state and can trigger reconcile with `?reconcile=true`, which
     refreshes local/conduit/shard/coverage fields after reconciliation.
+- Conduit API + conduit-mode EventSub subscription management authentication:
+  - Reconciliation uses Twitch **app access token** auth (client credentials)
+    for conduit create/update/patch calls and conduit-transport subscriptions.
+  - Identity mapping remains:
+    - `broadcaster_user_id` = target channel.
+    - `user_id` = bot user id.
+- EventSub conduit troubleshooting quick map:
+
+  | HTTP status | Typical meaning | Operator action |
+  |---|---|---|
+  | `400` | Payload/condition/transport mismatch | Re-check EventSub type payload schema, conduit transport block, and required condition fields (`broadcaster_user_id`, `user_id`). |
+  | `401` | Invalid token/client pairing | Confirm app access token validity and that token `client_id` matches configured Twitch client credentials. |
+  | `403` | Permission/authorization context mismatch | Verify request context/token type and the authorized channel/bot relationship for the requested subscription. |
+
+- Operator verification steps:
+  1. Run `GET /system/health` and confirm global conduit/shard coverage is healthy.
+  2. Run `GET /channels/{channel}/eventsub/health?reconcile=true` and confirm per-channel reconciliation + coverage complete successfully.
 - EventSub callback operations contract:
   - `/twitch/eventsub/callback` must be publicly reachable via HTTPS from
     Twitch (no private-only callback hostnames).

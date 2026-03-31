@@ -350,6 +350,10 @@ Certain events award priority points and are fed by EventSub subscriptions creat
 ### EventSub webhook + conduit reconciliation notes
 
 - Existing webhook subscriptions for follows/raids/cheers/subscriptions are preserved.
+- **Auth context for conduit APIs**: Conduit creation, shard patching, and conduit-mode EventSub subscription reconciliation use **Twitch app access token** authentication (client credentials), not user access tokens.
+- **Identity mapping for conduit subscriptions**:
+  - `broadcaster_user_id` = target channel Twitch user id.
+  - `user_id` = shared bot account Twitch user id.
 - In `webhook_conduit` mode (or when shadow mode is enabled), backend reconciliation now:
   - creates/reuses a Twitch conduit,
   - patches/reconciles shard transports to the webhook callback,
@@ -358,6 +362,14 @@ Certain events award priority points and are fed by EventSub subscriptions creat
   - `twitch_conduits`, `twitch_conduit_shards`
   - `event_subscriptions` with `transport="conduit"` for `channel.chat.message`.
 - `GET /channels/{channel}/eventsub/health?reconcile=true` runs reconciliation on-demand, then recomputes local subscriptions/conduit/shards/coverage before responding so top-level diagnostics match the new reconciliation state.
+
+### EventSub conduit troubleshooting quick map
+
+| HTTP status | Typical meaning | Operator action |
+|---|---|---|
+| `400` | Payload/condition/transport mismatch. | Re-check EventSub type payload schema, conduit transport block, and required condition fields (`broadcaster_user_id`, `user_id`). |
+| `401` | Invalid token/client pairing. | Confirm app access token validity and that token `client_id` matches the configured Twitch client credentials. |
+| `403` | Permission/authorization context mismatch. | Verify the request uses app-token context where required and that the authorized channel/bot relationship is valid for the requested subscription. |
 
 ### EventSub callback contract (operations)
 
@@ -395,6 +407,9 @@ Certain events award priority points and are fed by EventSub subscriptions creat
    - enable `chat_ingress_shadow_mode=true` first and confirm comparison logs are stable,
    - switch `chat_ingress_mode=webhook_conduit`,
    - disable shadow mode after validating authoritative webhook behavior.
+6. Operator verification endpoints:
+   - Call `GET /system/health` and confirm global conduit/shard coverage reports healthy.
+   - Call `GET /channels/{channel}/eventsub/health?reconcile=true` and confirm per-channel subscriptions/conduit/shard coverage reconcile successfully.
 
 ### Channel event stream
 
