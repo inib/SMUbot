@@ -627,6 +627,39 @@ def _eventsub_callback_hostname_issue(hostname: Optional[str]) -> Optional[str]:
     return None
 
 
+def normalize_eventsub_callback_override(value: Optional[str]) -> Optional[str]:
+    """Validate and normalize an admin-supplied EventSub callback override URL.
+
+    Dependencies: Uses Starlette ``URL`` parsing and
+    ``_eventsub_callback_hostname_issue`` host safety checks.
+    Code customers: ``update_system_config`` validates/persists
+    ``eventsub_callback_override`` updates using this helper.
+    Used variables/origin: Accepts operator-provided ``/system/config`` payload
+    values, enforces HTTPS + canonical callback path + public hostname, and
+    strips query/fragment from accepted values before persistence.
+    """
+
+    raw = (value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = URL(raw)
+    except Exception as exc:
+        raise ValueError("EventSub Callback URI must be a valid absolute HTTPS URL.") from exc
+    if not parsed.scheme or not parsed.hostname:
+        raise ValueError("EventSub Callback URI must be an absolute URL with scheme and hostname.")
+    if (parsed.scheme or "").lower() != "https":
+        raise ValueError("EventSub Callback URI must start with https://.")
+    if parsed.path != "/twitch/eventsub/callback":
+        raise ValueError("EventSub Callback URI path must be exactly /twitch/eventsub/callback.")
+    host_issue = _eventsub_callback_hostname_issue(parsed.hostname)
+    if host_issue:
+        raise ValueError(
+            "EventSub Callback URI hostname must be publicly reachable; internal/private hosts are not allowed."
+        )
+    return str(parsed.replace(query="", fragment=""))
+
+
 def _public_eventsub_callback_url(request: FastAPIRequest) -> tuple[Optional[str], Optional[str], dict[str, Any]]:
     """Build the webhook callback URL Twitch should register for EventSub.
 
@@ -753,6 +786,7 @@ def _system_config_payload() -> Dict[str, Any]:
         "twitch_client_secret_set": bool(get_twitch_client_secret()),
         "twitch_redirect_uri": get_twitch_redirect_uri(),
         "bot_redirect_uri": get_bot_redirect_uri(),
+        "eventsub_callback_override": get_eventsub_callback_override(),
         "public_backend_origin": get_public_backend_origin(),
         "twitch_scopes": get_twitch_scopes(),
         "bot_app_scopes": get_bot_app_scopes(),
@@ -2290,6 +2324,7 @@ class SystemConfigOut(BaseModel):
     twitch_client_secret_set: bool
     twitch_redirect_uri: Optional[str]
     bot_redirect_uri: Optional[str]
+    eventsub_callback_override: Optional[str]
     public_backend_origin: Optional[str]
     twitch_scopes: List[str]
     bot_app_scopes: List[str]
@@ -2302,6 +2337,7 @@ class SystemConfigUpdate(BaseModel):
     twitch_client_secret: Optional[str] = None
     twitch_redirect_uri: Optional[str] = None
     bot_redirect_uri: Optional[str] = None
+    eventsub_callback_override: Optional[str] = None
     public_backend_origin: Optional[str] = None
     twitch_scopes: Optional[List[str]] = None
     bot_app_scopes: Optional[List[str]] = None
@@ -5243,6 +5279,11 @@ def update_system_config(
         updates["twitch_redirect_uri"] = payload.twitch_redirect_uri.strip() or None
     if payload.bot_redirect_uri is not None:
         updates["bot_redirect_uri"] = payload.bot_redirect_uri.strip() or None
+    if payload.eventsub_callback_override is not None:
+        try:
+            updates["eventsub_callback_override"] = normalize_eventsub_callback_override(payload.eventsub_callback_override)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     if payload.public_backend_origin is not None:
         updates["public_backend_origin"] = payload.public_backend_origin.strip() or None
     if payload.twitch_scopes is not None:

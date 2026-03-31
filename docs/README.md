@@ -112,15 +112,24 @@ unlocks the API for the bot, queue manager, and public web frontend.
   - Internal/private-only callback hostnames are explicitly rejected during
     reconciliation (`backend`, `api`, `localhost`, private IPs, and bare
     private-only hostnames without public DNS suffixes).
-  - Set `/system/config.public_backend_origin` (or environment bootstrap
-    `PUBLIC_BACKEND_ORIGIN`) to the canonical public HTTPS backend origin so
-    registration always uses:
+  - Preferred: set `/system/config.eventsub_callback_override` to the exact
+    public callback URI, for example:
+    `https://api.example.com/twitch/eventsub/callback`.
+  - Fallback: set `/system/config.public_backend_origin` (or environment
+    bootstrap `PUBLIC_BACKEND_ORIGIN`) so registration can derive:
     `https://<public-backend-origin>/twitch/eventsub/callback`.
+  - Legacy bootstrap: `TWITCH_EVENTSUB_CALLBACK` is kept for initial/default
+    bootstrap only; runtime operations should use admin-managed
+    `eventsub_callback_override` to avoid stale env drift.
+  - Callback source precedence is: `eventsub_callback_override` >
+    `public_backend_origin` > `request_url` fallback.
   - Reconciliation warning output now includes callback source metadata:
     `eventsub_callback_override`, `public_backend_origin`, or `request_url`.
   - Invalid callback candidates degrade reconciliation status with explicit
     remediation text instead of silently failing with limited context.
-  - HTTP callback registration is blocked with `callback_url_not_https`.
+  - HTTP callback registration is blocked with `callback_url_not_https`;
+    `/system/config` also returns HTTP 400 details when an override is invalid
+    (non-HTTPS, wrong path, or internal/private host).
   - `301` redirecting `http://...` to `https://...` is not a supported
     substitute for reliable Twitch callback registration.
   - Signatures are validated against the persisted per-subscription secret

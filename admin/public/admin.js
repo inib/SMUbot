@@ -85,6 +85,7 @@ const credentialsSecretInput = document.getElementById('credentials-client-secre
 const credentialsSecretHint = document.getElementById('credentials-secret-hint');
 const credentialsRedirectInput = document.getElementById('credentials-redirect');
 const credentialsBotRedirectInput = document.getElementById('credentials-bot-redirect');
+const credentialsEventSubCallbackInput = document.getElementById('credentials-eventsub-callback');
 const scopesForm = document.getElementById('scopes-form');
 const twitchScopesInput = document.getElementById('twitch-scopes-input');
 const botScopesInput = document.getElementById('bot-scopes-input');
@@ -169,6 +170,34 @@ function parseScopesInput(value) {
     .filter(Boolean);
 }
 
+function validateEventSubCallbackInput(value) {
+  const raw = (value || '').trim();
+  if (!raw) return { valid: true, normalized: '' };
+  let parsed;
+  try {
+    parsed = new URL(raw);
+  } catch (err) {
+    return { valid: false, message: 'EventSub Callback URI must be a valid absolute HTTPS URL.' };
+  }
+  const host = (parsed.hostname || '').toLowerCase().replace(/\.$/, '');
+  if (parsed.protocol !== 'https:') {
+    return { valid: false, message: 'EventSub Callback URI must start with https://.' };
+  }
+  if (parsed.pathname !== '/twitch/eventsub/callback') {
+    return { valid: false, message: 'EventSub Callback URI path must be exactly /twitch/eventsub/callback.' };
+  }
+  if (!host || host === 'localhost' || host === 'backend' || host === 'api'
+    || host.endsWith('.localhost')
+    || /\.(local|internal|lan|home|svc|cluster\.local)$/.test(host)) {
+    return { valid: false, message: 'EventSub Callback URI hostname must be public (no localhost/internal hosts).' };
+  }
+  if (!host.includes('.')) {
+    return { valid: false, message: 'EventSub Callback URI hostname must be a public DNS name.' };
+  }
+  const normalized = `${parsed.origin}/twitch/eventsub/callback`;
+  return { valid: true, normalized };
+}
+
 function setSetupStatus(text, variant) {
   if (!setupStatusEl) return;
   setupStatusEl.textContent = text;
@@ -233,6 +262,10 @@ function applySystemConfig(config) {
   }
   if (credentialsBotRedirectInput) {
     credentialsBotRedirectInput.value = state.systemConfig?.bot_redirect_uri || '';
+  }
+  if (credentialsEventSubCallbackInput) {
+    credentialsEventSubCallbackInput.value = state.systemConfig?.eventsub_callback_override || '';
+    credentialsEventSubCallbackInput.setCustomValidity('');
   }
   if (credentialsSecretInput) {
     credentialsSecretInput.value = '';
@@ -340,6 +373,20 @@ async function handleCredentialsSubmit(event) {
     const botRedirect = credentialsBotRedirectInput.value.trim();
     if ((state.systemConfig.bot_redirect_uri || '') !== botRedirect) {
       patch.bot_redirect_uri = botRedirect || null;
+    }
+  }
+  if (credentialsEventSubCallbackInput) {
+    const parsed = validateEventSubCallbackInput(credentialsEventSubCallbackInput.value);
+    if (!parsed.valid) {
+      credentialsEventSubCallbackInput.setCustomValidity(parsed.message || 'Invalid EventSub Callback URI.');
+      credentialsEventSubCallbackInput.reportValidity();
+      showSetupAlert(parsed.message || 'Invalid EventSub Callback URI.', 'error');
+      return;
+    }
+    credentialsEventSubCallbackInput.setCustomValidity('');
+    const eventSubCallback = parsed.normalized || '';
+    if ((state.systemConfig.eventsub_callback_override || '') !== eventSubCallback) {
+      patch.eventsub_callback_override = eventSubCallback || null;
     }
   }
   if (!Object.keys(patch).length) {
@@ -1674,6 +1721,12 @@ window.addEventListener('DOMContentLoaded', () => {
   });
   if (credentialsForm) {
     credentialsForm.addEventListener('submit', handleCredentialsSubmit);
+  }
+  if (credentialsEventSubCallbackInput) {
+    credentialsEventSubCallbackInput.addEventListener('input', () => {
+      const parsed = validateEventSubCallbackInput(credentialsEventSubCallbackInput.value);
+      credentialsEventSubCallbackInput.setCustomValidity(parsed.valid ? '' : (parsed.message || 'Invalid EventSub Callback URI.'));
+    });
   }
   if (scopesForm) {
     scopesForm.addEventListener('submit', handleScopesSubmit);

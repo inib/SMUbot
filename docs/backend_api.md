@@ -12,10 +12,12 @@ This document summarizes the REST endpoints exposed by `backend_app.py`.
 ### `/system/config`
 - **GET response fields**
   - Existing setup/OAuth fields (`setup_complete`, client IDs/secrets, redirect URIs, scopes).
+  - `eventsub_callback_override`: optional admin-managed full callback override URL (example: `https://api.example.com/twitch/eventsub/callback`).
   - `public_backend_origin`: canonical public backend origin used for EventSub callback URL generation (example: `https://api.example.com`).
   - `chat_ingress_mode`: `websocket` (default) or `webhook_conduit`.
   - `chat_ingress_shadow_mode`: boolean dual-run switch for validation mode (default `false`).
 - **PUT payload additions**
+  - `eventsub_callback_override?: string`
   - `public_backend_origin?: string`
   - `chat_ingress_mode?: "websocket" | "webhook_conduit"`
   - `chat_ingress_shadow_mode?: boolean`
@@ -24,12 +26,17 @@ This document summarizes the REST endpoints exposed by `backend_app.py`.
 ### EventSub callback URL reliability requirements
 - Twitch EventSub webhook registration must use a **publicly reachable HTTPS callback URL**.
 - Callback validation enforces:
+  - Absolute URL.
   - `https://` scheme.
   - Exact path `/twitch/eventsub/callback`.
+  - Public hostname (no localhost/internal aliases/private-only hosts).
+- Valid override example: `https://api.example.com/twitch/eventsub/callback` (query/fragment are stripped during normalization).
+- Troubleshooting: HTTP URLs or internal hosts like `http://backend/...` and `https://localhost/...` are rejected with HTTP 400 details during `/system/config` update.
 - Callback source priority is:
-  1. `eventsub_callback_override`
+  1. `eventsub_callback_override` (admin-managed runtime override)
   2. `public_backend_origin`
   3. `request_url` fallback
+- Environment `TWITCH_EVENTSUB_CALLBACK` is now a **legacy bootstrap fallback** only; use `/system/config.eventsub_callback_override` for operational changes to avoid drift.
 - Reconciliation output now includes structured callback warnings with source
   metadata so operators can see which source failed validation and why.
 - Internal/private-only callback hostnames are rejected (examples:

@@ -44,6 +44,11 @@
               <span>Bot Redirect URI</span>
               <input type="text" id="credentials-bot-redirect" autocomplete="off" placeholder="https://admin.example.com/bot/callback" />
             </label>
+            <label class="field">
+              <span>EventSub Callback URI</span>
+              <input type="text" id="credentials-eventsub-callback" autocomplete="off" placeholder="https://api.example.com/twitch/eventsub/callback" />
+              <span class="form-hint">Must be a public <code>https://</code> URL with exact path <code>/twitch/eventsub/callback</code>.</span>
+            </label>
             <div class="form-actions">
               <button type="submit" id="credentials-save">Save credentials</button>
             </div>
