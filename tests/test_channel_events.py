@@ -1,4 +1,5 @@
 import unittest
+from unittest import mock
 from typing import Dict
 
 from fastapi.testclient import TestClient
@@ -479,6 +480,86 @@ class ChannelEventTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.text, "challenge-conduit")
+
+    def test_eventsub_conduit_verification_refreshes_shard_status_from_twitch(self) -> None:
+        """Refresh shard status after successful conduit verification callbacks.
+
+        Dependencies: Uses callback signature verification plus mocked
+        ``_eventsub_app_headers`` and Twitch shard list HTTP response.
+        Code customers: EventSub health diagnostics that should stop showing
+        stale ``webhook_callback_verification_pending`` shard status.
+        Used variables/origin: Starts local shard status as pending and uses
+        mocked Helix response data to transition it to enabled.
+        """
+
+        shard_secret = "verify-refresh-secret"
+        db = backend_app.SessionLocal()
+        try:
+            conduit = backend_app.TwitchConduit(conduit_id="conduit-refresh", status="enabled")
+            db.add(conduit)
+            db.commit()
+            db.refresh(conduit)
+            db.add(
+                backend_app.TwitchConduitShard(
+                    conduit_fk=conduit.id,
+                    shard_id="0",
+                    transport_callback="https://example/callback",
+                    transport_secret=shard_secret,
+                    status="webhook_callback_verification_pending",
+                )
+            )
+            db.commit()
+        finally:
+            db.close()
+
+        body = {
+            "conduit_shard": {"shard": "0", "conduit_id": "conduit-refresh"},
+            "challenge": "challenge-refresh",
+        }
+        raw = json.dumps(body).encode()
+        message_id = "msg-verify-refresh"
+        timestamp = "2023-01-01T00:00:00Z"
+        digest = hmac.new(shard_secret.encode(), msg=(message_id + timestamp).encode() + raw, digestmod=hashlib.sha256)
+        with mock.patch.object(backend_app, "_eventsub_app_headers", return_value={"Client-Id": "cid"}):
+            fake_response = mock.Mock()
+            fake_response.raise_for_status.return_value = None
+            fake_response.json.return_value = {
+                "data": [
+                    {
+                        "id": "0",
+                        "status": "enabled",
+                        "transport": {"method": "webhook", "callback": "https://example/callback"},
+                    }
+                ]
+            }
+            with mock.patch("backend_app.requests.get", return_value=fake_response):
+                response = self.client.post(
+                    "/twitch/eventsub/callback",
+                    data=raw,
+                    headers={
+                        "Twitch-Eventsub-Message-Id": message_id,
+                        "Twitch-Eventsub-Message-Timestamp": timestamp,
+                        "Twitch-Eventsub-Message-Signature": f"sha256={digest.hexdigest()}",
+                        "Twitch-Eventsub-Message-Type": "webhook_callback_verification",
+                    },
+                )
+        self.assertEqual(response.status_code, 200, response.text)
+
+        db = backend_app.SessionLocal()
+        try:
+            shard_row = (
+                db.query(backend_app.TwitchConduitShard)
+                .join(backend_app.TwitchConduit, backend_app.TwitchConduitShard.conduit_fk == backend_app.TwitchConduit.id)
+                .filter(
+                    backend_app.TwitchConduit.conduit_id == "conduit-refresh",
+                    backend_app.TwitchConduitShard.shard_id == "0",
+                )
+                .one()
+            )
+            self.assertEqual(shard_row.status, "enabled")
+            self.assertIsNotNone(shard_row.last_sync_at)
+        finally:
+            db.close()
 
     def test_eventsub_verification_rejects_missing_conduit_shard_field_shard(self) -> None:
         """Reject conduit verification payloads that omit ``conduit_shard.shard``.

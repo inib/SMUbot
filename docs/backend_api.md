@@ -429,6 +429,7 @@ Certain events award priority points and are fed by EventSub subscriptions creat
   - Conduit shard verification payloads with `conduit_shard` and no `subscription` are supported.
   - Conduit payload validation requires both `conduit_shard.conduit_id` and `conduit_shard.shard`; missing fields are rejected with explicit reason codes (`missing_conduit_shard_field_conduit_id`, `missing_conduit_shard_field_shard`).
   - Legacy behavior that globally required `subscription.id` has been removed for verification callbacks.
+  - After successful conduit verification or valid conduit chat notifications, the backend immediately re-queries Helix conduit shard status and updates persisted shard rows so health endpoints do not stay stuck in `webhook_callback_verification_pending`.
 - **Idempotency / retries**:
   - `notification` deliveries are inserted into `eventsub_message_dedupe` keyed by `message_id` before processing.
   - Duplicate retries are acknowledged with success and skipped to prevent duplicate command/event execution.
