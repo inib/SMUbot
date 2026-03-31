@@ -106,10 +106,20 @@ unlocks the API for the bot, queue manager, and public web frontend.
 - EventSub callback operations contract:
   - `/twitch/eventsub/callback` must be publicly reachable via HTTPS from
     Twitch (no private-only callback hostnames).
+  - Callback validation now enforces both:
+    - `https://` scheme.
+    - Exact callback path: `/twitch/eventsub/callback`.
+  - Internal/private-only callback hostnames are explicitly rejected during
+    reconciliation (`backend`, `api`, `localhost`, private IPs, and bare
+    private-only hostnames without public DNS suffixes).
   - Set `/system/config.public_backend_origin` (or environment bootstrap
     `PUBLIC_BACKEND_ORIGIN`) to the canonical public HTTPS backend origin so
     registration always uses:
     `https://<public-backend-origin>/twitch/eventsub/callback`.
+  - Reconciliation warning output now includes callback source metadata:
+    `eventsub_callback_override`, `public_backend_origin`, or `request_url`.
+  - Invalid callback candidates degrade reconciliation status with explicit
+    remediation text instead of silently failing with limited context.
   - HTTP callback registration is blocked with `callback_url_not_https`.
   - `301` redirecting `http://...` to `https://...` is not a supported
     substitute for reliable Twitch callback registration.
