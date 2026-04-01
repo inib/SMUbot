@@ -209,12 +209,26 @@ _INGRESS_METRICS: dict[str, Any] = {
     "reply_sent_count": 0,
     "reply_suppressed_count": 0,
     "send_api_failure_count": 0,
+    "send_api_failure_reasons": {
+        "invalid_reply_parent_message_id": 0,
+        "sender_token_mismatch": 0,
+        "invalid_sender_broadcaster_relation": 0,
+        "empty_or_invalid_message": 0,
+        "unknown_400": 0,
+        "transient_5xx": 0,
+        "timeout": 0,
+        "request_exception_non_timeout": 0,
+        "preflight_rejected": 0,
+    },
     "shard_status_transitions": {},
     "last_errors": {
         "signature_failure_at": None,
         "callback_4xx_at": None,
         "callback_5xx_at": None,
         "guard_degraded_at": None,
+        "send_api_failure_at": None,
+        "send_api_failure_reason_code": None,
+        "send_api_failure_snippet": None,
     },
     "callback_events": [],
 }
@@ -939,7 +953,15 @@ def _ingress_guard_thresholds() -> dict[str, float]:
 
 
 def _record_ingress_metric(metric: str, *, key: Optional[str] = None, timestamp: Optional[datetime] = None) -> None:
-    """Update in-memory ingress telemetry counters used by health diagnostics."""
+    """Update in-memory ingress telemetry counters used by health diagnostics.
+
+    Dependencies: Uses ``datetime.utcnow`` and guarded shared state
+    ``_INGRESS_METRICS`` protected by ``_INGRESS_METRICS_LOCK``.
+    Code customers: EventSub callback handlers, reply send path diagnostics, and
+    ``/system/health`` ingress summary generation.
+    Used variables/origin: ``metric`` and optional ``key`` come from ingress
+    processing branches (callback classes, reply send outcomes, guard events).
+    """
 
     now = timestamp or datetime.utcnow()
     with _INGRESS_METRICS_LOCK:
@@ -966,6 +988,10 @@ def _record_ingress_metric(metric: str, *, key: Optional[str] = None, timestamp:
             _INGRESS_METRICS["reply_suppressed_count"] = int(_INGRESS_METRICS.get("reply_suppressed_count", 0)) + 1
         elif metric == "send_api_failure":
             _INGRESS_METRICS["send_api_failure_count"] = int(_INGRESS_METRICS.get("send_api_failure_count", 0)) + 1
+            _INGRESS_METRICS["last_errors"]["send_api_failure_at"] = now
+        elif metric == "send_api_failure_reason" and key:
+            reasons = _INGRESS_METRICS["send_api_failure_reasons"]
+            reasons[key] = int(reasons.get(key, 0)) + 1
         elif metric == "shard_status_transition" and key:
             transitions = _INGRESS_METRICS["shard_status_transitions"]
             transitions[key] = int(transitions.get(key, 0)) + 1
@@ -978,7 +1004,14 @@ def _record_ingress_metric(metric: str, *, key: Optional[str] = None, timestamp:
 
 
 def _ingress_metrics_snapshot(now: datetime) -> dict[str, Any]:
-    """Return compact ingress telemetry for ``/system/health`` diagnostics."""
+    """Return compact ingress telemetry for ``/system/health`` diagnostics.
+
+    Dependencies: Reads ``_INGRESS_METRICS`` under lock and ingress guard
+    thresholds from ``_ingress_guard_thresholds``.
+    Code customers: ``/system/health`` endpoint and ingress guard evaluators.
+    Used variables/origin: ``now`` originates from runtime clock and scopes the
+    rolling callback throughput window.
+    """
 
     with _INGRESS_METRICS_LOCK:
         thresholds = _ingress_guard_thresholds()
@@ -997,6 +1030,7 @@ def _ingress_metrics_snapshot(now: datetime) -> dict[str, Any]:
             "reply_sent_count": int(_INGRESS_METRICS["reply_sent_count"]),
             "reply_suppressed_count": int(_INGRESS_METRICS["reply_suppressed_count"]),
             "send_api_failure_count": int(_INGRESS_METRICS["send_api_failure_count"]),
+            "send_api_failure_reasons": dict(_INGRESS_METRICS["send_api_failure_reasons"]),
             "shard_status_transitions": dict(_INGRESS_METRICS["shard_status_transitions"]),
             "last_errors": dict(_INGRESS_METRICS["last_errors"]),
             "recent_callback_throughput": {
@@ -1613,6 +1647,81 @@ def _preflight_eventsub_chat_reply_payload(
     return payload, None, headers
 
 
+def _sanitize_send_api_diagnostic_snippet(value: Any, *, max_len: int = 220) -> str:
+    """Normalize Twitch API diagnostics into a compact log-safe string snippet.
+
+    Dependencies: Pure string manipulation only.
+    Code customers: ``_extract_send_api_error_details`` and reply failure logs.
+    Used variables/origin: ``value`` originates from Twitch error fields
+    (``message``, ``error``, ``status``) or fallback response body text.
+    """
+
+    text = " ".join(str(value or "").split())
+    if len(text) <= max_len:
+        return text
+    return f"{text[:max_len - 3]}..."
+
+
+def _extract_send_api_error_details(response: Optional[requests.Response]) -> tuple[Optional[int], str, str]:
+    """Extract status, reason code, and sanitized diagnostic snippet from Twitch error responses.
+
+    Dependencies: Parses ``requests.Response`` JSON/body best-effort and maps
+    deterministic 400-series validation failures through
+    ``_map_send_api_400_reason_code``.
+    Code customers: ``_send_eventsub_chat_reply`` retry and telemetry logic.
+    Used variables/origin: ``response`` comes from Twitch Send Chat Message API
+    HTTP exceptions.
+    """
+
+    if response is None:
+        return None, "request_exception_non_timeout", ""
+    status_code = response.status_code
+    body_obj: dict[str, Any] = {}
+    try:
+        parsed = response.json()
+        if isinstance(parsed, dict):
+            body_obj = parsed
+    except ValueError:
+        body_obj = {}
+    message = _sanitize_send_api_diagnostic_snippet(body_obj.get("message"))
+    error = _sanitize_send_api_diagnostic_snippet(body_obj.get("error"))
+    body_status = body_obj.get("status")
+    status_text = _sanitize_send_api_diagnostic_snippet(body_status if body_status is not None else status_code)
+    if not any((message, error)):
+        fallback_text = _sanitize_send_api_diagnostic_snippet(response.text)
+        if fallback_text:
+            message = fallback_text
+    snippet = _sanitize_send_api_diagnostic_snippet(" | ".join(part for part in [f"status={status_text}", f"error={error}", f"message={message}"] if part))
+    reason_code = _map_send_api_400_reason_code(status_code=status_code, message=message, error=error) if status_code == 400 else (
+        "transient_5xx" if status_code >= 500 else f"http_{status_code}"
+    )
+    return status_code, reason_code, snippet
+
+
+def _map_send_api_400_reason_code(*, status_code: Optional[int], message: str, error: str) -> str:
+    """Map Twitch Send Chat API 400 diagnostics to stable reason-code classes.
+
+    Dependencies: Pure string matching; no external services.
+    Code customers: ``_extract_send_api_error_details`` and ingress summary
+    counters for deterministic 400 troubleshooting.
+    Used variables/origin: ``message``/``error`` strings originate from Twitch
+    JSON error payload fields.
+    """
+
+    if status_code != 400:
+        return "unknown_400"
+    corpus = f"{message} {error}".lower()
+    if "reply_parent_message_id" in corpus or ("reply" in corpus and "parent" in corpus):
+        return "invalid_reply_parent_message_id"
+    if ("sender_id" in corpus and "token" in corpus) or ("sender" in corpus and "does not match" in corpus):
+        return "sender_token_mismatch"
+    if ("sender_id" in corpus and "broadcaster" in corpus) or ("sender" in corpus and "broadcaster" in corpus):
+        return "invalid_sender_broadcaster_relation"
+    if "message" in corpus and any(term in corpus for term in ("empty", "invalid", "must not", "length", "between")):
+        return "empty_or_invalid_message"
+    return "unknown_400"
+
+
 def _send_eventsub_chat_reply(db: Session, channel: ActiveChannel, reply: dict[str, Any], *, reply_parent_message_id: Optional[str]) -> bool:
     """Send webhook reply text through Twitch Send Chat Message API with retries.
 
@@ -1643,6 +1752,7 @@ def _send_eventsub_chat_reply(db: Session, channel: ActiveChannel, reply: dict[s
     )
     if preflight_reason_code or not payload or not headers:
         _record_ingress_metric("send_api_failure")
+        _record_ingress_metric("send_api_failure_reason", key="preflight_rejected")
         logger.warning(
             "Webhook reply send skipped by preflight: reason_code=%s channel=%s template_key=%s",
             preflight_reason_code or "preflight_unknown_failure",
@@ -1664,15 +1774,35 @@ def _send_eventsub_chat_reply(db: Session, channel: ActiveChannel, reply: dict[s
             return True
         except requests.HTTPError as exc:
             _record_ingress_metric("send_api_failure")
-            status_code = exc.response.status_code if exc.response is not None else None
+            status_code, reason_code, diagnostic_snippet = _extract_send_api_error_details(exc.response)
+            with _INGRESS_METRICS_LOCK:
+                _INGRESS_METRICS["last_errors"]["send_api_failure_reason_code"] = reason_code
+                _INGRESS_METRICS["last_errors"]["send_api_failure_snippet"] = diagnostic_snippet
+            _record_ingress_metric("send_api_failure_reason", key=reason_code)
             if status_code is not None and 400 <= status_code < 500:
                 logger.warning(
-                    "Webhook reply send failed without retry: reason_code=api_4xx_response status_code=%s channel=%s template_key=%s",
+                    "Webhook reply send failed without retry: reason_code=%s status_code=%s channel=%s template_key=%s twitch_error=%s",
+                    reason_code,
                     status_code,
                     channel.channel_name,
                     reply.get("template_key"),
+                    diagnostic_snippet,
                 )
                 return False
+            if attempt == 2:
+                logger.exception(
+                    "Webhook reply send failed after retries: reason_code=%s status_code=%s twitch_error=%s",
+                    reason_code,
+                    status_code,
+                    diagnostic_snippet,
+                    extra={"channel": channel.channel_name, "template_key": reply.get("template_key")},
+                )
+                return False
+            time.sleep(delay_seconds)
+            delay_seconds *= 2
+        except requests.Timeout:
+            _record_ingress_metric("send_api_failure")
+            _record_ingress_metric("send_api_failure_reason", key="timeout")
             if attempt == 2:
                 logger.exception(
                     "Webhook reply send failed after retries",
@@ -1683,14 +1813,13 @@ def _send_eventsub_chat_reply(db: Session, channel: ActiveChannel, reply: dict[s
             delay_seconds *= 2
         except requests.RequestException:
             _record_ingress_metric("send_api_failure")
-            if attempt == 2:
-                logger.exception(
-                    "Webhook reply send failed after retries",
-                    extra={"channel": channel.channel_name, "template_key": reply.get("template_key")},
-                )
-                return False
-            time.sleep(delay_seconds)
-            delay_seconds *= 2
+            _record_ingress_metric("send_api_failure_reason", key="request_exception_non_timeout")
+            logger.warning(
+                "Webhook reply send failed without retry: reason_code=request_exception_non_timeout channel=%s template_key=%s",
+                channel.channel_name,
+                reply.get("template_key"),
+            )
+            return False
     return False
 
 
