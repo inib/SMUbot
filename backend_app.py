@@ -21,6 +21,7 @@ from datetime import datetime, timedelta
 import asyncio
 import requests
 import yaml
+from command_resolution import ROUTED_COMMANDS, load_commands_map, resolve_prefixed_command
 
 try:
     from ytmusicapi import YTMusic  # type: ignore
@@ -1430,109 +1431,32 @@ def _record_eventsub_notification_dedupe(db: Session, message_id: str) -> bool:
 def _extract_eventsub_chat_command(message_text: str) -> dict[str, Optional[str]]:
     """Parse a Twitch chat line into a normalized command summary.
 
-    Dependencies: Uses string normalization and canonical alias config from
-    ``commands.yml`` (with websocket-bot parity defaults).
-    Code customers: ``_process_eventsub_chat_notification`` emits structured
-    webhook-vs-websocket comparison logs from this parsed command metadata.
-    Used variables/origin: ``message_text`` comes from Twitch
+    Dependencies: shared command resolver utilities powered by
+    ``commands.yml`` and websocket-parity defaults. Code customers:
+    ``_process_eventsub_chat_notification`` emits structured webhook-vs-
+    websocket comparison logs from this parsed command metadata. Used
+    variables/origin: ``message_text`` comes from Twitch
     ``channel.chat.message`` payload fields.
     """
 
-    text_content = (message_text or "").strip()
-    if not text_content.startswith("!"):
-        return {"alias": None, "canonical": None, "args": None, "parse_reason": "non_command_message"}
-    command_blob = text_content[1:]
-    command_token, _, remainder = command_blob.partition(" ")
-    alias = command_token.strip().lower()
-    args = remainder.strip() or ""
-    aliases = _eventsub_chat_command_aliases()
-    canonical = next((name for name, alias_list in aliases.items() if alias in alias_list), None)
-    parse_reason = "ok" if canonical else "unknown_alias"
-    parse_detail = f"alias '{alias}' is not in configured commands map" if parse_reason == "unknown_alias" and alias else None
-    feedback_message = f"Unknown command alias '{alias}'." if parse_reason == "unknown_alias" and alias else None
-    return {
-        "alias": alias or None,
-        "canonical": canonical,
-        "args": args,
-        "parse_reason": parse_reason,
-        "parse_detail": parse_detail,
-        "feedback_message": feedback_message,
-    }
-
-
-def _eventsub_default_commands_map() -> dict[str, list[str]]:
-    """Return fallback aliases that mirror websocket bot command defaults.
-
-    Dependencies: none (in-memory constants). Code customers:
-    ``_load_eventsub_commands_map`` when command YAML is unavailable.
-    Used variables/origin: values are copied from bot command defaults.
-    """
-
-    return {
-        "prefix": ["!"],
-        "request": ["request", "req", "r", "sr"],
-        "prioritize": ["prioritize", "prio", "bump"],
-        "points": ["points", "pp"],
-        "remove": ["remove", "undo", "del"],
-        "archive": ["archive"],
-        "random_request": ["random", "rr", "randomrequest"],
-        "playlist_request": ["playlist", "pl"],
-    }
-
-
-def _load_eventsub_commands_map() -> dict[str, list[str]]:
-    """Load canonical command aliases from bot ``commands.yml``.
-
-    Dependencies: reads ``COMMANDS_FILE`` env var and parses YAML via
-    ``yaml.safe_load``. Code customers: ``_eventsub_chat_command_aliases``.
-    Used variables/origin: path defaults to ``/bot/commands.yml`` and falls
-    back to repository ``bot/commands.yml`` for local/test execution.
-    """
-
-    defaults = _eventsub_default_commands_map()
-    command_file = FilePath(os.getenv("COMMANDS_FILE", "/bot/commands.yml"))
-    if not command_file.exists():
-        repo_path = FilePath(__file__).resolve().parent / "bot" / "commands.yml"
-        if repo_path.exists():
-            command_file = repo_path
-    loaded: dict[str, Any] = {}
-    try:
-        with command_file.open("r", encoding="utf-8") as handle:
-            payload = yaml.safe_load(handle) or {}
-            if isinstance(payload, dict):
-                loaded = payload
-    except FileNotFoundError:
-        logger.info("EventSub command map file not found; using websocket-bot defaults", extra={"path": str(command_file)})
-    except Exception:
-        logger.warning(
-            "Failed to parse EventSub command map; using websocket-bot defaults",
-            extra={"path": str(command_file)},
-            exc_info=True,
-        )
-    merged: dict[str, Any] = {**defaults, **loaded}
-    normalized: dict[str, list[str]] = {}
-    for key, value in merged.items():
-        if isinstance(value, list):
-            normalized[key] = [str(item).strip().lower() for item in value if str(item).strip()]
-        elif value is None:
-            normalized[key] = []
-        else:
-            scalar = str(value).strip().lower()
-            normalized[key] = [scalar] if scalar else []
-    return normalized
+    return resolve_prefixed_command(
+        message_text,
+        _eventsub_chat_command_aliases(),
+        routed_commands=ROUTED_COMMANDS,
+    )
 
 
 @lru_cache(maxsize=1)
 def _eventsub_chat_command_aliases() -> dict[str, list[str]]:
     """Return cached canonical EventSub aliases from bot command config.
 
-    Dependencies: wraps ``_load_eventsub_commands_map`` with memoization.
+    Dependencies: wraps shared ``load_commands_map`` with memoization.
     Code customers: ``_extract_eventsub_chat_command``.
     Used variables/origin: loaded aliases originate from ``commands.yml`` or
     websocket-bot parity defaults.
     """
 
-    return _load_eventsub_commands_map()
+    return load_commands_map(logger=logger)
 
 
 def _eventsub_outcome(

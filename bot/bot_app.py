@@ -5,6 +5,7 @@ from enum import IntEnum
 from dataclasses import dataclass
 from pathlib import Path
 from datetime import datetime, timedelta
+from command_resolution import default_commands_map, load_commands_map
 
 import aiohttp
 from twitchio import eventsub, HTTPException
@@ -54,16 +55,8 @@ BACKEND_URL = os.getenv('BACKEND_URL', 'http://api:7070')
 ADMIN_TOKEN = os.getenv('ADMIN_TOKEN', 'change-me')
 MESSAGES_PATH = Path(os.getenv("BOT_MESSAGES_PATH", "/bot/messages.yml"))
 COMMANDS_FILE = os.getenv('COMMANDS_FILE', '/bot/commands.yml')
-DEFAULT_COMMANDS = {
-    'prefix': '!',
-    'request': ['request', 'req', 'r', 'sr'],
-    'prioritize': ['prioritize', 'prio', 'bump'],
-    'points': ['points', 'pp'],
-    'remove': ['remove', 'undo', 'del'],
-    'archive': ['archive'],
-    'random_request': ['random', 'rr', 'randomrequest'],
-    'playlist_request': ['playlist', 'pl'],
-}
+DEFAULT_COMMANDS = default_commands_map()
+
 
 DEFAULT_MESSAGES = {
     'currency_singular': 'point',
@@ -483,14 +476,14 @@ def extract_youtube_url(text: str) -> Optional[str]:
     return None
 
 def load_commands(path: str) -> Dict[str, List[str]]:
-    cfg = DEFAULT_COMMANDS.copy()
-    try:
-        with open(path, 'r', encoding='utf-8') as f:
-            data = yaml.safe_load(f) or {}
-            cfg.update(data)
-    except FileNotFoundError:
-        pass
-    return {k: v if isinstance(v, list) else [v] for k, v in cfg.items()}
+    """Load normalized command aliases from YAML with bot-parity defaults.
+
+    Dependencies: shared `load_commands_map` utility and `COMMANDS_FILE`
+    filesystem path. Code customers: `SongBot` startup initialization. Used
+    variables/origin: `path` is sourced from `COMMANDS_FILE` env/default.
+    """
+
+    return load_commands_map(path, logger=logger)
 
 
 def load_messages(path: Path) -> Dict[str, str]:

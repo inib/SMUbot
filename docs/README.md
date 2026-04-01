@@ -179,6 +179,9 @@ unlocks the API for the bot, queue manager, and public web frontend.
     with parse/auth/business-rule/send reason code namespaces for diagnostics.
   - Authoritative webhook command execution currently covers `request`,
     `playlist_request`, `prioritize`, `remove`, and `points`.
+  - Webhook and websocket command parsing both use the shared
+    `command_resolution.py` utility shipped in both API and bot container
+    images, keeping alias/prefix parsing behavior aligned in production.
   - Authoritative webhook command execution now also emits user-facing chat
     replies through Twitch `POST /helix/chat/messages` using a stable reply
     contract (`status`, `template_key`, `template_vars`, `visibility`) so

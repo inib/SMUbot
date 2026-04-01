@@ -4,6 +4,7 @@ ENV PYTHONUNBUFFERED=1
 COPY bot/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 COPY bot/*.py ./
+COPY command_resolution.py ./command_resolution.py
 COPY bot/commands.yml ./commands.yml
 COPY bot/messages.yml ./messages.yml
 
