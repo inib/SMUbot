@@ -32,9 +32,12 @@ This document summarizes the REST endpoints exposed by `backend_app.py`.
   - callback status buckets (`2xx/4xx/5xx`),
   - signature failures,
   - dedupe hits,
+  - Send Chat API failure reason counters (`invalid_reply_parent_message_id`,
+    `sender_token_mismatch`, `invalid_sender_broadcaster_relation`,
+    `empty_or_invalid_message`, `unknown_400`, transient classes),
   - per-channel webhook command dispatch outcomes,
   - conduit shard status transitions,
-  - recent callback throughput + last error timestamps.
+  - recent callback throughput + last error timestamps/diagnostic snippets.
 - `eventsub.authoritative_guard` includes degradation reasons (`missing_healthy_shards`, `callback_errors_spike`) and whether fallback was applied.
 - Recommended operator thresholds:
   - callback error threshold: 5 errors / 5 minutes,

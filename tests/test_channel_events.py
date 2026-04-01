@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 import hashlib
 import hmac
 import json
+import requests
 
 import backend_app
 
@@ -1131,6 +1132,70 @@ class ChannelEventTests(unittest.TestCase):
         finally:
             db.close()
 
+    def test_send_eventsub_chat_reply_400_maps_reason_and_skips_retry(self) -> None:
+        """Map deterministic Twitch 400 reply diagnostics and avoid retries."""
+
+        details = _setup_channel()
+        db = backend_app.SessionLocal()
+        try:
+            channel = db.get(backend_app.ActiveChannel, details["channel_pk"])
+            self.assertIsNotNone(channel)
+            reply = {"status": "success", "template_key": "queue_open", "template_vars": {}, "visibility": "normal"}
+
+            response = requests.Response()
+            response.status_code = 400
+            response._content = b'{"error":"Bad Request","status":400,"message":"reply_parent_message_id is invalid"}'
+            error = requests.HTTPError(response=response)
+            with mock.patch.object(backend_app, "get_bot_user_id", return_value="bot-user-1"), mock.patch.object(
+                backend_app, "_resolve_twitch_token_subject_id", return_value="bot-user-1"
+            ), mock.patch("backend_app.requests.post", side_effect=error) as mock_send:
+                sent = backend_app._send_eventsub_chat_reply(
+                    db,
+                    channel,
+                    reply,
+                    reply_parent_message_id="bad-parent-id",
+                )
+            self.assertFalse(sent)
+            self.assertEqual(mock_send.call_count, 1)
+            snapshot = backend_app._ingress_metrics_snapshot(backend_app.datetime.utcnow())
+            reasons = snapshot.get("send_api_failure_reasons") or {}
+            self.assertGreaterEqual(reasons.get("invalid_reply_parent_message_id", 0), 1)
+        finally:
+            db.close()
+
+    def test_send_eventsub_chat_reply_5xx_retries_and_tracks_transient_reason(self) -> None:
+        """Retry transient Send Chat API failures and classify reason as transient 5xx."""
+
+        details = _setup_channel()
+        db = backend_app.SessionLocal()
+        try:
+            channel = db.get(backend_app.ActiveChannel, details["channel_pk"])
+            self.assertIsNotNone(channel)
+            reply = {"status": "success", "template_key": "queue_open", "template_vars": {}, "visibility": "normal"}
+
+            response = requests.Response()
+            response.status_code = 503
+            response._content = b'{"error":"Service Unavailable","status":503,"message":"server overloaded"}'
+            error = requests.HTTPError(response=response)
+            with mock.patch.object(backend_app, "get_bot_user_id", return_value="bot-user-1"), mock.patch.object(
+                backend_app, "_resolve_twitch_token_subject_id", return_value="bot-user-1"
+            ), mock.patch("backend_app.requests.post", side_effect=error) as mock_send, mock.patch(
+                "backend_app.time.sleep", return_value=None
+            ):
+                sent = backend_app._send_eventsub_chat_reply(
+                    db,
+                    channel,
+                    reply,
+                    reply_parent_message_id="parent-id",
+                )
+            self.assertFalse(sent)
+            self.assertEqual(mock_send.call_count, 3)
+            snapshot = backend_app._ingress_metrics_snapshot(backend_app.datetime.utcnow())
+            reasons = snapshot.get("send_api_failure_reasons") or {}
+            self.assertGreaterEqual(reasons.get("transient_5xx", 0), 1)
+        finally:
+            db.close()
+
     def test_eventsub_chat_notification_shadow_mode_request_does_not_mutate_queue(self) -> None:
         """Keep webhook chat commands parse-only when shadow mode is enabled."""
 
@@ -1514,6 +1579,7 @@ class ChannelEventTests(unittest.TestCase):
             backend_app._record_ingress_metric("callback_status", key="2xx")
             backend_app._record_ingress_metric("callback_status", key="4xx")
             backend_app._record_ingress_metric("signature_failure")
+            backend_app._record_ingress_metric("send_api_failure_reason", key="unknown_400")
         finally:
             db.close()
 
@@ -1525,6 +1591,7 @@ class ChannelEventTests(unittest.TestCase):
         self.assertGreaterEqual((summary.get("callback_status") or {}).get("2xx", 0), 1)
         self.assertGreaterEqual((summary.get("callback_status") or {}).get("4xx", 0), 1)
         self.assertGreaterEqual(summary.get("signature_failures", 0), 1)
+        self.assertGreaterEqual((summary.get("send_api_failure_reasons") or {}).get("unknown_400", 0), 1)
 
     def test_ingress_guard_degradation_can_auto_fallback_websocket_mode(self) -> None:
         """Auto-fallback to websocket mode when authoritative ingress is degraded."""
