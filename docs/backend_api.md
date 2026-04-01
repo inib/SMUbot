@@ -461,6 +461,9 @@ Certain events award priority points and are fed by EventSub subscriptions creat
   - Canonical webhook execution now covers `request`, `playlist_request`, `prioritize`, `remove`, and `points` with queue mutation and reply semantics aligned to the prior websocket flow.
   - Explicit no-op buckets are tracked for non-command chat lines, unknown aliases, policy-suppressed replies, and shadow-mode observe-only dispatch.
   - Authoritative webhook execution now produces chat replies through Twitch Send Chat Message API (`POST /helix/chat/messages`) with a stable reply contract (`status=success|error`, `template_key`, `template_vars`, optional `visibility` level).
+  - Reply threading uses EventSub chat payload `event.message_id` only. The EventSub transport header message id is not used for `reply_parent_message_id`; when `event.message_id` is absent, reply threading is omitted.
+  - Deterministic preflight validation now runs before Send Chat API calls to prevent guaranteed 400 retries: non-empty `broadcaster_id`, non-empty `sender_id`, message length `1-500`, and `sender_id` equality with bot token subject (`/oauth2/validate` `user_id`).
+  - Preflight failures emit explicit reason codes and skip HTTP requests/retries.
   - Reply rendering uses the same message-catalog template semantics as websocket bot command responses.
   - Channel `bot_message_level` thresholds still gate webhook replies exactly like bot/websocket mode (`mute` suppresses all, `normal`/`verbose`/`debug` thresholds allow <= level).
   - In `chat_ingress_shadow_mode=true`, webhook command notifications stay observe-only and do not send chat replies or mutate queue state.

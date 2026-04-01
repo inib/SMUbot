@@ -897,7 +897,7 @@ class ChannelEventTests(unittest.TestCase):
         timestamp = "2023-01-01T00:00:00Z"
         signature = hmac.new(secret.encode(), msg=(message_id + timestamp).encode() + raw, digestmod=hashlib.sha256)
         with mock.patch.object(backend_app, "get_bot_user_id", return_value="bot-user-1"), mock.patch.object(
-            backend_app, "_eventsub_bot_headers", return_value={"Authorization": "Bearer token", "Client-Id": "cid"}
+            backend_app, "_resolve_twitch_token_subject_id", return_value="bot-user-1"
         ), mock.patch("backend_app.requests.post") as mock_send:
             mock_send.return_value.raise_for_status.return_value = None
             response = self.client.post(
@@ -925,6 +925,209 @@ class ChannelEventTests(unittest.TestCase):
             self.assertIsNotNone(song)
             self.assertEqual(song.artist, "Artist C")
             self.assertEqual(song.title, "Song Three")
+        finally:
+            db.close()
+
+    def test_eventsub_chat_notification_reply_parent_uses_event_message_id(self) -> None:
+        """Send replies threaded to ``event.message_id`` instead of header message id."""
+
+        details = _setup_channel()
+        secret = "chatsecret-event-message-id"
+        conduit_id = "conduit-chat-event-message-id"
+        shard_id = "13"
+        subscription_id = "sub-chat-event-message-id"
+        db = backend_app.SessionLocal()
+        try:
+            backend_app.set_settings(db, {"chat_ingress_mode": "webhook_conduit", "chat_ingress_shadow_mode": "0"})
+        finally:
+            db.close()
+        _create_chat_conduit_subscription(
+            details["channel_pk"],
+            subscription_id=subscription_id,
+            conduit_id=conduit_id,
+            shard_id=shard_id,
+            secret=secret,
+        )
+
+        body = {
+            "subscription": {
+                "id": subscription_id,
+                "type": "channel.chat.message",
+                "status": "enabled",
+                "version": "1",
+                "condition": {"broadcaster_user_id": "cid"},
+                "transport": {"method": "conduit", "conduit_id": conduit_id},
+            },
+            "event": {
+                "message_id": "event-message-id-123",
+                "chatter_user_id": "webhook-user-2",
+                "chatter_user_login": "webhookuser2",
+                "message": {"text": "!request Artist E - Song Five"},
+            },
+        }
+        raw = json.dumps(body).encode()
+        header_message_id = "header-message-id-999"
+        timestamp = "2023-01-01T00:00:00Z"
+        signature = hmac.new(secret.encode(), msg=(header_message_id + timestamp).encode() + raw, digestmod=hashlib.sha256)
+        with mock.patch.object(backend_app, "get_bot_user_id", return_value="bot-user-1"), mock.patch.object(
+            backend_app, "_resolve_twitch_token_subject_id", return_value="bot-user-1"
+        ), mock.patch("backend_app.requests.post") as mock_send:
+            mock_send.return_value.raise_for_status.return_value = None
+            response = self.client.post(
+                "/twitch/eventsub/callback",
+                data=raw,
+                headers={
+                    "Twitch-Eventsub-Message-Id": header_message_id,
+                    "Twitch-Eventsub-Message-Timestamp": timestamp,
+                    "Twitch-Eventsub-Message-Signature": f"sha256={signature.hexdigest()}",
+                    "Twitch-Eventsub-Message-Type": "notification",
+                },
+            )
+            payload = mock_send.call_args.kwargs["json"]
+            self.assertEqual(payload["reply_parent_message_id"], "event-message-id-123")
+        self.assertEqual(response.status_code, 200, response.text)
+
+    def test_eventsub_chat_notification_reply_parent_omitted_when_event_message_id_missing(self) -> None:
+        """Omit reply threading when ``event.message_id`` is absent."""
+
+        details = _setup_channel()
+        secret = "chatsecret-no-event-message-id"
+        conduit_id = "conduit-chat-no-event-message-id"
+        shard_id = "14"
+        subscription_id = "sub-chat-no-event-message-id"
+        db = backend_app.SessionLocal()
+        try:
+            backend_app.set_settings(db, {"chat_ingress_mode": "webhook_conduit", "chat_ingress_shadow_mode": "0"})
+        finally:
+            db.close()
+        _create_chat_conduit_subscription(
+            details["channel_pk"],
+            subscription_id=subscription_id,
+            conduit_id=conduit_id,
+            shard_id=shard_id,
+            secret=secret,
+        )
+
+        body = {
+            "subscription": {
+                "id": subscription_id,
+                "type": "channel.chat.message",
+                "status": "enabled",
+                "version": "1",
+                "condition": {"broadcaster_user_id": "cid"},
+                "transport": {"method": "conduit", "conduit_id": conduit_id},
+            },
+            "event": {
+                "chatter_user_id": "webhook-user-3",
+                "chatter_user_login": "webhookuser3",
+                "message": {"text": "!request Artist F - Song Six"},
+            },
+        }
+        raw = json.dumps(body).encode()
+        header_message_id = "header-message-id-omit-reply-parent"
+        timestamp = "2023-01-01T00:00:00Z"
+        signature = hmac.new(secret.encode(), msg=(header_message_id + timestamp).encode() + raw, digestmod=hashlib.sha256)
+        with mock.patch.object(backend_app, "get_bot_user_id", return_value="bot-user-1"), mock.patch.object(
+            backend_app, "_resolve_twitch_token_subject_id", return_value="bot-user-1"
+        ), mock.patch("backend_app.requests.post") as mock_send:
+            mock_send.return_value.raise_for_status.return_value = None
+            response = self.client.post(
+                "/twitch/eventsub/callback",
+                data=raw,
+                headers={
+                    "Twitch-Eventsub-Message-Id": header_message_id,
+                    "Twitch-Eventsub-Message-Timestamp": timestamp,
+                    "Twitch-Eventsub-Message-Signature": f"sha256={signature.hexdigest()}",
+                    "Twitch-Eventsub-Message-Type": "notification",
+                },
+            )
+            payload = mock_send.call_args.kwargs["json"]
+            self.assertNotIn("reply_parent_message_id", payload)
+        self.assertEqual(response.status_code, 200, response.text)
+
+    def test_eventsub_chat_notification_preflight_sender_subject_mismatch_skips_send(self) -> None:
+        """Skip deterministic bad payload sends when sender and token subject mismatch."""
+
+        details = _setup_channel()
+        secret = "chatsecret-sender-mismatch"
+        conduit_id = "conduit-chat-sender-mismatch"
+        shard_id = "15"
+        subscription_id = "sub-chat-sender-mismatch"
+        db = backend_app.SessionLocal()
+        try:
+            backend_app.set_settings(db, {"chat_ingress_mode": "webhook_conduit", "chat_ingress_shadow_mode": "0"})
+        finally:
+            db.close()
+        _create_chat_conduit_subscription(
+            details["channel_pk"],
+            subscription_id=subscription_id,
+            conduit_id=conduit_id,
+            shard_id=shard_id,
+            secret=secret,
+        )
+
+        body = {
+            "subscription": {
+                "id": subscription_id,
+                "type": "channel.chat.message",
+                "status": "enabled",
+                "version": "1",
+                "condition": {"broadcaster_user_id": "cid"},
+                "transport": {"method": "conduit", "conduit_id": conduit_id},
+            },
+            "event": {
+                "message_id": "event-message-id-sender-mismatch",
+                "chatter_user_id": "webhook-user-4",
+                "chatter_user_login": "webhookuser4",
+                "message": {"text": "!request Artist G - Song Seven"},
+            },
+        }
+        raw = json.dumps(body).encode()
+        header_message_id = "header-message-id-sender-mismatch"
+        timestamp = "2023-01-01T00:00:00Z"
+        signature = hmac.new(secret.encode(), msg=(header_message_id + timestamp).encode() + raw, digestmod=hashlib.sha256)
+        with mock.patch.object(backend_app, "get_bot_user_id", return_value="bot-user-1"), mock.patch.object(
+            backend_app, "_resolve_twitch_token_subject_id", return_value="bot-user-2"
+        ), mock.patch("backend_app.requests.post") as mock_send:
+            response = self.client.post(
+                "/twitch/eventsub/callback",
+                data=raw,
+                headers={
+                    "Twitch-Eventsub-Message-Id": header_message_id,
+                    "Twitch-Eventsub-Message-Timestamp": timestamp,
+                    "Twitch-Eventsub-Message-Signature": f"sha256={signature.hexdigest()}",
+                    "Twitch-Eventsub-Message-Type": "notification",
+                },
+            )
+            self.assertEqual(mock_send.call_count, 0)
+        self.assertEqual(response.status_code, 200, response.text)
+
+    def test_send_eventsub_chat_reply_preflight_invalid_message_length_skips_request(self) -> None:
+        """Skip Send Chat API call when rendered message violates Twitch length limits."""
+
+        details = _setup_channel()
+        db = backend_app.SessionLocal()
+        try:
+            channel = db.get(backend_app.ActiveChannel, details["channel_pk"])
+            self.assertIsNotNone(channel)
+            over_limit_message = "x" * (backend_app.TWITCH_SEND_CHAT_MESSAGE_MAX_LENGTH + 1)
+            reply = {
+                "status": "success",
+                "template_key": over_limit_message,
+                "template_vars": {},
+                "visibility": "normal",
+            }
+            with mock.patch.object(backend_app, "get_bot_user_id", return_value="bot-user-1"), mock.patch.object(
+                backend_app, "_resolve_twitch_token_subject_id", return_value="bot-user-1"
+            ), mock.patch("backend_app.requests.post") as mock_send:
+                sent = backend_app._send_eventsub_chat_reply(
+                    db,
+                    channel,
+                    reply,
+                    reply_parent_message_id="event-message-id-over-limit",
+                )
+                self.assertFalse(sent)
+                self.assertEqual(mock_send.call_count, 0)
         finally:
             db.close()
 
