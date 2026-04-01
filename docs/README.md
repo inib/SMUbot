@@ -182,6 +182,14 @@ unlocks the API for the bot, queue manager, and public web frontend.
     replies through Twitch `POST /helix/chat/messages` using a stable reply
     contract (`status`, `template_key`, `template_vars`, `visibility`) so
     webhook responses match websocket/bot catalog semantics.
+  - Reply threading now uses chat event payload `event.message_id` only (never
+    the EventSub transport header message id). If `event.message_id` is
+    missing, the send payload omits `reply_parent_message_id`.
+  - Deterministic Send Chat 400 guards now run before HTTP requests:
+    `broadcaster_id` and `sender_id` must be non-empty, message length must be
+    within Twitch Send Chat limits (`1-500` chars), and `sender_id` must match
+    the bot token subject (`/oauth2/validate user_id`). Failed preflight emits
+    explicit reason codes and skips request/retry.
   - Reply visibility still honors per-channel `bot_message_level` thresholds,
     so muted/normal/verbose/debug suppression behavior is unchanged.
   - Shadow mode remains non-sending and non-mutating for webhook commands even

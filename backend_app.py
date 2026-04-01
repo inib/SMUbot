@@ -192,6 +192,7 @@ BOT_MESSAGE_DEFAULT_TEMPLATES: dict[str, str] = {
     "failed": "Failed: {error}",
 }
 BOT_MESSAGE_LEVEL_RANK: dict[str, int] = {"mute": 0, "normal": 1, "verbose": 2, "debug": 3}
+TWITCH_SEND_CHAT_MESSAGE_MAX_LENGTH = 500
 
 _bot_log_listeners: set[asyncio.Queue[str]] = set()
 _bot_oauth_states: dict[str, Dict[str, Any]] = {}
@@ -1513,11 +1514,112 @@ def _should_send_eventsub_reply(channel: ActiveChannel, visibility: str) -> bool
     return threshold_name != "mute" and message_rank <= threshold_rank
 
 
+def _resolve_twitch_token_subject_id(access_token: str, *, timeout: float = 6.0) -> Optional[str]:
+    """Resolve Twitch OAuth token subject user id via validation endpoint.
+
+    Dependencies: Performs an HTTPS GET to Twitch ``/oauth2/validate``.
+    Code customers: ``_preflight_eventsub_chat_reply_payload`` sender parity.
+    Used variables/origin: ``access_token`` comes from persisted bot OAuth
+    credentials and maps to validation response field ``user_id``.
+    """
+
+    token = (access_token or "").strip()
+    if not token:
+        return None
+    response = requests.get(
+        "https://id.twitch.tv/oauth2/validate",
+        headers={"Authorization": f"OAuth {token}"},
+        timeout=timeout,
+    )
+    if response.status_code != 200:
+        return None
+    payload = response.json()
+    subject_id = str(payload.get("user_id") or "").strip()
+    return subject_id or None
+
+
+def _build_eventsub_chat_reply_payload(
+    *,
+    broadcaster_id: str,
+    sender_id: str,
+    message: str,
+    reply_parent_message_id: Optional[str],
+) -> dict[str, Any]:
+    """Build Twitch send-chat payload with optional reply parent message id.
+
+    Dependencies: Pure builder with no external runtime dependencies.
+    Code customers: ``_preflight_eventsub_chat_reply_payload`` and send API call
+    path inside ``_send_eventsub_chat_reply``.
+    Used variables/origin: values originate from active channel identity, bot
+    OAuth identity, rendered reply text, and EventSub payload ``message_id``.
+    """
+
+    payload: dict[str, Any] = {
+        "broadcaster_id": broadcaster_id,
+        "sender_id": sender_id,
+        "message": message,
+    }
+    if reply_parent_message_id:
+        payload["reply_parent_message_id"] = reply_parent_message_id
+    return payload
+
+
+def _preflight_eventsub_chat_reply_payload(
+    db: Session,
+    *,
+    channel: ActiveChannel,
+    sender_id: str,
+    message: str,
+    reply_parent_message_id: Optional[str],
+) -> tuple[Optional[dict[str, Any]], Optional[str], Optional[dict[str, str]]]:
+    """Validate deterministic Twitch send-chat inputs before HTTP requests.
+
+    Dependencies: Reads ``BotConfig`` for bot access token, validates token
+    subject via Twitch ``/oauth2/validate``, and assembles Helix headers.
+    Code customers: ``_send_eventsub_chat_reply`` deterministic preflight guard.
+    Used variables/origin: broadcaster id from ``channel.channel_id``,
+    ``sender_id`` from bot identity resolution, ``message`` from rendered reply,
+    and ``reply_parent_message_id`` from EventSub ``event.message_id``.
+    """
+
+    broadcaster_id = str(channel.channel_id or "").strip()
+    normalized_sender_id = str(sender_id or "").strip()
+    normalized_message = str(message or "")
+    if not broadcaster_id:
+        return None, "preflight_missing_broadcaster_id", None
+    if not normalized_sender_id:
+        return None, "preflight_missing_sender_id", None
+    message_len = len(normalized_message)
+    if message_len < 1 or message_len > TWITCH_SEND_CHAT_MESSAGE_MAX_LENGTH:
+        return None, "preflight_invalid_message_length", None
+
+    cfg = db.query(BotConfig).order_by(BotConfig.id.asc()).first()
+    access_token = (cfg.access_token if cfg and cfg.access_token else "").strip()
+    if not access_token:
+        return None, "preflight_missing_bot_access_token", None
+    token_subject_id = _resolve_twitch_token_subject_id(access_token)
+    if not token_subject_id:
+        return None, "preflight_token_subject_unresolved", None
+    if token_subject_id != normalized_sender_id:
+        return None, "preflight_sender_token_subject_mismatch", None
+
+    headers = _eventsub_headers(access_token)
+    payload = _build_eventsub_chat_reply_payload(
+        broadcaster_id=broadcaster_id,
+        sender_id=normalized_sender_id,
+        message=normalized_message,
+        reply_parent_message_id=(reply_parent_message_id or "").strip() or None,
+    )
+    return payload, None, headers
+
+
 def _send_eventsub_chat_reply(db: Session, channel: ActiveChannel, reply: dict[str, Any], *, reply_parent_message_id: Optional[str]) -> bool:
     """Send webhook reply text through Twitch Send Chat Message API with retries.
 
-    Dependencies: Uses ``_eventsub_bot_headers`` for bot OAuth context and
-    ``get_bot_user_id`` for sender id, then POSTs ``/helix/chat/messages``.
+    Dependencies: Resolves sender identity via ``get_bot_user_id``, validates
+    deterministic payload constraints through
+    ``_preflight_eventsub_chat_reply_payload``, then POSTs
+    ``/helix/chat/messages``.
     Code customers: ``_process_eventsub_chat_notification`` authoritative path.
     Used variables/origin: ``reply`` contract is emitted by command executors;
     ``reply_parent_message_id`` comes from the inbound EventSub message id.
@@ -1531,24 +1633,23 @@ def _send_eventsub_chat_reply(db: Session, channel: ActiveChannel, reply: dict[s
     if not text:
         _record_ingress_metric("reply_suppressed")
         return False
-    sender_id = get_bot_user_id()
-    if not sender_id:
+    sender_id = str(get_bot_user_id() or "").strip()
+    payload, preflight_reason_code, headers = _preflight_eventsub_chat_reply_payload(
+        db,
+        channel=channel,
+        sender_id=sender_id,
+        message=text,
+        reply_parent_message_id=reply_parent_message_id,
+    )
+    if preflight_reason_code or not payload or not headers:
         _record_ingress_metric("send_api_failure")
-        logger.warning("Webhook reply send skipped: bot_user_id unavailable")
+        logger.warning(
+            "Webhook reply send skipped by preflight: reason_code=%s channel=%s template_key=%s",
+            preflight_reason_code or "preflight_unknown_failure",
+            channel.channel_name,
+            reply.get("template_key"),
+        )
         return False
-    try:
-        headers = _eventsub_bot_headers(db)
-    except Exception:
-        _record_ingress_metric("send_api_failure")
-        logger.exception("Webhook reply send skipped: bot oauth credentials unavailable")
-        return False
-    payload: dict[str, Any] = {
-        "broadcaster_id": channel.channel_id,
-        "sender_id": sender_id,
-        "message": text,
-    }
-    if reply_parent_message_id:
-        payload["reply_parent_message_id"] = reply_parent_message_id
     delay_seconds = 0.3
     for attempt in range(3):
         try:
@@ -1561,6 +1662,25 @@ def _send_eventsub_chat_reply(db: Session, channel: ActiveChannel, reply: dict[s
             response.raise_for_status()
             _record_ingress_metric("reply_sent")
             return True
+        except requests.HTTPError as exc:
+            _record_ingress_metric("send_api_failure")
+            status_code = exc.response.status_code if exc.response is not None else None
+            if status_code is not None and 400 <= status_code < 500:
+                logger.warning(
+                    "Webhook reply send failed without retry: reason_code=api_4xx_response status_code=%s channel=%s template_key=%s",
+                    status_code,
+                    channel.channel_name,
+                    reply.get("template_key"),
+                )
+                return False
+            if attempt == 2:
+                logger.exception(
+                    "Webhook reply send failed after retries",
+                    extra={"channel": channel.channel_name, "template_key": reply.get("template_key")},
+                )
+                return False
+            time.sleep(delay_seconds)
+            delay_seconds *= 2
         except requests.RequestException:
             _record_ingress_metric("send_api_failure")
             if attempt == 2:
@@ -2184,11 +2304,12 @@ def _process_eventsub_chat_notification(
             reply_contract = ((outcome.get("metadata") or {}).get("response") if isinstance(outcome.get("metadata"), dict) else None)
             reply_sent = False
             if isinstance(reply_contract, dict) and not shadow_mode:
+                reply_parent_message_id = str(event_payload.get("message_id") or "").strip() or None
                 reply_sent = _send_eventsub_chat_reply(
                     db,
                     channel,
                     reply_contract,
-                    reply_parent_message_id=message_id,
+                    reply_parent_message_id=reply_parent_message_id,
                 )
             mutated = bool((outcome.get("metadata") or {}).get("mutated")) if isinstance(outcome.get("metadata"), dict) else False
             executed_authoritative = outcome.get("status") == "executed" and (mutated or reply_sent)
