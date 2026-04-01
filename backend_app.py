@@ -1864,6 +1864,38 @@ def _parse_artist_title_loose(raw: str) -> tuple[str, str]:
     return "Unknown", candidate
 
 
+def _extract_request_youtube_url(text: str) -> Optional[str]:
+    """Extract and canonicalize a YouTube URL from free-form request text.
+
+    Dependencies: ``re``-backed URL matching and ``_canonicalize_video_url`` to
+    align webhook parsing with the websocket ``extract_youtube_url`` helper.
+    Code customers: ``_eventsub_execute_request_command``.
+    Used variables/origin: ``text`` comes from parsed request command args and
+    may include plain ``Artist - Title`` values or a YouTube URL.
+    """
+
+    candidate = (text or "").strip()
+    if not candidate:
+        return None
+    youtube_patterns = (
+        re.compile(r"https?://(www\.)?youtube\.com/watch\?v=([\w-]{11})", re.I),
+        re.compile(r"https?://(music\.)?youtube\.com/watch\?v=([\w-]{11})", re.I),
+        re.compile(r"https?://youtu\.be/([\w-]{11})", re.I),
+    )
+    for pattern in youtube_patterns:
+        match = pattern.search(candidate)
+        if not match:
+            continue
+        video_id = match.group(match.lastindex or 0)
+        canonical_url, normalized_video_id = _canonicalize_video_url(None, video_id)
+        if canonical_url and normalized_video_id:
+            return canonical_url
+    canonical_url, canonical_video_id = _canonicalize_video_url(candidate, None)
+    if canonical_url and canonical_video_id:
+        return canonical_url
+    return None
+
+
 def _eventsub_execute_request_command(
     db: Session,
     channel: ActiveChannel,
@@ -1885,98 +1917,98 @@ def _eventsub_execute_request_command(
     """
 
     request_text = (args or "").strip()
-    if not request_text:
+    channel_pk = channel.id
+    try:
+        request_url = _extract_request_youtube_url(request_text)
+        request_is_youtube_url = bool(request_url)
+        user = _get_or_create_channel_user(db, channel_pk, chatter_user_id, chatter_login)
+        db.flush()
+        settings = get_or_create_settings(db, channel_pk)
+        enforce_queue_limits(db, channel_pk, user.id, False)
+        stream_id = current_stream(db, channel_pk)
+        song: Optional[Song] = None
+        if request_is_youtube_url and request_url:
+            song = (
+                db.query(Song)
+                .filter(
+                    Song.channel_id == channel_pk,
+                    Song.youtube_link == request_url,
+                )
+                .one_or_none()
+            )
+            if not song:
+                extracted_title = _fetch_youtube_oembed_title(request_url)
+                artist_name, title_name = _parse_artist_title_loose(extracted_title) if extracted_title else ("YouTube", request_url)
+                song = Song(channel_id=channel_pk, artist=artist_name, title=title_name, youtube_link=request_url)
+                db.add(song)
+                db.flush()
+        else:
+            artist_name, title_name = _parse_artist_title_loose(request_text)
+            song = (
+                db.query(Song)
+                .filter(
+                    Song.channel_id == channel_pk,
+                    func.lower(Song.artist) == artist_name.lower(),
+                    func.lower(Song.title) == title_name.lower(),
+                )
+                .one_or_none()
+            )
+            if not song:
+                song = Song(channel_id=channel_pk, artist=artist_name, title=title_name, youtube_link=None)
+                db.add(song)
+                db.flush()
+        actor_ctx = actor or {}
+        is_priority, priority_source = _apply_priority_to_new_request(
+            db,
+            settings,
+            user.id,
+            stream_id,
+            want_priority=False,
+            prefer_sub_free=True,
+            is_subscriber=bool(actor_ctx.get("is_subscriber")),
+            is_mod=bool(actor_ctx.get("is_mod") or actor_ctx.get("is_broadcaster")),
+        )
+        req = _create_request_entry(db, channel_pk, user.id, song.id, bumped=False)
+        req.is_priority = is_priority
+        req.priority_source = priority_source
+        db.commit()
+        db.refresh(req)
+        event_payload = _serialize_request_event(db, req)
+        publish_channel_event(channel_pk, "request.added", event_payload)
+        if req.is_priority or req.bumped:
+            publish_channel_event(channel_pk, "request.bumped", event_payload)
+        publish_queue_changed(channel_pk)
+        return _eventsub_outcome(
+            "executed",
+            command="request",
+            reason_code="ok",
+            metadata={
+                "mutated": True,
+                "request_id": req.id,
+                "song_id": song.id,
+                "response": _eventsub_response_contract(
+                    "success",
+                    template_key="request_added",
+                    template_vars={"artist": song.artist, "title": song.title},
+                    visibility="normal",
+                ),
+            },
+        )
+    except HTTPException as exc:
         return _eventsub_outcome(
             "rejected",
             command="request",
-            reason_code="invalid_args",
-            detail="request text required",
+            reason_code="business_rule_http_error",
+            detail=str(exc.detail),
             metadata={
                 "response": _eventsub_response_contract(
                     "error",
                     template_key="failed",
-                    template_vars={"error": "request text required"},
+                    template_vars={"error": str(exc.detail)},
                     visibility="normal",
                 )
             },
         )
-    request_url, request_video_id = _canonicalize_video_url(request_text, None)
-    request_is_youtube_url = bool(request_video_id)
-
-    channel_pk = channel.id
-    user = _get_or_create_channel_user(db, channel_pk, chatter_user_id, chatter_login)
-    db.flush()
-    settings = get_or_create_settings(db, channel_pk)
-    enforce_queue_limits(db, channel_pk, user.id, False)
-    stream_id = current_stream(db, channel_pk)
-    song: Optional[Song] = None
-    if request_is_youtube_url and request_url:
-        song = (
-            db.query(Song)
-            .filter(
-                Song.channel_id == channel_pk,
-                Song.youtube_link == request_url,
-            )
-            .one_or_none()
-        )
-        if not song:
-            extracted_title = _fetch_youtube_oembed_title(request_url)
-            artist_name, title_name = _parse_artist_title_loose(extracted_title) if extracted_title else ("YouTube", request_url)
-            song = Song(channel_id=channel_pk, artist=artist_name, title=title_name, youtube_link=request_url)
-            db.add(song)
-            db.flush()
-    else:
-        artist_name, title_name = _parse_artist_title_loose(request_text)
-        song = (
-            db.query(Song)
-            .filter(
-                Song.channel_id == channel_pk,
-                func.lower(Song.artist) == artist_name.lower(),
-                func.lower(Song.title) == title_name.lower(),
-            )
-            .one_or_none()
-        )
-        if not song:
-            song = Song(channel_id=channel_pk, artist=artist_name, title=title_name, youtube_link=None)
-            db.add(song)
-            db.flush()
-    actor_ctx = actor or {}
-    is_priority, priority_source = _apply_priority_to_new_request(
-        db,
-        settings,
-        user.id,
-        stream_id,
-        want_priority=False,
-        prefer_sub_free=True,
-        is_subscriber=bool(actor_ctx.get("is_subscriber")),
-        is_mod=bool(actor_ctx.get("is_mod") or actor_ctx.get("is_broadcaster")),
-    )
-    req = _create_request_entry(db, channel_pk, user.id, song.id, bumped=False)
-    req.is_priority = is_priority
-    req.priority_source = priority_source
-    db.commit()
-    db.refresh(req)
-    event_payload = _serialize_request_event(db, req)
-    publish_channel_event(channel_pk, "request.added", event_payload)
-    if req.is_priority or req.bumped:
-        publish_channel_event(channel_pk, "request.bumped", event_payload)
-    publish_queue_changed(channel_pk)
-    return _eventsub_outcome(
-        "executed",
-        command="request",
-        reason_code="ok",
-        metadata={
-            "mutated": True,
-            "request_id": req.id,
-            "song_id": song.id,
-            "response": _eventsub_response_contract(
-                "success",
-                template_key="request_added",
-                template_vars={"artist": song.artist, "title": song.title},
-                visibility="normal",
-            ),
-        },
-    )
 
 
 def _eventsub_execute_playlist_request_command(
