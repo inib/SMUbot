@@ -1,6 +1,8 @@
 import unittest
 from unittest import mock
 from typing import Dict
+import tempfile
+import os
 
 from fastapi.testclient import TestClient
 import hashlib
@@ -1489,6 +1491,60 @@ class ChannelEventTests(unittest.TestCase):
             self.assertEqual(len(rows), 0)
         finally:
             db.close()
+
+    def test_extract_eventsub_chat_command_uses_commands_yml_aliases(self) -> None:
+        """Parse webhook aliases from the same canonical command map as websocket mode.
+
+        Dependencies: ``COMMANDS_FILE`` env wiring and webhook parser alias map
+        cache invalidation. Code customers: EventSub webhook parse parity.
+        Used variables/origin: temporary YAML file defines aliases that must map
+        to canonical commands in ``_extract_eventsub_chat_command``.
+        """
+
+        custom_commands = """
+prefix: "!"
+request:
+  - request
+  - req
+  - sr
+points:
+  - points
+  - pp
+remove:
+  - remove
+  - undo
+  - del
+"""
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".yml", delete=False) as handle:
+            handle.write(custom_commands)
+            custom_path = handle.name
+        previous = os.environ.get("COMMANDS_FILE")
+        try:
+            os.environ["COMMANDS_FILE"] = custom_path
+            backend_app._eventsub_chat_command_aliases.cache_clear()
+            self.assertEqual(backend_app._extract_eventsub_chat_command("!req Artist - Song")["canonical"], "request")
+            self.assertEqual(backend_app._extract_eventsub_chat_command("!sr Artist - Song")["canonical"], "request")
+            self.assertEqual(backend_app._extract_eventsub_chat_command("!pp")["canonical"], "points")
+            self.assertEqual(backend_app._extract_eventsub_chat_command("!undo")["canonical"], "remove")
+            self.assertEqual(backend_app._extract_eventsub_chat_command("!del")["canonical"], "remove")
+        finally:
+            if previous is None:
+                os.environ.pop("COMMANDS_FILE", None)
+            else:
+                os.environ["COMMANDS_FILE"] = previous
+            backend_app._eventsub_chat_command_aliases.cache_clear()
+            os.unlink(custom_path)
+
+    def test_extract_eventsub_chat_command_unknown_alias_returns_reason_and_feedback(self) -> None:
+        """Return explicit unknown-alias parse metadata for webhook diagnostics."""
+
+        backend_app._eventsub_chat_command_aliases.cache_clear()
+        parsed = backend_app._extract_eventsub_chat_command("!notacommand 123")
+        self.assertEqual(parsed["parse_reason"], "unknown_alias")
+        self.assertEqual(parsed["canonical"], None)
+        self.assertEqual(parsed["alias"], "notacommand")
+        self.assertIn("notacommand", str(parsed["parse_detail"]))
+        self.assertEqual(parsed["feedback_message"], "Unknown command alias 'notacommand'.")
 
     def test_eventsub_conduit_chat_notification_missing_shard_secret_returns_503(self) -> None:
         """Fail conduit chat notifications when persisted shard secret is missing.
