@@ -84,6 +84,8 @@ unlocks the API for the bot, queue manager, and public web frontend.
   - healthy conduit shards drop below `chat_ingress_guard_min_healthy_shards`,
   - callback 4xx/5xx volume in `chat_ingress_guard_window_seconds` exceeds
     `chat_ingress_guard_callback_error_threshold`.
+- Startup import now validates ingress-guard symbol availability before running
+  the guard so symbol-order regressions fail fast during process boot.
 - Migration `migrations/20260330_eventsub_conduits.sql` adds additive EventSub
   replay/conduit tables (`eventsub_message_dedupe`, `twitch_conduits`,
   `twitch_conduit_shards`) plus conduit linkage columns on

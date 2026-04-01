@@ -875,8 +875,57 @@ def get_chat_websocket_fallback_legacy_enabled() -> bool:
     return _env_flag(get_setting("chat_websocket_fallback_legacy_enabled", "0"))
 
 
+def _coerce_int(value: Any, *, default: int = 0) -> int:
+    """Best-effort conversion of arbitrary values to integers.
+
+    Dependencies: Uses ``math.isfinite`` and Python numeric coercion built-ins.
+    Code customers: ingress guard threshold parsing, response normalization for
+    user metadata payloads, and command metadata coercion paths.
+    Used variables/origin: accepts caller-provided ``value`` from persisted
+    settings, API payload metadata, or ORM fields, and returns ``default`` when
+    conversion fails or would be non-finite.
+    """
+
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return default
+        return int(value)
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return default
+        try:
+            return int(stripped, 10)
+        except ValueError:
+            try:
+                float_value = float(stripped)
+            except ValueError:
+                return default
+            if not math.isfinite(float_value):
+                return default
+            return int(float_value)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _ingress_guard_thresholds() -> dict[str, float]:
-    """Return normalized ingress guard thresholds from persisted settings."""
+    """Return normalized ingress guard thresholds from persisted settings.
+
+    Dependencies: Reads persisted settings via ``get_setting`` and normalizes
+    integer-like values through ``_coerce_int``.
+    Code customers: startup/runtime ingress guard evaluators and health summary
+    diagnostics that need consistent threshold bounds.
+    Used variables/origin: ingests ``chat_ingress_guard_*`` setting values from
+    app settings storage and enforces minimum safe bounds.
+    """
 
     callback_error_threshold = max(_coerce_int(get_setting("chat_ingress_guard_callback_error_threshold", "5"), default=5), 1)
     window_seconds = max(_coerce_int(get_setting("chat_ingress_guard_window_seconds", "300"), default=300), 60)
@@ -3370,11 +3419,29 @@ def _ensure_playlist_schema() -> None:
             connection.execute(text("ALTER TABLE playlists_tmp RENAME TO playlists"))
 
 
+def _validate_startup_symbol_order() -> None:
+    """Fail fast when startup depends on symbols defined too late in module load.
+
+    Dependencies: Reads module globals and raises ``RuntimeError`` on missing
+    critical symbols.
+    Code customers: module import/startup path immediately before migration and
+    ingress guard startup invocation.
+    Used variables/origin: validates global symbol names relied on during
+    startup execution ordering.
+    """
+
+    required_symbols = ("_coerce_int", "_ingress_guard_thresholds", "run_ingress_guard_startup_check")
+    missing = [name for name in required_symbols if name not in globals()]
+    if missing:
+        raise RuntimeError(f"Startup symbol order invalid; missing definitions: {', '.join(missing)}")
+
+
 ensure_channel_settings_schema()
 _ensure_playlist_schema()
 ensure_eventsub_conduit_schema()
 bootstrap_settings_from_env()
 cleanup_conduit_subscription_secret_semantics()
+_validate_startup_symbol_order()
 run_ingress_guard_startup_check()
 
 # =====================================
@@ -7995,45 +8062,6 @@ def _refresh_users_with_helix_names(db: Session, channel_obj: Optional[ActiveCha
         db.commit()
     return updated
 
-
-def _coerce_int(value: Any, *, default: int = 0) -> int:
-    """Best-effort conversion of arbitrary values to integers.
-
-    User metadata stored in the database predates the new Pydantic response
-    models and can therefore contain unexpected types (e.g. stringified
-    numbers). Rather than returning a 500 error when validation fails we coerce
-    the value into a safe integer and fall back to ``default`` when conversion
-    is not possible.
-    """
-
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return int(value)
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float):
-        if not math.isfinite(value):
-            return default
-        return int(value)
-    if isinstance(value, str):
-        stripped = value.strip()
-        if not stripped:
-            return default
-        try:
-            return int(stripped, 10)
-        except ValueError:
-            try:
-                float_value = float(stripped)
-            except ValueError:
-                return default
-            if not math.isfinite(float_value):
-                return default
-            return int(float_value)
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
 
 
 def _coerce_str(value: Any, *, default: str = "") -> str:
