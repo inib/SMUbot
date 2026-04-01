@@ -309,7 +309,7 @@ Expected:
   so future per-command/per-message template or level customization can be
   rolled out without refactoring dispatch logic.
 - Supports commands:
-  - `!request` – add a song request.
+  - `!request` – add a song request from either a direct YouTube URL or free-form text (`Artist - Title` preferred, plain title falls back to `Unknown - <title>`).
   - `!playlist <name> <index>` – queue a song from a saved playlist by position.
   - `!prioritize` – bump one of your requests using priority points.
   - `!points` – check remaining priority points.

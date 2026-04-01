@@ -1902,6 +1902,44 @@ def _send_eventsub_chat_reply(db: Session, channel: ActiveChannel, reply: dict[s
     return False
 
 
+def _fetch_youtube_oembed_title(url: str) -> Optional[str]:
+    """Fetch a YouTube title through oEmbed for webhook request command parity.
+
+    Dependencies: outbound HTTP via ``requests.get`` to YouTube oEmbed.
+    Code customers: ``_eventsub_execute_request_command``.
+    Used variables/origin: ``url`` is derived from chat command args after
+    canonical video URL parsing.
+    """
+
+    oembed_url = f"https://www.youtube.com/oembed?url={url}&format=json"
+    try:
+        response = requests.get(oembed_url, timeout=8)
+        response.raise_for_status()
+        payload = response.json()
+    except (requests.RequestException, ValueError):
+        return None
+    title = payload.get("title")
+    if isinstance(title, str):
+        normalized = title.strip()
+        return normalized or None
+    return None
+
+
+def _parse_artist_title_loose(raw: str) -> tuple[str, str]:
+    """Parse request text as ``Artist - Title`` with websocket-compatible fallback.
+
+    Dependencies: none.
+    Code customers: ``_eventsub_execute_request_command``.
+    Used variables/origin: ``raw`` comes from request chat args or oEmbed title.
+    """
+
+    candidate = (raw or "").strip()
+    if " - " in candidate:
+        artist, title = candidate.split(" - ", 1)
+        return artist.strip(), title.strip()
+    return "Unknown", candidate
+
+
 def _eventsub_execute_request_command(
     db: Session,
     channel: ActiveChannel,
@@ -1938,24 +1976,8 @@ def _eventsub_execute_request_command(
                 )
             },
         )
-    artist, sep, title = request_text.partition("-")
-    artist_name = artist.strip()
-    title_name = title.strip() if sep else ""
-    if not artist_name or not title_name:
-        return _eventsub_outcome(
-            "rejected",
-            command="request",
-            reason_code="invalid_args",
-            detail="expected format: artist - title",
-            metadata={
-                "response": _eventsub_response_contract(
-                    "error",
-                    template_key="failed",
-                    template_vars={"error": "expected format: artist - title"},
-                    visibility="normal",
-                )
-            },
-        )
+    request_url, request_video_id = _canonicalize_video_url(request_text, None)
+    request_is_youtube_url = bool(request_video_id)
 
     channel_pk = channel.id
     user = _get_or_create_channel_user(db, channel_pk, chatter_user_id, chatter_login)
@@ -1963,19 +1985,37 @@ def _eventsub_execute_request_command(
     settings = get_or_create_settings(db, channel_pk)
     enforce_queue_limits(db, channel_pk, user.id, False)
     stream_id = current_stream(db, channel_pk)
-    song = (
-        db.query(Song)
-        .filter(
-            Song.channel_id == channel_pk,
-            func.lower(Song.artist) == artist_name.lower(),
-            func.lower(Song.title) == title_name.lower(),
+    song: Optional[Song] = None
+    if request_is_youtube_url and request_url:
+        song = (
+            db.query(Song)
+            .filter(
+                Song.channel_id == channel_pk,
+                Song.youtube_link == request_url,
+            )
+            .one_or_none()
         )
-        .one_or_none()
-    )
-    if not song:
-        song = Song(channel_id=channel_pk, artist=artist_name, title=title_name, youtube_link=None)
-        db.add(song)
-        db.flush()
+        if not song:
+            extracted_title = _fetch_youtube_oembed_title(request_url)
+            artist_name, title_name = _parse_artist_title_loose(extracted_title) if extracted_title else ("YouTube", request_url)
+            song = Song(channel_id=channel_pk, artist=artist_name, title=title_name, youtube_link=request_url)
+            db.add(song)
+            db.flush()
+    else:
+        artist_name, title_name = _parse_artist_title_loose(request_text)
+        song = (
+            db.query(Song)
+            .filter(
+                Song.channel_id == channel_pk,
+                func.lower(Song.artist) == artist_name.lower(),
+                func.lower(Song.title) == title_name.lower(),
+            )
+            .one_or_none()
+        )
+        if not song:
+            song = Song(channel_id=channel_pk, artist=artist_name, title=title_name, youtube_link=None)
+            db.add(song)
+            db.flush()
     actor_ctx = actor or {}
     is_priority, priority_source = _apply_priority_to_new_request(
         db,
