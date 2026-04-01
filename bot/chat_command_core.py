@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Protocol, Set, Tuple
 
+from command_resolution import ROUTED_COMMANDS, resolve_prefixed_command
+
 
 @dataclass(frozen=True)
 class NormalizedChatInput:
@@ -88,34 +90,20 @@ class ChatCommandContext:
 def parse_chat_command(chat_input: NormalizedChatInput, commands_map: Dict[str, List[str]]) -> Optional[ParsedChatCommand]:
     """Parse a canonical command from normalized chat input text.
 
-    Dependencies: command prefix and aliases configured in `commands_map`. Code
-    customers: Twitch/WebSocket event adapters and tests. Used
-    variables/origin: `chat_input.text` carries the raw chat message body.
+    Dependencies: shared command resolver (`resolve_prefixed_command`) and
+    aliases configured in `commands_map`. Code customers: Twitch/WebSocket
+    event adapters and tests. Used variables/origin: `chat_input.text` carries
+    the raw chat message body.
     """
 
-    content = (chat_input.text or "").strip()
-    prefix_items = commands_map.get('prefix') or ['!']
-    prefix = prefix_items[0] if prefix_items else '!'
-    if not content.startswith(prefix):
+    parsed = resolve_prefixed_command(chat_input.text, commands_map, routed_commands=ROUTED_COMMANDS)
+    if parsed.get('parse_reason') != 'ok' or not parsed.get('canonical') or not parsed.get('alias'):
         return None
-    cmd, *rest = content[len(prefix):].split(' ', 1)
-    if not cmd:
-        return None
-    args = rest[0] if rest else ''
-    cmd_lower = cmd.lower()
-    routed_commands = (
-        'request',
-        'random_request',
-        'playlist_request',
-        'prioritize',
-        'points',
-        'remove',
-        'archive',
+    return ParsedChatCommand(
+        canonical=str(parsed['canonical']),
+        alias=str(parsed['alias']),
+        args=str(parsed.get('args') or ''),
     )
-    for canonical in routed_commands:
-        if cmd_lower in (commands_map.get(canonical) or []):
-            return ParsedChatCommand(canonical=canonical, alias=cmd_lower, args=args)
-    return None
 
 
 async def dispatch_chat_command(chat_input: NormalizedChatInput, parsed: ParsedChatCommand, ctx: ChatCommandContext) -> bool:
