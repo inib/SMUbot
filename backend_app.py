@@ -1,6 +1,7 @@
 from __future__ import annotations
 import math
 import contextlib
+from functools import lru_cache
 from typing import Optional, List, Any, Dict, Mapping, Iterable, Literal, Sequence
 from threading import Lock
 import os
@@ -14,10 +15,12 @@ import secrets
 import html
 import random
 import ipaddress
+from pathlib import Path as FilePath
 from urllib.parse import quote, urlparse, urlunparse, parse_qs
 from datetime import datetime, timedelta
 import asyncio
 import requests
+import yaml
 
 try:
     from ytmusicapi import YTMusic  # type: ignore
@@ -1427,8 +1430,8 @@ def _record_eventsub_notification_dedupe(db: Session, message_id: str) -> bool:
 def _extract_eventsub_chat_command(message_text: str) -> dict[str, Optional[str]]:
     """Parse a Twitch chat line into a normalized command summary.
 
-    Dependencies: Uses string normalization and the static command alias map so
-    webhook chat ingress can be evaluated without requiring bot runtime objects.
+    Dependencies: Uses string normalization and canonical alias config from
+    ``commands.yml`` (with websocket-bot parity defaults).
     Code customers: ``_process_eventsub_chat_notification`` emits structured
     webhook-vs-websocket comparison logs from this parsed command metadata.
     Used variables/origin: ``message_text`` comes from Twitch
@@ -1442,18 +1445,94 @@ def _extract_eventsub_chat_command(message_text: str) -> dict[str, Optional[str]
     command_token, _, remainder = command_blob.partition(" ")
     alias = command_token.strip().lower()
     args = remainder.strip() or ""
-    aliases: dict[str, set[str]] = {
-        "request": {"request", "r"},
-        "random_request": {"random", "rand", "rr"},
-        "playlist_request": {"playlist", "pl"},
-        "prioritize": {"prioritize", "prio"},
-        "points": {"points", "pts"},
-        "remove": {"remove", "rm"},
-        "archive": {"archive"},
-    }
-    canonical = next((name for name, alias_set in aliases.items() if alias in alias_set), None)
+    aliases = _eventsub_chat_command_aliases()
+    canonical = next((name for name, alias_list in aliases.items() if alias in alias_list), None)
     parse_reason = "ok" if canonical else "unknown_alias"
-    return {"alias": alias or None, "canonical": canonical, "args": args, "parse_reason": parse_reason}
+    parse_detail = f"alias '{alias}' is not in configured commands map" if parse_reason == "unknown_alias" and alias else None
+    feedback_message = f"Unknown command alias '{alias}'." if parse_reason == "unknown_alias" and alias else None
+    return {
+        "alias": alias or None,
+        "canonical": canonical,
+        "args": args,
+        "parse_reason": parse_reason,
+        "parse_detail": parse_detail,
+        "feedback_message": feedback_message,
+    }
+
+
+def _eventsub_default_commands_map() -> dict[str, list[str]]:
+    """Return fallback aliases that mirror websocket bot command defaults.
+
+    Dependencies: none (in-memory constants). Code customers:
+    ``_load_eventsub_commands_map`` when command YAML is unavailable.
+    Used variables/origin: values are copied from bot command defaults.
+    """
+
+    return {
+        "prefix": ["!"],
+        "request": ["request", "req", "r", "sr"],
+        "prioritize": ["prioritize", "prio", "bump"],
+        "points": ["points", "pp"],
+        "remove": ["remove", "undo", "del"],
+        "archive": ["archive"],
+        "random_request": ["random", "rr", "randomrequest"],
+        "playlist_request": ["playlist", "pl"],
+    }
+
+
+def _load_eventsub_commands_map() -> dict[str, list[str]]:
+    """Load canonical command aliases from bot ``commands.yml``.
+
+    Dependencies: reads ``COMMANDS_FILE`` env var and parses YAML via
+    ``yaml.safe_load``. Code customers: ``_eventsub_chat_command_aliases``.
+    Used variables/origin: path defaults to ``/bot/commands.yml`` and falls
+    back to repository ``bot/commands.yml`` for local/test execution.
+    """
+
+    defaults = _eventsub_default_commands_map()
+    command_file = FilePath(os.getenv("COMMANDS_FILE", "/bot/commands.yml"))
+    if not command_file.exists():
+        repo_path = FilePath(__file__).resolve().parent / "bot" / "commands.yml"
+        if repo_path.exists():
+            command_file = repo_path
+    loaded: dict[str, Any] = {}
+    try:
+        with command_file.open("r", encoding="utf-8") as handle:
+            payload = yaml.safe_load(handle) or {}
+            if isinstance(payload, dict):
+                loaded = payload
+    except FileNotFoundError:
+        logger.info("EventSub command map file not found; using websocket-bot defaults", extra={"path": str(command_file)})
+    except Exception:
+        logger.warning(
+            "Failed to parse EventSub command map; using websocket-bot defaults",
+            extra={"path": str(command_file)},
+            exc_info=True,
+        )
+    merged: dict[str, Any] = {**defaults, **loaded}
+    normalized: dict[str, list[str]] = {}
+    for key, value in merged.items():
+        if isinstance(value, list):
+            normalized[key] = [str(item).strip().lower() for item in value if str(item).strip()]
+        elif value is None:
+            normalized[key] = []
+        else:
+            scalar = str(value).strip().lower()
+            normalized[key] = [scalar] if scalar else []
+    return normalized
+
+
+@lru_cache(maxsize=1)
+def _eventsub_chat_command_aliases() -> dict[str, list[str]]:
+    """Return cached canonical EventSub aliases from bot command config.
+
+    Dependencies: wraps ``_load_eventsub_commands_map`` with memoization.
+    Code customers: ``_extract_eventsub_chat_command``.
+    Used variables/origin: loaded aliases originate from ``commands.yml`` or
+    websocket-bot parity defaults.
+    """
+
+    return _load_eventsub_commands_map()
 
 
 def _eventsub_outcome(
@@ -2422,7 +2501,22 @@ def _process_eventsub_chat_notification(
     parse_reason = str(parsed.get("parse_reason") or "")
     if not parsed.get("canonical"):
         if parse_reason == "unknown_alias":
-            outcome = _eventsub_outcome("rejected", command=None, reason_code="parse_unknown_alias")
+            alias = str(parsed.get("alias") or "")
+            parse_detail = str(parsed.get("parse_detail") or "unknown alias")
+            feedback_message = str(parsed.get("feedback_message") or "") or None
+            logger.info(
+                "EventSub chat command rejected: reason_code=parse_unknown_alias alias=%s detail=%s feedback_message=%s",
+                alias or "<empty>",
+                parse_detail,
+                feedback_message or "<none>",
+            )
+            outcome = _eventsub_outcome(
+                "rejected",
+                command=None,
+                reason_code="parse_unknown_alias",
+                detail=parse_detail,
+                metadata={"alias": alias or None, "feedback_message": feedback_message},
+            )
             webhook_result = "ignored_unknown_alias"
         else:
             outcome = _eventsub_outcome("rejected", command=None, reason_code="parse_non_command")
