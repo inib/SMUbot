@@ -22,6 +22,7 @@ import asyncio
 import requests
 import yaml
 from command_resolution import ROUTED_COMMANDS, load_commands_map, resolve_prefixed_command
+from bot.chat_command_core import resolve_command_handler
 
 try:
     from ytmusicapi import YTMusic  # type: ignore
@@ -2389,10 +2390,13 @@ def _dispatch_eventsub_chat_command(
     parsed: dict[str, Optional[str]],
     event_payload: dict[str, Any],
 ) -> dict[str, Any]:
-    """Dispatch parsed canonical chat commands to backend execution routines.
+    """Dispatch parsed canonical chat commands through shared chat-core routing.
 
-    Dependencies: command-specific execution helpers and queue APIs already used
-    by websocket chat command execution path.
+    Description: keeps webhook notification execution aligned with websocket
+    command routing by resolving canonical handlers through the shared
+    ``resolve_command_handler`` utility.
+    Dependencies: command-specific execution helpers, shared resolver utility,
+    and queue APIs already used by websocket chat command execution path.
     Code customers: ``_process_eventsub_chat_notification`` authoritative mode.
     Used variables/origin: ``parsed`` comes from
     ``_extract_eventsub_chat_command`` and ``event_payload`` comes from Twitch
@@ -2448,7 +2452,9 @@ def _dispatch_eventsub_chat_command(
         "archive": lambda: _eventsub_outcome("rejected", command="archive", reason_code="permission_denied", detail="archive requires moderator authorization"),
         "random_request": lambda: _eventsub_outcome("rejected", command="random_request", reason_code="legacy_websocket_only", detail="cleanup_candidate: migrate websocket-only random request routine"),
     }
-    handler = dispatch_map.get(canonical)
+    # TODO(removal): fold per-command webhook executors into a unified shared
+    # command context once DB/session adapters are parity-tested.
+    handler = resolve_command_handler(str(canonical or ""), dispatch_map)
     if not handler:
         return _eventsub_outcome("rejected", command=canonical, reason_code="parse_unknown_alias")
     return handler()
