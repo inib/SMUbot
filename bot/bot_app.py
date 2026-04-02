@@ -1652,11 +1652,13 @@ class BotService:
         backend_client: Backend,
         *,
         poll_interval: int = 15,
+        idle_recheck_interval: int = 900,
         bot_factory: Optional[Callable[..., SongBot]] = None,
         task_factory: Optional[Callable[[Awaitable], asyncio.Task]] = None,
     ):
         self.backend = backend_client
         self.poll_interval = poll_interval
+        self.idle_recheck_interval = idle_recheck_interval
         self.bot_factory = bot_factory or (lambda **kwargs: SongBot(**kwargs))
         self._create_task = task_factory or asyncio.create_task
         self._bot: Optional[SongBot] = None
@@ -1670,9 +1672,24 @@ class BotService:
         self._current_scopes: List[str] = []
         self._credentials_available: Optional[bool] = None
         self._last_enabled: Optional[bool] = None
+        self._runtime_required: Optional[bool] = None
 
     async def run(self):
+        """Run the bot worker loop with ingress-aware runtime gating.
+
+        Dependencies: backend ``/system/config`` and (when required)
+        ``/bot/config`` APIs. Code customers: ``main`` entrypoint process for
+        the bot container. Used variables/origin: ``chat_ingress_mode`` and
+        ``chat_websocket_fallback_legacy_enabled`` from backend system config to
+        avoid steady-state polling when websocket runtime is unnecessary.
+        """
+
         while True:
+            runtime_required = await self._requires_runtime()
+            if not runtime_required:
+                await self._stop_bot(reason='runtime_not_required')
+                await asyncio.sleep(self.idle_recheck_interval)
+                continue
             try:
                 raw_config = await self.backend.get_bot_config()
             except Exception as exc:
@@ -1692,6 +1709,42 @@ class BotService:
                     event='config',
                 )
             await asyncio.sleep(self.poll_interval)
+
+    async def _requires_runtime(self) -> bool:
+        """Return whether websocket lifecycle support still requires bot runtime.
+
+        Dependencies: backend ``get_system_config`` API client.
+        Code customers: ``BotService.run`` polling loop gate.
+        Used variables/origin: ``chat_ingress_mode`` plus
+        ``chat_websocket_fallback_legacy_enabled`` determine websocket runtime
+        requirement; backend fetch failures default to ``True`` for safety.
+        """
+
+        try:
+            config = await self.backend.get_system_config()
+        except Exception as exc:
+            await push_console_event(
+                'error',
+                f'Failed to fetch system configuration; keeping bot runtime active: {exc}',
+                event='config',
+            )
+            return True
+        ingress_mode = str(config.get("chat_ingress_mode") or "websocket").strip().lower()
+        rollback_enabled = bool(config.get("chat_websocket_fallback_legacy_enabled"))
+        runtime_required = ingress_mode == "websocket" or rollback_enabled
+        if self._runtime_required is None or self._runtime_required != runtime_required:
+            await push_console_event(
+                'info',
+                'Bot runtime mode switched',
+                event='lifecycle',
+                metadata={
+                    'runtime_required': runtime_required,
+                    'chat_ingress_mode': ingress_mode,
+                    'chat_websocket_fallback_legacy_enabled': rollback_enabled,
+                },
+            )
+        self._runtime_required = runtime_required
+        return runtime_required
 
     async def apply_settings(self, settings: BotSettings):
         required_fields = {

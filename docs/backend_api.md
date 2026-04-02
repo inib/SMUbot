@@ -17,6 +17,9 @@ This document summarizes the REST endpoints exposed by `backend_app.py`.
   - `chat_ingress_mode`: `webhook_conduit` (default authoritative) or `websocket` (legacy fallback).
   - `chat_ingress_shadow_mode`: boolean dual-run switch for validation mode (default `false`).
   - `chat_websocket_fallback_legacy_enabled`: explicit rollback flag for websocket EventSub chat subscriptions in bot runtime.
+    When `chat_ingress_mode=webhook_conduit` and this flag is `false`, bot
+    runtime websocket lifecycle is not required and workers avoid steady-state
+    `/bot/config` polling churn.
   - `chat_ingress_guard_auto_fallback_enabled`: if `true`, degraded authoritative ingress can auto-switch mode to `websocket`.
 - **PUT payload additions**
   - `eventsub_callback_override?: string`

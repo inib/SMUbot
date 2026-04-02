@@ -78,6 +78,8 @@ unlocks the API for the bot, queue manager, and public web frontend.
 - Legacy rollback is explicit through `chat_websocket_fallback_legacy_enabled`.
   Websocket EventSub chat subscriptions are suppressed in bot runtime when
   `chat_ingress_mode=webhook_conduit` and this rollback flag is `false`.
+  In that authoritative mode, the bot worker now idles in a minimal credential
+  maintenance role and no longer performs steady-state `/bot/config` polling.
 - Startup/runtime ingress guard now evaluates conduit health with high-severity
   alerts and optional auto-fallback (`chat_ingress_guard_auto_fallback_enabled`)
   when:
@@ -299,6 +301,10 @@ Expected:
 
 ## Bot Highlights
 - Automatically discovers authorized channels from the backend and joins them.
+- Runtime activation is ingress-gated: websocket lifecycle is started only when
+  `chat_ingress_mode=websocket` or explicit rollback
+  (`chat_websocket_fallback_legacy_enabled=true`) is enabled; otherwise the bot
+  process remains idle and periodically rechecks only `/system/config`.
 - Honors each channel's `bot_message_level` (`mute`, `normal`, `verbose`,
   `debug`) when deciding whether to send chat output; suppressed messages still
   go to backend bot logs for observability.
