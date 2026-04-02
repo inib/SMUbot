@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Protocol, Set, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Protocol, Set, Tuple, TypeVar
 
 from command_resolution import ROUTED_COMMANDS, resolve_prefixed_command
 
@@ -62,6 +62,8 @@ class ChatBackendClient(Protocol):
 SendReplyFn = Callable[..., Awaitable[None]]
 LogErrorFn = Callable[[str, Dict[str, object]], Awaitable[None]]
 YouTubeTitleFn = Callable[[str], Awaitable[Optional[str]]]
+CommandHandlerFn = Callable[[NormalizedChatInput, str, "ChatCommandContext"], Awaitable[None]]
+HandlerT = TypeVar("HandlerT")
 
 
 @dataclass
@@ -115,7 +117,7 @@ async def dispatch_chat_command(chat_input: NormalizedChatInput, parsed: ParsedC
     comes from `parsed`, message identity fields come from `chat_input`.
     """
 
-    handlers = {
+    handlers: Dict[str, CommandHandlerFn] = {
         'request': execute_request,
         'random_request': execute_random_request,
         'playlist_request': execute_playlist_request,
@@ -123,11 +125,29 @@ async def dispatch_chat_command(chat_input: NormalizedChatInput, parsed: ParsedC
         'points': execute_points,
         'remove': execute_remove,
     }
-    handler = handlers.get(parsed.canonical)
+    handler = resolve_command_handler(parsed.canonical, handlers)
     if not handler:
         return False
     await handler(chat_input, parsed.args, ctx)
     return True
+
+
+def resolve_command_handler(canonical: str, handlers: Dict[str, HandlerT]) -> Optional[HandlerT]:
+    """Resolve canonical command names against a shared handler map.
+
+    Description: provides a transport-agnostic lookup helper so websocket and
+    webhook dispatchers can share canonical command routing behavior.
+    Dependencies: dictionary lookups only.
+    Code customers: `dispatch_chat_command` and webhook notification command
+    dispatch in `backend_app`.
+    Used variables/origin: `canonical` originates from shared command parsing;
+    `handlers` is provided by each transport adapter.
+    """
+
+    token = str(canonical or "").strip().lower()
+    if not token:
+        return None
+    return handlers.get(token)
 
 
 async def _resolve_channel(chat_input: NormalizedChatInput, command: str, ctx: ChatCommandContext) -> Optional[Tuple[str, str]]:

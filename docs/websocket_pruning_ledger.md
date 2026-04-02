@@ -12,6 +12,14 @@ Use this ledger whenever websocket-only code/tests are removed.
 
 ## Entries
 
+### 2026-04-02 — Remove BotService duplicate command parser/handlers
+- **removed modules/functions**: `bot/bot_app.py` `BotService.event_message`, `BotService.handle_request`, `BotService.handle_prioritize`, `BotService.handle_points`, `BotService.handle_remove`, `BotService.handle_archive`
+- **replacement path**: `SongBot.event_message` + `bot/chat_command_core.py` shared parser/dispatcher; webhook command dispatch in `backend_app._dispatch_eventsub_chat_command`
+- **deprecation decision date**: 2026-04-02
+- **rollback implications**: no runtime impact expected; BotService never owned authoritative Twitch chat execution. Rollback by restoring deleted BotService compatibility methods.
+- **classification**: unused code removed
+- **archived rationale link**: [Archived websocket deprecation rationale](./archive/websocket_deprecation_rationale.md)
+
 ### 2026-04-02 — Process baseline entry
 - **removed modules/functions**: none (documentation/process update only)
 - **replacement path**: n/a
