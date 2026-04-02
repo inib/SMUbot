@@ -1839,9 +1839,152 @@ remove:
         )
         self.assertEqual(response.status_code, 503, response.text)
         payload = response.json().get("detail") or {}
-        self.assertEqual(payload.get("reason_code"), "missing_conduit_shard_secret")
+        self.assertEqual(payload.get("reason_code"), "missing_shard_secret")
         self.assertEqual(payload.get("conduit_id"), conduit_id)
         self.assertEqual(payload.get("shard_id"), shard_id)
+
+    def test_eventsub_conduit_notification_signature_passes_with_current_shard_secret(self) -> None:
+        """Accept conduit notifications signed by the active shard secret.
+
+        Dependencies: callback HMAC verification and conduit shard secret lookup.
+        Code customers: webhook-conduit notification path.
+        Used variables/origin: payload transport + subscription metadata provide
+        conduit/shard identity while shard row ``current_secret`` is canonical.
+        """
+
+        details = _setup_channel()
+        conduit_id = "conduit-current-secret"
+        shard_id = "2"
+        _create_chat_conduit_subscription(
+            details["channel_pk"],
+            subscription_id="sub-current-secret",
+            conduit_id=conduit_id,
+            shard_id=shard_id,
+            secret="shard-current",
+        )
+        body = {
+            "subscription": {
+                "id": "sub-current-secret",
+                "type": "channel.chat.message",
+                "status": "enabled",
+                "version": "1",
+                "condition": {"broadcaster_user_id": details["channel_name"]},
+                "transport": {"method": "conduit", "conduit_id": conduit_id},
+            },
+            "event": {"chatter_user_id": "u1", "chatter_user_login": "u1", "message": {"text": "hello"}},
+        }
+        raw = json.dumps(body).encode()
+        headers = _signed_eventsub_headers("shard-current", "msg-current-secret", "2023-01-01T00:00:00Z", raw)
+        response = self.client.post("/twitch/eventsub/callback", data=raw, headers=headers)
+        self.assertEqual(response.status_code, 200, response.text)
+
+    def test_eventsub_conduit_notification_stale_secret_fails(self) -> None:
+        """Reject conduit notifications signed with an expired previous secret.
+
+        Dependencies: shard rotation fields and callback signature diagnostics.
+        Code customers: operators triaging drift after rotation grace expires.
+        Used variables/origin: subscription legacy secret intentionally matches
+        stale signing key to assert ``stale_shard_secret`` reason reporting.
+        """
+
+        details = _setup_channel()
+        conduit_id = "conduit-stale-secret"
+        shard_id = "3"
+        _create_chat_conduit_subscription(
+            details["channel_pk"],
+            subscription_id="sub-stale-secret",
+            conduit_id=conduit_id,
+            shard_id=shard_id,
+            secret="shard-current-new",
+        )
+        db = backend_app.SessionLocal()
+        try:
+            row = (
+                db.query(backend_app.TwitchConduitShard)
+                .join(backend_app.TwitchConduit, backend_app.TwitchConduitShard.conduit_fk == backend_app.TwitchConduit.id)
+                .filter(
+                    backend_app.TwitchConduit.conduit_id == conduit_id,
+                    backend_app.TwitchConduitShard.shard_id == shard_id,
+                )
+                .one()
+            )
+            row.current_secret = "shard-current-new"
+            row.previous_secret = "legacy-subscription-secret"
+            row.previous_secret_valid_until = backend_app.datetime.utcnow() - backend_app.timedelta(seconds=30)
+            row.transport_secret = "shard-current-new"
+            db.commit()
+        finally:
+            db.close()
+        body = {
+            "subscription": {
+                "id": "sub-stale-secret",
+                "type": "channel.chat.message",
+                "status": "enabled",
+                "version": "1",
+                "condition": {"broadcaster_user_id": details["channel_name"]},
+                "transport": {"method": "conduit", "conduit_id": conduit_id},
+            },
+            "event": {"chatter_user_id": "u2", "chatter_user_login": "u2", "message": {"text": "hello"}},
+        }
+        raw = json.dumps(body).encode()
+        headers = _signed_eventsub_headers("legacy-subscription-secret", "msg-stale-secret", "2023-01-01T00:00:00Z", raw)
+        response = self.client.post("/twitch/eventsub/callback", data=raw, headers=headers)
+        self.assertEqual(response.status_code, 403, response.text)
+        detail = response.json().get("detail") or {}
+        self.assertEqual(detail.get("reason_code"), "stale_shard_secret")
+
+    def test_eventsub_conduit_notification_rotation_grace_accepts_previous_secret(self) -> None:
+        """Accept conduit notifications signed with previous secret in grace.
+
+        Dependencies: shard rotation grace window and callback verification.
+        Code customers: zero-downtime shard secret rotation in conduit ingress.
+        Used variables/origin: previous secret is explicitly persisted with a
+        future ``previous_secret_valid_until`` timestamp.
+        """
+
+        details = _setup_channel()
+        conduit_id = "conduit-rotation-grace"
+        shard_id = "4"
+        _create_chat_conduit_subscription(
+            details["channel_pk"],
+            subscription_id="sub-rotation-grace",
+            conduit_id=conduit_id,
+            shard_id=shard_id,
+            secret="rotated-current-secret",
+        )
+        db = backend_app.SessionLocal()
+        try:
+            row = (
+                db.query(backend_app.TwitchConduitShard)
+                .join(backend_app.TwitchConduit, backend_app.TwitchConduitShard.conduit_fk == backend_app.TwitchConduit.id)
+                .filter(
+                    backend_app.TwitchConduit.conduit_id == conduit_id,
+                    backend_app.TwitchConduitShard.shard_id == shard_id,
+                )
+                .one()
+            )
+            row.current_secret = "rotated-current-secret"
+            row.previous_secret = "legacy-subscription-secret"
+            row.previous_secret_valid_until = backend_app.datetime.utcnow() + backend_app.timedelta(minutes=2)
+            row.transport_secret = "rotated-current-secret"
+            db.commit()
+        finally:
+            db.close()
+        body = {
+            "subscription": {
+                "id": "sub-rotation-grace",
+                "type": "channel.chat.message",
+                "status": "enabled",
+                "version": "1",
+                "condition": {"broadcaster_user_id": details["channel_name"]},
+                "transport": {"method": "conduit", "conduit_id": conduit_id},
+            },
+            "event": {"chatter_user_id": "u3", "chatter_user_login": "u3", "message": {"text": "hello"}},
+        }
+        raw = json.dumps(body).encode()
+        headers = _signed_eventsub_headers("legacy-subscription-secret", "msg-rotation-grace", "2023-01-01T00:00:00Z", raw)
+        response = self.client.post("/twitch/eventsub/callback", data=raw, headers=headers)
+        self.assertEqual(response.status_code, 200, response.text)
 
     def test_system_health_reports_ingress_summary_metrics(self) -> None:
         """Expose compact ingress summary with callback throughput and counters."""

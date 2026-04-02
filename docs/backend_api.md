@@ -522,11 +522,11 @@ Certain events award priority points and are fed by EventSub subscriptions creat
 - **Signature verification**:
   - The backend computes `HMAC_SHA256(secret, message_id + timestamp + raw_body)` and rejects mismatches with `403`.
   - For classic webhook payloads, the `secret` is taken from `event_subscriptions.secret` via `subscription.id`.
-  - For conduit chat notifications (`subscription.type=channel.chat.message` and/or `subscription.transport.method=conduit`), the `secret` is resolved from `twitch_conduit_shards.transport_secret` using the persisted `(conduit_id, shard_id)` linkage from `event_subscriptions` columns/metadata/transport data.
-  - Conduit reconciliation stores linkage metadata (`conduit_id`, `shard_id`, and transport details) on `event_subscriptions`; the `event_subscriptions.secret` field for conduit rows is treated as a schema-compatibility placeholder and is not authoritative.
+  - For conduit chat notifications (`subscription.type=channel.chat.message` and/or `subscription.transport.method=conduit`), the `secret` is resolved from persisted shard state (`twitch_conduit_shards.current_secret`, optional `previous_secret` during grace, and legacy mirror `transport_secret`) using `(conduit_id, shard_id)` derived from payload transport + metadata linkage.
+  - Conduit reconciliation stores linkage metadata (`conduit_id`, `shard_id`, and transport details) on `event_subscriptions`; the `event_subscriptions.secret` field for conduit rows is treated as a schema-compatibility placeholder and is not authoritative for conduit notifications.
   - Migration-safe behavior: existing conduit rows that still contain legacy/random `event_subscriptions.secret` values are ignored during conduit notification signature verification.
-  - If a conduit notification cannot resolve shard secret material, the callback returns explicit diagnostics with reason code (for example `missing_conduit_shard_secret`) and uses `503` for missing secret state so operators can distinguish config drift from invalid signatures.
-  - For conduit verification payloads (`verification_shape=conduit_shard`), the `secret` is taken from `twitch_conduit_shards.transport_secret` using the persisted `(conduit_shard.conduit_id, conduit_shard.shard)` pair.
+  - If a conduit notification cannot resolve shard secret material, the callback returns explicit diagnostics with reason code (for example `missing_shard_secret`, `secret_lookup_mismatch`) and uses `503` for missing secret state so operators can distinguish config drift from invalid signatures; stale legacy signatures are surfaced with `stale_shard_secret`.
+  - For conduit verification payloads (`verification_shape=conduit_shard`), the `secret` is taken from active persisted shard secret material using the `(conduit_shard.conduit_id, conduit_shard.shard)` pair.
 - **Verification payload variants**:
   - Classic webhook verification payloads with `subscription` are supported.
   - Conduit shard verification payloads with `conduit_shard` and no `subscription` are supported.
@@ -567,7 +567,7 @@ Certain events award priority points and are fed by EventSub subscriptions creat
 4. Monitor callback logs for:
    - signature failures,
    - unknown subscription IDs,
-   - conduit shard secret resolution failures (`missing_conduit_shard_field_conduit_id`, `missing_conduit_shard_field_shard`, `missing_conduit_shard_secret`, `unknown_conduit_shard`),
+   - conduit shard secret resolution failures (`missing_conduit_shard_field_conduit_id`, `missing_conduit_shard_field_shard`, `missing_shard_secret`, `secret_lookup_mismatch`, `unknown_conduit_shard`),
    - dedupe hits (retry storms),
    - reply send failures / suppressions (`send_api_failure_count`, `reply_suppressed_count`),
    - webhook/websocket comparison deltas while shadow mode is enabled.

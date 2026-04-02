@@ -125,6 +125,7 @@ EVENTSUB_EVENT_MAP: dict[str, str] = {
 }
 EVENTSUB_CONDUIT_CHAT_TYPE = "channel.chat.message"
 EVENTSUB_CONDUIT_SECRET_PLACEHOLDER = "__conduit_secret_unused__"
+CONDUIT_SECRET_ROTATION_GRACE_SECONDS = 300
 
 BOT_MESSAGE_LEVEL_DETAILS: list[dict[str, str]] = [
     {
@@ -415,6 +416,9 @@ def ensure_eventsub_conduit_schema() -> None:
                         conduit_fk INTEGER NOT NULL REFERENCES twitch_conduits(id) ON DELETE CASCADE,
                         shard_id VARCHAR NOT NULL,
                         transport_callback TEXT,
+                        current_secret TEXT,
+                        previous_secret TEXT,
+                        previous_secret_valid_until DATETIME,
                         transport_secret TEXT,
                         status VARCHAR NOT NULL DEFAULT 'pending',
                         last_sync_at DATETIME,
@@ -427,8 +431,25 @@ def ensure_eventsub_conduit_schema() -> None:
             )
         else:
             shard_columns = {col["name"] for col in inspector.get_columns("twitch_conduit_shards")}
+            if "current_secret" not in shard_columns:
+                conn.execute(text("ALTER TABLE twitch_conduit_shards ADD COLUMN current_secret TEXT"))
+            if "previous_secret" not in shard_columns:
+                conn.execute(text("ALTER TABLE twitch_conduit_shards ADD COLUMN previous_secret TEXT"))
+            if "previous_secret_valid_until" not in shard_columns:
+                conn.execute(text("ALTER TABLE twitch_conduit_shards ADD COLUMN previous_secret_valid_until DATETIME"))
             if "transport_secret" not in shard_columns:
                 conn.execute(text("ALTER TABLE twitch_conduit_shards ADD COLUMN transport_secret TEXT"))
+            conn.execute(
+                text(
+                    """
+                    UPDATE twitch_conduit_shards
+                    SET current_secret = transport_secret
+                    WHERE (current_secret IS NULL OR current_secret = '')
+                      AND transport_secret IS NOT NULL
+                      AND transport_secret != ''
+                    """
+                )
+            )
 
 
 def backfill_missing_channel_keys() -> None:
@@ -2800,7 +2821,9 @@ def _reconcile_twitch_conduit_shards(
     Code customers: Conduit reconciliation and eventsub health coverage checks.
     Used variables/origin: ``headers`` are app-auth conduit credentials; shard
     IDs come from Helix payloads and fallback to a local range when Twitch omits
-    data; callback originates from API route URL.
+    data; callback originates from API route URL. Secret rotation writes keep
+    shard metadata and ``current_secret``/``previous_secret`` updates in the
+    same transaction.
     """
 
     errors: list[str] = []
@@ -2815,8 +2838,11 @@ def _reconcile_twitch_conduit_shards(
             )
             .one_or_none()
         )
+        existing_secret = None
+        if existing:
+            existing_secret = existing.current_secret or existing.transport_secret
         secret_by_shard[shard_id] = (
-            existing.transport_secret if existing and existing.transport_secret else secrets.token_urlsafe(32)
+            existing_secret if existing_secret else secrets.token_urlsafe(32)
         )
     shards_payload = [
         {
@@ -2871,7 +2897,7 @@ def _reconcile_twitch_conduit_shards(
             db.add(row)
         transport = shard.get("transport") or {}
         row.transport_callback = transport.get("callback") or callback
-        row.transport_secret = secret_by_shard.get(shard_id) or row.transport_secret
+        _persist_conduit_shard_secret(row, secret_by_shard.get(shard_id) or "", now=now)
         next_status = shard.get("status") or "enabled"
         prev_status = row.status or "pending"
         if prev_status != next_status:
@@ -2895,7 +2921,7 @@ def _reconcile_twitch_conduit_shards(
             row = TwitchConduitShard(conduit_fk=conduit_row.id, shard_id=shard_id)
             db.add(row)
         row.transport_callback = callback
-        row.transport_secret = secret_by_shard.get(shard_id) or row.transport_secret
+        _persist_conduit_shard_secret(row, secret_by_shard.get(shard_id) or "", now=now)
         if (row.status or "pending") != "pending":
             _record_ingress_metric("shard_status_transition", key=f"{row.status}->pending")
         row.status = "pending"
@@ -2981,6 +3007,66 @@ def _refresh_conduit_shard_status_from_twitch(
     return updated
 
 
+def _active_conduit_shard_secret_candidates(
+    shard_row: TwitchConduitShard,
+    *,
+    now: datetime,
+) -> list[tuple[str, str]]:
+    """Return accepted shard secrets for signature checks with rotation grace.
+
+    Description: Produces ordered candidate secrets where current secret is
+    authoritative and an optional previous secret is accepted only within a
+    bounded grace window.
+    Dependencies: Reads ``TwitchConduitShard`` ORM fields and uses
+    ``datetime`` comparisons only.
+    Code customers: ``_resolve_conduit_notification_secret`` and conduit
+    verification flows.
+    Used variables/origin: ``shard_row`` comes from persistent shard state;
+    ``now`` comes from callback/reconciliation call sites for coherent timing.
+    """
+
+    candidates: list[tuple[str, str]] = []
+    current = (shard_row.current_secret or shard_row.transport_secret or "").strip()
+    if current:
+        candidates.append((current, "current_secret"))
+    previous = (shard_row.previous_secret or "").strip()
+    if previous and shard_row.previous_secret_valid_until and shard_row.previous_secret_valid_until >= now:
+        candidates.append((previous, "previous_secret"))
+    return candidates
+
+
+def _persist_conduit_shard_secret(
+    shard_row: TwitchConduitShard,
+    next_secret: str,
+    *,
+    now: datetime,
+) -> None:
+    """Persist shard secret rotation state atomically with shard metadata writes.
+
+    Description: Updates ``current_secret`` and moves the prior value to
+    ``previous_secret`` with a short validity window when a rotation occurs.
+    Dependencies: Uses ``CONDUIT_SECRET_ROTATION_GRACE_SECONDS`` and mutates a
+    tracked SQLAlchemy ``TwitchConduitShard`` row in the caller transaction.
+    Code customers: ``_reconcile_twitch_conduit_shards`` write path.
+    Used variables/origin: ``next_secret`` originates from reconciliation
+    secret planning; ``now`` comes from reconciliation clock.
+    """
+
+    trimmed_next = (next_secret or "").strip()
+    if not trimmed_next:
+        return
+    active = (shard_row.current_secret or shard_row.transport_secret or "").strip()
+    if active and active != trimmed_next:
+        shard_row.previous_secret = active
+        shard_row.previous_secret_valid_until = now + timedelta(seconds=CONDUIT_SECRET_ROTATION_GRACE_SECONDS)
+    elif not active:
+        shard_row.previous_secret = None
+        shard_row.previous_secret_valid_until = None
+    shard_row.current_secret = trimmed_next
+    # Legacy compatibility column: keep in sync until removed.
+    shard_row.transport_secret = trimmed_next
+
+
 def _resolve_conduit_verification_secret(
     payload: Mapping[str, Any],
     db: Session,
@@ -3014,25 +3100,29 @@ def _resolve_conduit_verification_secret(
     )
     if not rows:
         return None, conduit_id, shard_id, "unknown_conduit_shard"
-    if not rows[0].transport_secret:
-        return None, conduit_id, shard_id, "missing_conduit_shard_secret"
-    return rows[0].transport_secret, conduit_id, shard_id, None
+    now = datetime.utcnow()
+    candidates = _active_conduit_shard_secret_candidates(rows[0], now=now)
+    if not candidates:
+        return None, conduit_id, shard_id, "missing_shard_secret"
+    return candidates[0][0], conduit_id, shard_id, None
 
 
 def _resolve_conduit_notification_secret(
     subscription: EventSubscription,
     payload: Mapping[str, Any],
     db: Session,
-) -> tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
-    """Resolve conduit shard secret for ``notification`` callback signature checks.
+) -> tuple[list[tuple[str, str]], Optional[str], Optional[str], Optional[str]]:
+    """Resolve conduit shard secret candidates for ``notification`` signatures.
 
     Dependencies: Uses ``json`` for persisted ``EventSubscription.meta`` parsing
-    and ``TwitchConduit``/``TwitchConduitShard`` tables for secret lookup.
+    and ``TwitchConduit``/``TwitchConduitShard`` tables for secret lookup plus
+    rotation grace handling via ``_active_conduit_shard_secret_candidates``.
     Code customers: ``eventsub_callback`` notification branch for
     conduit-delivered chat messages.
     Used variables/origin: Reads conduit identity from subscription columns,
     subscription metadata, and payload transport fields; shard identity comes
-    from subscription column/metadata.
+    from payload/metadata and then subscription fields. Returns reason codes
+    including ``missing_shard_secret`` and ``secret_lookup_mismatch``.
     """
 
     sub_info = payload.get("subscription") or {}
@@ -3049,27 +3139,33 @@ def _resolve_conduit_notification_secret(
     conduit_meta = meta_payload.get("conduit_shard") if isinstance(meta_payload.get("conduit_shard"), dict) else {}
 
     conduit_id = (
-        subscription.conduit_id
-        or meta_payload.get("conduit_id")
-        or conduit_meta.get("conduit_id")
+        sub_transport.get("conduit_id")
         or meta_transport.get("conduit_id")
-        or sub_transport.get("conduit_id")
+        or conduit_meta.get("conduit_id")
+        or meta_payload.get("conduit_id")
+        or subscription.conduit_id
     )
     if conduit_id is not None:
         conduit_id = str(conduit_id)
     if not conduit_id:
-        return None, None, None, "missing_conduit_shard_field_conduit_id"
+        return [], None, None, "missing_conduit_shard_field_conduit_id"
 
     shard_id = (
-        subscription.shard_id
+        sub_transport.get("shard_id")
         or meta_payload.get("shard_id")
         or conduit_meta.get("shard_id")
         or conduit_meta.get("shard")
+        or subscription.shard_id
     )
     if shard_id is not None:
         shard_id = str(shard_id)
     if not shard_id:
-        return None, conduit_id, None, "missing_conduit_shard_field_shard"
+        return [], conduit_id, None, "missing_conduit_shard_field_shard"
+
+    if subscription.conduit_id and subscription.conduit_id != conduit_id:
+        return [], conduit_id, shard_id, "secret_lookup_mismatch"
+    if subscription.shard_id and subscription.shard_id != shard_id:
+        return [], conduit_id, shard_id, "secret_lookup_mismatch"
 
     shard_row = (
         db.query(TwitchConduitShard)
@@ -3081,10 +3177,11 @@ def _resolve_conduit_notification_secret(
         .one_or_none()
     )
     if not shard_row:
-        return None, conduit_id, shard_id, "unknown_conduit_shard"
-    if not shard_row.transport_secret:
-        return None, conduit_id, shard_id, "missing_conduit_shard_secret"
-    return shard_row.transport_secret, conduit_id, shard_id, None
+        return [], conduit_id, shard_id, "unknown_conduit_shard"
+    candidates = _active_conduit_shard_secret_candidates(shard_row, now=datetime.utcnow())
+    if not candidates:
+        return [], conduit_id, shard_id, "missing_shard_secret"
+    return candidates, conduit_id, shard_id, None
 
 
 def _persist_conduit_subscription_secret_placeholder(existing_secret: Optional[str]) -> str:
@@ -3573,6 +3670,9 @@ class TwitchConduitShard(Base):
     conduit_fk = Column(Integer, ForeignKey("twitch_conduits.id", ondelete="CASCADE"), nullable=False)
     shard_id = Column(String, nullable=False)
     transport_callback = Column(Text)
+    current_secret = Column(Text)
+    previous_secret = Column(Text)
+    previous_secret_valid_until = Column(DateTime)
     transport_secret = Column(Text)
     status = Column(String, nullable=False, default="pending")
     last_sync_at = Column(DateTime)
@@ -9780,12 +9880,13 @@ async def eventsub_callback(request: FastAPIRequest, db: Session = Depends(get_d
     verification_secret = subscription.secret
     conduit_id: Optional[str] = None
     shard_id: Optional[str] = None
+    verification_secret_candidates: list[tuple[str, str]] = []
     if is_conduit_chat_notification:
-        verification_secret, conduit_id, shard_id, resolve_error = _resolve_conduit_notification_secret(
+        verification_secret_candidates, conduit_id, shard_id, resolve_error = _resolve_conduit_notification_secret(
             subscription, payload, db
         )
-        if resolve_error or not verification_secret:
-            status_code = 503 if resolve_error == "missing_conduit_shard_secret" else 403
+        if resolve_error or not verification_secret_candidates:
+            status_code = 503 if resolve_error == "missing_shard_secret" else 403
             logger.warning(
                 "EventSub callback rejected: reason_code=%s message_id=%s message_type=%s subscription_id=%s conduit_id=%s shard_id=%s diagnostics=conduit_notification_secret_resolution_failed",
                 resolve_error or "unknown_conduit_secret_resolution_error",
@@ -9805,17 +9906,49 @@ async def eventsub_callback(request: FastAPIRequest, db: Session = Depends(get_d
                     "subscription_id": sub_id,
                 },
             )
+    else:
+        # cleanup_candidate: non-conduit notification verification still uses
+        # per-subscription secret semantics; future removal once conduit is
+        # fully authoritative for chat ingress.
+        verification_secret_candidates = [(verification_secret, "legacy_subscription_secret")]
 
-    if not _verify_eventsub_signature(verification_secret, message_id, timestamp, body, signature):
+    signature_match = False
+    matched_secret_source: Optional[str] = None
+    for candidate_secret, source_name in verification_secret_candidates:
+        if _verify_eventsub_signature(candidate_secret, message_id, timestamp, body, signature):
+            signature_match = True
+            matched_secret_source = source_name
+            break
+
+    if not signature_match:
         _record_ingress_metric("signature_failure")
         if is_conduit_chat_notification:
+            stale_secret_detected = _verify_eventsub_signature(
+                subscription.secret,
+                message_id,
+                timestamp,
+                body,
+                signature,
+            )
+            reason_code = "stale_shard_secret" if stale_secret_detected else "invalid_signature"
             logger.warning(
-                "EventSub callback rejected: reason_code=invalid_signature message_id=%s message_type=%s subscription_id=%s conduit_id=%s shard_id=%s signature_mode=conduit_shard_secret",
+                "EventSub callback rejected: reason_code=%s message_id=%s message_type=%s subscription_id=%s conduit_id=%s shard_id=%s signature_mode=conduit_shard_secret",
+                reason_code,
                 message_id,
                 message_type or "<missing>",
                 sub_id,
                 conduit_id or "<missing>",
                 shard_id or "<missing>",
+            )
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "reason_code": reason_code,
+                    "message": "Conduit notification signature validation failed.",
+                    "conduit_id": conduit_id,
+                    "shard_id": shard_id,
+                    "subscription_id": sub_id,
+                },
             )
         else:
             logger.warning(
@@ -9825,6 +9958,14 @@ async def eventsub_callback(request: FastAPIRequest, db: Session = Depends(get_d
                 sub_id,
             )
         raise HTTPException(status_code=403, detail="invalid signature")
+    if is_conduit_chat_notification:
+        logger.debug(
+            "EventSub callback signature accepted for conduit notification message_id=%s conduit_id=%s shard_id=%s secret_source=%s",
+            message_id,
+            conduit_id or "<missing>",
+            shard_id or "<missing>",
+            matched_secret_source or "<unknown>",
+        )
 
     subscription.status = sub_info.get("status") or subscription.status
     subscription.updated_at = datetime.utcnow()
