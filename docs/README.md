@@ -355,6 +355,22 @@ Expected:
 5. Only remove websocket rollback harness/tests when product explicitly
    confirms **no websocket rollback supported** (rollback EOL).
 
+
+### Websocket-only pruning ledger policy
+- Every PR that removes websocket-only modules/functions/tests must append an
+  entry to `docs/websocket_pruning_ledger.md`.
+- Required entry fields:
+  1. removed modules/functions,
+  2. replacement path,
+  3. deprecation decision date,
+  4. rollback implications,
+  5. classification (`unused code removed` or `behavioral removal`), and
+  6. archived rationale link (`docs/archive/websocket_deprecation_rationale.md`).
+- Keep `unused code removed` entries even when removals are non-behavioral so
+  future audits can trace cleanup intent.
+- If code is identified as unused but intentionally retained, mark it as a
+  cleanup candidate in docs and defer removal until rollback policy is explicit.
+
 ### Maintenance checklist
 - Verify bot/app token refreshes complete successfully each day.
 - Reconcile conduit shards on a fixed cadence (recommended: every 15 minutes or

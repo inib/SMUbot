@@ -283,6 +283,13 @@ Channel settings include queue intake controls:
   historical rollout aid and should not be treated as a long-term migration
   substitute.
 
+### Websocket-only cleanup ledger
+When pruning websocket-only code/tests, update `docs/websocket_pruning_ledger.md`
+in the same PR. Each entry must include removed modules/functions, replacement
+path, deprecation decision date, rollback implications, an `unused code removed`
+or `behavioral removal` classification, and a link to the archived rationale in
+`docs/archive/websocket_deprecation_rationale.md`.
+
 ## Songs
 | Method | Path | Description |
 |--------|------|-------------|
