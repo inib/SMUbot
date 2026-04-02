@@ -13,6 +13,20 @@ Additional directories include:
 - **admin/** – static assets for the Admin control panel used to manage the shared bot account and view channel stats.
 - **data/** – persistent SQLite database storage.
 
+## Canonical chat architecture (steady state)
+The production architecture is now documented as a fixed three-stage flow:
+
+1. **Ingress**: Twitch EventSub webhook callbacks via conduit transport
+   (`/twitch/eventsub/callback`).
+2. **Execution**: shared chat command core (`command_resolution.py`) used by
+   both webhook and websocket paths to keep command semantics aligned.
+3. **Outbound**: Twitch Send Chat Message API (`POST /helix/chat/messages`) for
+   user-visible bot replies.
+
+Legacy websocket-only ingress is retained strictly as an explicit rollback path
+under `chat_websocket_fallback_legacy_enabled`; it is not the canonical steady
+state.
+
 ## Admin panel bot message controls
 - Channel detail cards in the Admin panel now include a dedicated **Bot Messages**
   tab beside **Custom Settings** and **Active Streams**.
@@ -88,15 +102,9 @@ unlocks the API for the bot, queue manager, and public web frontend.
     `chat_ingress_guard_callback_error_threshold`.
 - Startup import now validates ingress-guard symbol availability before running
   the guard so symbol-order regressions fail fast during process boot.
-- Migration `migrations/20260330_eventsub_conduits.sql` adds additive EventSub
-  replay/conduit tables (`eventsub_message_dedupe`, `twitch_conduits`,
-  `twitch_conduit_shards`) plus conduit linkage columns on
-  `event_subscriptions`.
 - Conduit shard metadata now persists `twitch_conduit_shards.transport_secret`
   so callback verification can validate Twitch conduit-shard challenges without
   requiring `subscription.id`.
-- Startup now includes a compatibility patch for the same tables/columns so
-  staggered deploys on legacy SQLite/prod databases continue booting safely.
 - EventSub health endpoints now include conduit + shard coverage summaries:
   - `GET /system/health` reports global conduit assignment coverage.
   - `GET /system/health.eventsub.ingress_summary` adds compact runtime counters:
@@ -212,6 +220,108 @@ unlocks the API for the bot, queue manager, and public web frontend.
     sends), while websocket remains authoritative.
   - With `chat_ingress_mode=webhook_conduit` and shadow mode disabled, webhook
     ingress is authoritative and performs real command execution/persistence.
+
+### Steady-state runbooks
+
+#### 1) Callback delivery failures (`/twitch/eventsub/callback`)
+**Symptoms**
+- Rising callback `4xx`/`5xx` counters in `GET /system/health` ingress summary.
+- Twitch retries for the same EventSub message IDs, or delayed command effects.
+
+**Dependencies**
+- Public HTTPS callback endpoint with exact path `/twitch/eventsub/callback`.
+- Valid callback secret lookup source (`event_subscriptions.secret` for classic
+  rows; `twitch_conduit_shards.transport_secret` for conduit shard callbacks).
+
+**Primary variables/origins to verify**
+- `eventsub_callback_override` (admin runtime source; highest precedence).
+- `public_backend_origin` (derived callback origin when override is unset).
+- Callback source metadata shown in reconciliation warnings (`eventsub_callback_override`, `public_backend_origin`, or `request_url`).
+
+**Procedure**
+1. `GET /system/health` and inspect callback status buckets + last error fields.
+2. `GET /channels/{channel}/eventsub/health?reconcile=true` to refresh callback
+   and shard registration status.
+3. If callback URL is invalid/degraded, update `eventsub_callback_override` to
+   an HTTPS public URL ending in `/twitch/eventsub/callback`.
+4. Re-run channel reconcile and confirm callback warnings clear.
+
+#### 2) Conduit shard degradation
+**Symptoms**
+- `eventsub.authoritative_guard` reports `missing_healthy_shards`.
+- Per-channel EventSub health reports incomplete shard assignment/coverage.
+
+**Dependencies**
+- Conduit assignment state persisted in `twitch_conduits` and
+  `twitch_conduit_shards`.
+- Guard thresholds in `/system/config` (minimum healthy shards + fallback flag).
+
+**Primary variables/origins to verify**
+- `chat_ingress_guard_min_healthy_shards`.
+- `chat_ingress_guard_auto_fallback_enabled`.
+- Per-channel shard status from `/channels/{channel}/eventsub/health`.
+
+**Procedure**
+1. Confirm degradation reason in `GET /system/health`.
+2. Reconcile affected channels with `?reconcile=true` and verify shard status
+   transitions settle to healthy coverage.
+3. If degradation persists and auto-fallback is disabled, manually enable
+   `chat_websocket_fallback_legacy_enabled=true` as rollback protection.
+4. Return to authoritative webhook mode only after shard coverage stabilizes.
+
+#### 3) Send Chat Message API `4xx`/`5xx` handling
+**Symptoms**
+- `send_api_failure_count` increases in ingress telemetry.
+- Reply outcomes show preflight/API reason codes (`sender_token_mismatch`,
+  `invalid_reply_parent_message_id`, `unknown_400`, transient failures).
+
+**Dependencies**
+- Valid bot OAuth token and `/oauth2/validate` subject match.
+- Non-empty `broadcaster_id`, `sender_id`, and reply payload length within
+  Twitch limits (`1-500` chars).
+
+**Primary variables/origins to verify**
+- `event.message_id` presence for reply threading origin.
+- Bot token subject (`sender_id`) versus configured bot account identity.
+- Message catalog visibility level (`bot_message_level`) if replies appear suppressed.
+
+**Procedure**
+1. Check `GET /system/health.eventsub.ingress_summary` failure reason counters.
+2. Separate deterministic `4xx` validation failures from transient `5xx`/network
+   classes before retry policy changes.
+3. Fix identity/payload mismatches first (`sender_id`, parent message ID,
+   message length).
+4. For transient classes, keep retries bounded and monitor recovery via
+   `reply_sent_count` versus `send_api_failure_count`.
+
+#### 4) Credential expiry remediation
+**Symptoms**
+- `401` from Twitch APIs (conduit registration or send chat).
+- Reconciliation/auth warnings indicating invalid or mismatched token context.
+
+**Dependencies**
+- App access token flow for conduit API + transport subscriptions.
+- Bot user token for Send Chat Message API calls.
+
+**Primary variables/origins to verify**
+- Twitch client credentials configured in setup (`client_id`, `client_secret`).
+- Bot OAuth configuration in `/bot/config`.
+- Token/client pairing validity (`/oauth2/validate` metadata).
+
+**Procedure**
+1. Validate app and bot tokens independently against Twitch validation endpoint.
+2. Re-run bot OAuth flow if bot token subject/scopes are stale or expired.
+3. Confirm conduit reconcile succeeds with app token auth.
+4. Confirm webhook command replies recover (Send API success + reduced 401s).
+
+## Archive: migration and compatibility notes
+- Migration `migrations/20260330_eventsub_conduits.sql` added additive EventSub
+  replay/conduit tables (`eventsub_message_dedupe`, `twitch_conduits`,
+  `twitch_conduit_shards`) plus conduit linkage columns on
+  `event_subscriptions`.
+- Startup includes a compatibility patch for those tables/columns so staggered
+  deploys on legacy SQLite/prod databases can boot before dedicated migration
+  rollout is completed.
 
 ### EventSub HTTPS callback pre-cutover check
 Use this before enabling `chat_ingress_mode=webhook_conduit` in production:
