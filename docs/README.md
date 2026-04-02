@@ -423,6 +423,8 @@ Expected:
   (`https://www.youtube.com/watch?v=uWQQbQ9jqU4`).
 - Exposes REST endpoints for managing songs and queue entries, plus SSE streams
   for queue updates and bot log streaming.
+- Backend container image now copies the shared `bot/` Python package so
+  backend imports like `bot.chat_command_core` resolve in container runtime.
 - `run.sh` initializes the database and starts the server with Uvicorn.
 
 ## Bot Highlights
@@ -431,6 +433,12 @@ Expected:
   `chat_ingress_mode=websocket` or explicit rollback
   (`chat_websocket_fallback_legacy_enabled=true`) is enabled; otherwise the bot
   process remains idle and periodically rechecks only `/system/config`.
+- In `chat_ingress_mode=webhook_conduit`, startup logs now explicitly state that
+  webhook/conduit is the canonical ingress path and websocket chat subscriptions
+  are rollback-only.
+- Legacy websocket rollback keeps only minimal `subscribe_websocket` hooks;
+  prior websocket subscription reuse/recovery loops are intentionally disabled
+  to avoid accidental authoritative use during normal operations.
 - Honors each channel's `bot_message_level` (`mute`, `normal`, `verbose`,
   `debug`) when deciding whether to send chat output; suppressed messages still
   go to backend bot logs for observability.

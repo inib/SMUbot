@@ -89,6 +89,8 @@ This document summarizes the REST endpoints exposed by `backend_app.py`.
 3. Rollback playbook:
    - Enable `chat_websocket_fallback_legacy_enabled=true` for immediate websocket subscription restore.
    - If required, switch `chat_ingress_mode=websocket`.
+   - Bot runtime treats websocket as rollback-only in authoritative mode: no
+     websocket subscription reuse/recovery loops should be considered canonical.
    - Keep at least one rollback smoke check (`!request` or `!points`) active in
      staging for one additional release window before deleting websocket test
      fixtures.
