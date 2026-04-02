@@ -423,6 +423,8 @@ Expected:
   (`https://www.youtube.com/watch?v=uWQQbQ9jqU4`).
 - Exposes REST endpoints for managing songs and queue entries, plus SSE streams
   for queue updates and bot log streaming.
+- Backend container image now copies the shared `bot/` Python package so
+  backend imports like `bot.chat_command_core` resolve in container runtime.
 - `run.sh` initializes the database and starts the server with Uvicorn.
 
 ## Bot Highlights

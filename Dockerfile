@@ -7,6 +7,7 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 COPY backend_app.py ./backend_app.py
 COPY command_resolution.py ./command_resolution.py
+COPY bot ./bot
 COPY run.sh ./run.sh
 RUN chmod +x run.sh
 VOLUME ["/data"]
