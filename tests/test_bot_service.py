@@ -95,6 +95,7 @@ class BotServiceTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(asyncio.CancelledError):
                 await service.run()
 
+        self.backend.get_system_config.assert_awaited()
         service.apply_settings.assert_awaited_once()
         args, kwargs = service.apply_settings.call_args
         settings = args[0]
@@ -106,6 +107,30 @@ class BotServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(settings.bot_user_id, "1234")
         self.assertEqual(settings.scopes, ["user:bot"])
         self.assertTrue(settings.enabled)
+
+    async def test_run_skips_bot_config_poll_when_runtime_not_required(self) -> None:
+        service = bot_app.BotService(
+            self.backend,
+            bot_factory=self.bot_factory,
+            task_factory=asyncio.create_task,
+        )
+        self.backend.get_system_config = AsyncMock(
+            return_value={
+                "chat_ingress_mode": "webhook_conduit",
+                "chat_websocket_fallback_legacy_enabled": False,
+            }
+        )
+        self.backend.get_bot_config = AsyncMock(side_effect=AssertionError("must not poll /bot/config"))
+        service.apply_settings = AsyncMock()
+        sleep_mock = AsyncMock(side_effect=asyncio.CancelledError())
+
+        with patch.object(bot_app.asyncio, "sleep", sleep_mock):
+            with self.assertRaises(asyncio.CancelledError):
+                await service.run()
+
+        self.backend.get_system_config.assert_awaited_once()
+        self.backend.get_bot_config.assert_not_awaited()
+        service.apply_settings.assert_not_awaited()
 
     async def test_settings_missing_credentials_disable_bot(self) -> None:
         service = bot_app.BotService(
