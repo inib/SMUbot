@@ -42,14 +42,18 @@ This document summarizes the REST endpoints exposed by `backend_app.py`.
 - `eventsub.ingress_summary` includes compact operational counters:
   - callback status buckets (`2xx/4xx/5xx`),
   - signature failures,
+  - last signature failure reason (`last_errors.signature_failure_reason_code`),
   - dedupe hits,
   - Send Chat API failure reason counters (`invalid_reply_parent_message_id`,
     `sender_token_mismatch`, `invalid_sender_broadcaster_relation`,
     `empty_or_invalid_message`, `unknown_400`, transient classes),
   - per-channel webhook command dispatch outcomes,
   - conduit shard status transitions,
+  - last reply preflight failure reason (`last_errors.reply_preflight_failure_reason_code`),
   - recent callback throughput + last error timestamps/diagnostic snippets.
 - `eventsub.authoritative_guard` includes degradation reasons (`missing_healthy_shards`, `callback_errors_spike`) and whether fallback was applied.
+- `eventsub.authoritative_guard.runtime_invariants` reports runtime checks for
+  conduit shard-secret resolvability and sender token-subject resolvability.
 - Recommended operator thresholds:
   - callback error threshold: 5 errors / 5 minutes,
   - minimum healthy shards: 1 (or expected shard count for larger deployments).
@@ -264,6 +268,29 @@ Channel settings include queue intake controls:
   - Send failure reason counters (`sender_token_mismatch`,
     `invalid_reply_parent_message_id`, `unknown_400`, transient classes).
   - `event.message_id` from EventSub payload for reply threading.
+
+### `invalid_signature` troubleshooting runbook
+- **Description**: Recover conduit signature validation when active shard
+  assignments cannot resolve usable shard secret material.
+- **Dependencies**: `twitch_conduit_shards` secret state, conduit assignment
+  linkage (`event_subscriptions.conduit_id` + `event_subscriptions.shard_id`),
+  and callback signature headers.
+- **Code-customers**: Operators handling EventSub `403 invalid_signature`.
+- **Used variables/origin**:
+  - `eventsub.ingress_summary.last_errors.signature_failure_reason_code`.
+  - `eventsub.authoritative_guard.runtime_invariants.unresolved_assignments`.
+  - Per-channel reconcile output from `/channels/{channel}/eventsub/health`.
+
+### `preflight_token_subject_unresolved` troubleshooting runbook
+- **Description**: Restore webhook reply preflight when sender token subject is
+  not resolvable from Twitch `/oauth2/validate`.
+- **Dependencies**: Valid bot user token from `/bot/config`, Twitch token
+  validation reachability, and sender identity parity guard.
+- **Code-customers**: Operators triaging skipped Send Chat API calls.
+- **Used variables/origin**:
+  - `eventsub.ingress_summary.last_errors.reply_preflight_failure_reason_code`.
+  - `eventsub.authoritative_guard.runtime_invariants.sender_token_subject_resolvable`.
+  - Bot sender token subject (`/oauth2/validate` `user_id`).
 
 ### Credential expiry remediation runbook
 - **Description**: Recover from expired/invalid app or bot credentials impacting
@@ -578,7 +605,14 @@ Certain events award priority points and are fed by EventSub subscriptions creat
 6. Operator verification endpoints:
    - Call `GET /system/health` and confirm global conduit/shard coverage reports healthy.
    - Call `GET /channels/{channel}/eventsub/health?reconcile=true` and confirm per-channel subscriptions/conduit/shard coverage reconcile successfully.
-7. Legacy bug note:
+7. Post-deploy invariant verification commands:
+   - `curl -sS http://localhost:7070/system/health | jq '.eventsub.authoritative_guard.runtime_invariants'`
+   - `curl -sS http://localhost:7070/system/health | jq '.eventsub.ingress_summary.last_errors | {signature_failure_reason_code, reply_preflight_failure_reason_code}'`
+   - Expected healthy values:
+     - `conduit_signature_secret_resolvable=true`
+     - `sender_token_subject_resolvable=true`
+     - `unresolved_assignment_count=0`
+8. Legacy bug note:
    - If you previously saw `subscription id missing` on valid conduit verification callbacks, upgrade to this patch level; the callback now branches verification shape before subscription lookup.
 
 ### Channel event stream

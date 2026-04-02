@@ -110,9 +110,10 @@ unlocks the API for the bot, queue manager, and public web frontend.
   - `GET /system/health.eventsub.ingress_summary` adds compact runtime counters:
     callback 2xx/4xx/5xx, signature failures, dedupe hits, per-channel command
     dispatch outcomes, shard status transitions, Send Chat API failure reasons
-    (including mapped 400 validation classes), and last error timestamps.
+    (including mapped 400 validation classes), last signature failure reason,
+    last reply preflight failure reason, and last error timestamps.
   - `GET /system/health.eventsub.authoritative_guard` reports degradation
-    reasons and whether auto-fallback was applied.
+    reasons, whether auto-fallback was applied, and runtime invariant checks.
   - `GET /channels/{channel}/eventsub/health` reports per-channel shard
     assignment state and can trigger reconcile with `?reconcile=true`, which
     refreshes local/conduit/shard/coverage fields after reconciliation.
@@ -294,7 +295,47 @@ unlocks the API for the bot, queue manager, and public web frontend.
 4. For transient classes, keep retries bounded and monitor recovery via
    `reply_sent_count` versus `send_api_failure_count`.
 
-#### 4) Credential expiry remediation
+#### 4) `invalid_signature` (conduit shard secret path)
+**Symptoms**
+- `eventsub.ingress_summary.last_errors.signature_failure_reason_code`
+  repeatedly reports `invalid_signature`.
+- `eventsub.authoritative_guard.runtime_invariants` reports unresolved
+  conduit assignments.
+
+**Dependencies**
+- Active conduit assignment linkage (`event_subscriptions.conduit_id/shard_id`).
+- Resolvable shard secret material in `twitch_conduit_shards`.
+
+**Primary variables/origins to verify**
+- `runtime_invariants.conduit_signature_secret_resolvable`.
+- `runtime_invariants.unresolved_assignments[]`.
+
+**Procedure**
+1. Run `GET /system/health` and inspect `eventsub.authoritative_guard.runtime_invariants`.
+2. Reconcile channel assignments with
+   `GET /channels/{channel}/eventsub/health?reconcile=true`.
+3. Confirm unresolved assignment count returns to `0`.
+
+#### 5) `preflight_token_subject_unresolved` (sender identity path)
+**Symptoms**
+- `eventsub.ingress_summary.last_errors.reply_preflight_failure_reason_code`
+  reports `preflight_token_subject_unresolved`.
+- Webhook replies are skipped before Send Chat API call.
+
+**Dependencies**
+- Valid bot access token in `/bot/config`.
+- Reachable Twitch `/oauth2/validate` endpoint.
+
+**Primary variables/origins to verify**
+- `runtime_invariants.sender_token_subject_resolvable`.
+- Bot token subject (`/oauth2/validate` `user_id`) vs configured sender identity.
+
+**Procedure**
+1. Refresh/reauthorize bot OAuth token if validation subject is missing.
+2. Re-check `GET /system/health` and confirm invariant becomes `true`.
+3. Confirm preflight reason field stops reporting unresolved subject failures.
+
+#### 6) Credential expiry remediation
 **Symptoms**
 - `401` from Twitch APIs (conduit registration or send chat).
 - Reconciliation/auth warnings indicating invalid or mismatched token context.
@@ -343,6 +384,9 @@ Expected:
 2. If degraded (`missing_healthy_shards` / `callback_errors_spike`), run:
    - `GET /channels/{channel}/eventsub/health?reconcile=true`
    - validate callback URL config + shard statuses.
+   - verify invariants explicitly:
+     - `curl -sS http://localhost:7070/system/health | jq '.eventsub.authoritative_guard.runtime_invariants'`
+     - `curl -sS http://localhost:7070/system/health | jq '.eventsub.ingress_summary.last_errors | {signature_failure_reason_code, reply_preflight_failure_reason_code}'`
 3. Emergency rollback:
    - set `chat_websocket_fallback_legacy_enabled=true`,
    - optionally switch `chat_ingress_mode=websocket` if operator policy
