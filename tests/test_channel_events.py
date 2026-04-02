@@ -1994,8 +1994,9 @@ remove:
         try:
             backend_app._record_ingress_metric("callback_status", key="2xx")
             backend_app._record_ingress_metric("callback_status", key="4xx")
-            backend_app._record_ingress_metric("signature_failure")
+            backend_app._record_ingress_metric("signature_failure", key="invalid_signature")
             backend_app._record_ingress_metric("send_api_failure_reason", key="unknown_400")
+            backend_app._record_ingress_metric("send_api_failure_reason", key="preflight_token_subject_unresolved")
         finally:
             db.close()
 
@@ -2008,6 +2009,46 @@ remove:
         self.assertGreaterEqual((summary.get("callback_status") or {}).get("4xx", 0), 1)
         self.assertGreaterEqual(summary.get("signature_failures", 0), 1)
         self.assertGreaterEqual((summary.get("send_api_failure_reasons") or {}).get("unknown_400", 0), 1)
+        last_errors = summary.get("last_errors") or {}
+        self.assertEqual(last_errors.get("signature_failure_reason_code"), "invalid_signature")
+        self.assertEqual(
+            last_errors.get("reply_preflight_failure_reason_code"),
+            "preflight_token_subject_unresolved",
+        )
+
+    def test_runtime_invariant_detects_unresolved_conduit_assignment(self) -> None:
+        """Report unresolved conduit shard secret path in runtime invariants.
+
+        Dependencies: Persists conduit chat assignment rows without matching
+        shard metadata and calls runtime invariant evaluator directly.
+        Code customers: ingress guard startup/runtime invariant diagnostics.
+        Used variables/origin: assignment conduit/shard IDs come from persisted
+        ``event_subscriptions`` rows and are expected to fail secret resolution.
+        """
+
+        details = _setup_channel()
+        db = backend_app.SessionLocal()
+        try:
+            db.add(
+                backend_app.EventSubscription(
+                    channel_id=details["channel_pk"],
+                    twitch_subscription_id="sub-invariant-missing-secret",
+                    type="channel.chat.message",
+                    status="enabled",
+                    secret=backend_app.EVENTSUB_CONDUIT_SECRET_PLACEHOLDER,
+                    callback="https://example/callback",
+                    transport="conduit",
+                    conduit_id="conduit-invariant-missing",
+                    shard_id="9",
+                )
+            )
+            db.commit()
+            invariants = backend_app._evaluate_ingress_runtime_invariants(db, now=backend_app.datetime.utcnow())
+            self.assertFalse(invariants.get("conduit_signature_secret_resolvable"))
+            self.assertGreaterEqual(invariants.get("unresolved_assignment_count", 0), 1)
+            self.assertFalse(invariants.get("sender_token_subject_resolvable"))
+        finally:
+            db.close()
 
     def test_ingress_guard_degradation_can_auto_fallback_websocket_mode(self) -> None:
         """Auto-fallback to websocket mode when authoritative ingress is degraded."""

@@ -229,12 +229,14 @@ _INGRESS_METRICS: dict[str, Any] = {
     "shard_status_transitions": {},
     "last_errors": {
         "signature_failure_at": None,
+        "signature_failure_reason_code": None,
         "callback_4xx_at": None,
         "callback_5xx_at": None,
         "guard_degraded_at": None,
         "send_api_failure_at": None,
         "send_api_failure_reason_code": None,
         "send_api_failure_snippet": None,
+        "reply_preflight_failure_reason_code": None,
     },
     "callback_events": [],
 }
@@ -1001,6 +1003,8 @@ def _record_ingress_metric(metric: str, *, key: Optional[str] = None, timestamp:
         elif metric == "signature_failure":
             _INGRESS_METRICS["signature_failures"] = int(_INGRESS_METRICS.get("signature_failures", 0)) + 1
             _INGRESS_METRICS["last_errors"]["signature_failure_at"] = now
+            if key:
+                _INGRESS_METRICS["last_errors"]["signature_failure_reason_code"] = key
         elif metric == "dedupe_hit":
             _INGRESS_METRICS["dedupe_hits"] = int(_INGRESS_METRICS.get("dedupe_hits", 0)) + 1
         elif metric == "command_dispatch_outcome" and key:
@@ -1018,6 +1022,8 @@ def _record_ingress_metric(metric: str, *, key: Optional[str] = None, timestamp:
         elif metric == "send_api_failure_reason" and key:
             reasons = _INGRESS_METRICS["send_api_failure_reasons"]
             reasons[key] = int(reasons.get(key, 0)) + 1
+            if key.startswith("preflight_"):
+                _INGRESS_METRICS["last_errors"]["reply_preflight_failure_reason_code"] = key
         elif metric == "shard_status_transition" and key:
             transitions = _INGRESS_METRICS["shard_status_transitions"]
             transitions[key] = int(transitions.get(key, 0)) + 1
@@ -1070,10 +1076,20 @@ def _ingress_metrics_snapshot(now: datetime) -> dict[str, Any]:
 
 
 def _evaluate_ingress_guard(db: Session, now: datetime, *, apply_fallback: bool) -> dict[str, Any]:
-    """Evaluate authoritative webhook-conduit health and optional fallback policy."""
+    """Evaluate authoritative webhook-conduit guard health and runtime invariants.
+
+    Dependencies: Reads ingress counters via ``_ingress_metrics_snapshot``,
+    shard state from ``TwitchConduitShard``, persisted settings for fallback
+    thresholds, and invariant status from ``_evaluate_ingress_runtime_invariants``.
+    Code customers: startup guard checks, ``/system/health`` diagnostics, and
+    webhook callback post-processing guard reevaluation.
+    Used variables/origin: ``now`` comes from runtime clock and ``db`` is the
+    request/startup SQLAlchemy session used for shard and settings reads.
+    """
 
     thresholds = _ingress_guard_thresholds()
     summary = _ingress_metrics_snapshot(now)
+    invariants = _evaluate_ingress_runtime_invariants(db, now=now)
     shard_rows = db.query(TwitchConduitShard).all()
     healthy_shards = sum(1 for shard in shard_rows if (shard.status or "").lower() == "enabled")
     degraded_reasons: list[str] = []
@@ -1083,6 +1099,10 @@ def _evaluate_ingress_guard(db: Session, now: datetime, *, apply_fallback: bool)
     callback_errors = int(recent["callbacks_4xx"]) + int(recent["callbacks_5xx"])
     if callback_errors >= int(thresholds["callback_error_threshold"]):
         degraded_reasons.append("callback_errors_spike")
+    if not invariants["conduit_signature_secret_resolvable"]:
+        degraded_reasons.append("invalid_signature")
+    if not invariants["sender_token_subject_resolvable"]:
+        degraded_reasons.append("preflight_token_subject_unresolved")
     degraded = bool(degraded_reasons)
     auto_fallback_enabled = _env_flag(get_setting("chat_ingress_guard_auto_fallback_enabled", "0"))
     fallback_applied = False
@@ -1102,6 +1122,7 @@ def _evaluate_ingress_guard(db: Session, now: datetime, *, apply_fallback: bool)
         "degraded": degraded,
         "reasons": degraded_reasons,
         "healthy_shards": healthy_shards,
+        "runtime_invariants": invariants,
         "thresholds": {k: int(v) for k, v in thresholds.items()},
         "auto_fallback_enabled": auto_fallback_enabled,
         "auto_fallback_applied": fallback_applied,
@@ -1109,8 +1130,108 @@ def _evaluate_ingress_guard(db: Session, now: datetime, *, apply_fallback: bool)
     }
 
 
+def _resolve_bot_sender_token_subject_cached(
+    access_token: str,
+    *,
+    now: datetime,
+    ttl_seconds: int = 120,
+) -> Optional[str]:
+    """Resolve bot sender token subject with short-lived cache for guard loops.
+
+    Dependencies: Uses process-local cache state and
+    ``_resolve_twitch_token_subject_id`` for Twitch validation when cache misses.
+    Code customers: ``_evaluate_ingress_runtime_invariants`` guard checks.
+    Used variables/origin: ``access_token`` comes from persisted ``BotConfig``
+    credentials; ``now`` is the guard evaluation timestamp.
+    """
+
+    token = (access_token or "").strip()
+    if not token:
+        return None
+    cache = getattr(_resolve_bot_sender_token_subject_cached, "_cache", None)
+    if not isinstance(cache, dict):
+        cache = {}
+        setattr(_resolve_bot_sender_token_subject_cached, "_cache", cache)
+    expires_at = cache.get("expires_at")
+    if cache.get("access_token") == token and isinstance(expires_at, datetime) and now <= expires_at:
+        subject = cache.get("subject_id")
+        return str(subject).strip() if subject else None
+    subject_id = _resolve_twitch_token_subject_id(token)
+    cache["access_token"] = token
+    cache["subject_id"] = subject_id
+    cache["expires_at"] = now + timedelta(seconds=max(ttl_seconds, 15))
+    return subject_id
+
+
+def _evaluate_ingress_runtime_invariants(db: Session, *, now: datetime) -> dict[str, Any]:
+    """Evaluate critical conduit-secret and sender-token runtime invariants.
+
+    Dependencies: Reads conduit assignment rows from ``EventSubscription``,
+    conduit shard secret material from ``TwitchConduit``/``TwitchConduitShard``,
+    and bot OAuth credentials from ``BotConfig``.
+    Code customers: ``_evaluate_ingress_guard`` startup/runtime degradation
+    checks and operator diagnostics exposed via ``/system/health``.
+    Used variables/origin: ``now`` is reused for secret grace checks and token
+    subject cache expiry; ``db`` supplies persisted assignment/config state.
+    """
+
+    assignment_rows = (
+        db.query(EventSubscription.conduit_id, EventSubscription.shard_id)
+        .filter(
+            EventSubscription.type == EVENTSUB_CONDUIT_CHAT_TYPE,
+            EventSubscription.transport == "conduit",
+            EventSubscription.status == "enabled",
+        )
+        .all()
+    )
+    assignment_pairs = {
+        (str(conduit_id or "").strip(), str(shard_id or "").strip())
+        for conduit_id, shard_id in assignment_rows
+        if str(conduit_id or "").strip() and str(shard_id or "").strip()
+    }
+    unresolved_assignments: list[dict[str, str]] = []
+    for conduit_id, shard_id in sorted(assignment_pairs):
+        shard_row = (
+            db.query(TwitchConduitShard)
+            .join(TwitchConduit, TwitchConduitShard.conduit_fk == TwitchConduit.id)
+            .filter(
+                TwitchConduit.conduit_id == conduit_id,
+                TwitchConduitShard.shard_id == shard_id,
+            )
+            .one_or_none()
+        )
+        if not shard_row:
+            unresolved_assignments.append(
+                {"conduit_id": conduit_id, "shard_id": shard_id, "reason_code": "unknown_conduit_shard"}
+            )
+            continue
+        if not _active_conduit_shard_secret_candidates(shard_row, now=now):
+            unresolved_assignments.append(
+                {"conduit_id": conduit_id, "shard_id": shard_id, "reason_code": "missing_shard_secret"}
+            )
+
+    cfg = db.query(BotConfig).order_by(BotConfig.id.asc()).first()
+    bot_access_token = (cfg.access_token if cfg and cfg.access_token else "").strip()
+    token_subject_id = _resolve_bot_sender_token_subject_cached(bot_access_token, now=now) if bot_access_token else None
+
+    return {
+        "conduit_signature_secret_resolvable": not unresolved_assignments,
+        "sender_token_subject_resolvable": bool(token_subject_id),
+        "active_assignment_count": len(assignment_pairs),
+        "unresolved_assignment_count": len(unresolved_assignments),
+        "unresolved_assignments": unresolved_assignments[:10],
+        "bot_sender_subject_id": token_subject_id,
+    }
+
+
 def run_ingress_guard_startup_check() -> None:
-    """Run a startup ingress guard check and emit high-severity alerts when degraded."""
+    """Run startup ingress guard checks, including runtime invariant validation.
+
+    Dependencies: Uses ``SessionLocal`` and ``_evaluate_ingress_guard``.
+    Code customers: Module startup bootstrap after schema compatibility checks.
+    Used variables/origin: active only when ``chat_ingress_mode`` is
+    ``webhook_conduit`` so guard checks match authoritative ingress operation.
+    """
 
     db = SessionLocal()
     try:
@@ -1778,6 +1899,7 @@ def _send_eventsub_chat_reply(db: Session, channel: ActiveChannel, reply: dict[s
     if preflight_reason_code or not payload or not headers:
         _record_ingress_metric("send_api_failure")
         _record_ingress_metric("send_api_failure_reason", key="preflight_rejected")
+        _record_ingress_metric("send_api_failure_reason", key=preflight_reason_code or "preflight_unknown_failure")
         logger.warning(
             "Webhook reply send skipped by preflight: reason_code=%s channel=%s template_key=%s",
             preflight_reason_code or "preflight_unknown_failure",
@@ -9778,7 +9900,7 @@ async def eventsub_callback(request: FastAPIRequest, db: Session = Depends(get_d
                 return JSONResponse(status_code=202, content={"detail": "unknown subscription"})
             secret = subscription.secret
             if not _verify_eventsub_signature(secret, message_id, timestamp, body, signature):
-                _record_ingress_metric("signature_failure")
+                _record_ingress_metric("signature_failure", key="invalid_signature")
                 logger.warning(
                     "EventSub callback rejected: reason_code=invalid_signature message_id=%s message_type=%s verification_shape=%s",
                     message_id,
@@ -9811,7 +9933,7 @@ async def eventsub_callback(request: FastAPIRequest, db: Session = Depends(get_d
                 )
                 raise HTTPException(status_code=400, detail=resolve_error or "conduit_shard_secret_unavailable")
             if not _verify_eventsub_signature(secret, message_id, timestamp, body, signature):
-                _record_ingress_metric("signature_failure")
+                _record_ingress_metric("signature_failure", key="invalid_signature")
                 logger.warning(
                     "EventSub callback rejected: reason_code=invalid_signature message_id=%s message_type=%s verification_shape=%s conduit_id=%s shard_id=%s",
                     message_id,
@@ -9921,7 +10043,6 @@ async def eventsub_callback(request: FastAPIRequest, db: Session = Depends(get_d
             break
 
     if not signature_match:
-        _record_ingress_metric("signature_failure")
         if is_conduit_chat_notification:
             stale_secret_detected = _verify_eventsub_signature(
                 subscription.secret,
@@ -9931,6 +10052,7 @@ async def eventsub_callback(request: FastAPIRequest, db: Session = Depends(get_d
                 signature,
             )
             reason_code = "stale_shard_secret" if stale_secret_detected else "invalid_signature"
+            _record_ingress_metric("signature_failure", key=reason_code)
             logger.warning(
                 "EventSub callback rejected: reason_code=%s message_id=%s message_type=%s subscription_id=%s conduit_id=%s shard_id=%s signature_mode=conduit_shard_secret",
                 reason_code,
@@ -9951,6 +10073,7 @@ async def eventsub_callback(request: FastAPIRequest, db: Session = Depends(get_d
                 },
             )
         else:
+            _record_ingress_metric("signature_failure", key="invalid_signature")
             logger.warning(
                 "EventSub callback rejected: reason_code=invalid_signature message_id=%s message_type=%s subscription_id=%s signature_mode=legacy_subscription_secret",
                 message_id,
