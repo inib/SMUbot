@@ -341,7 +341,7 @@ class BotServiceTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(bot_app.asyncio, "create_task", fake_create_task), patch.object(bot_app, "push_console_event", AsyncMock()):
             await song_bot.sync_channels()
 
-        self.assertFalse(song_bot._websocket_ingress_enabled)
+        self.assertFalse(song_bot._websocket_fallback_enabled)
 
     async def test_sync_channels_keeps_websocket_rollback_smoke_harness_enabled(self) -> None:
         """Keep minimal websocket rollback smoke coverage during migration window.
@@ -384,7 +384,7 @@ class BotServiceTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(bot_app.asyncio, "create_task", fake_create_task), patch.object(bot_app, "push_console_event", AsyncMock()):
             await song_bot.sync_channels()
 
-        self.assertTrue(song_bot._websocket_ingress_enabled)
+        self.assertTrue(song_bot._websocket_fallback_enabled)
         song_bot._subscribe_for_channel.assert_any_await("1")
         self.assertGreaterEqual(song_bot._subscribe_for_channel.await_count, 1)
 
