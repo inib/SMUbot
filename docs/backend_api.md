@@ -78,6 +78,12 @@ This document summarizes the REST endpoints exposed by `backend_app.py`.
 3. Rollback playbook:
    - Enable `chat_websocket_fallback_legacy_enabled=true` for immediate websocket subscription restore.
    - If required, switch `chat_ingress_mode=websocket`.
+   - Keep at least one rollback smoke check (`!request` or `!points`) active in
+     staging for one additional release window before deleting websocket test
+     fixtures.
+   - If product decision explicitly confirms **no websocket rollback supported**,
+     declare rollback EOL and remove both the smoke harness and websocket toggle
+     path together.
    - Re-run conduit reconcile + callback validation before returning to authoritative mode.
 
 ## Authentication
