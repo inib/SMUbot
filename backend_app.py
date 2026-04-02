@@ -3,7 +3,7 @@ import math
 import contextlib
 from functools import lru_cache
 from typing import Optional, List, Any, Dict, Mapping, Iterable, Literal, Sequence
-from threading import Lock
+from threading import Event, Lock, Thread
 import os
 import json
 import time
@@ -115,6 +115,9 @@ DEV_MODE = True
 APP_ACCESS_TOKEN: Optional[str] = None
 APP_TOKEN_EXPIRES = 0
 BOT_USER_ID: Optional[str] = None
+BOT_TOKEN_REFRESH_POLL_SECONDS = 60
+BOT_TOKEN_REFRESH_LEEWAY_SECONDS = 300
+BOT_TOKEN_REFRESH_FAILURE_GRACE_SECONDS = 900
 
 EVENTSUB_EVENT_MAP: dict[str, str] = {
     "channel.follow": "follow",
@@ -240,6 +243,17 @@ _INGRESS_METRICS: dict[str, Any] = {
     },
     "callback_events": [],
 }
+
+_BOT_TOKEN_REFRESH_LOCK = Lock()
+_BOT_TOKEN_REFRESH_STATE: dict[str, Any] = {
+    "last_attempt_at": None,
+    "last_success_at": None,
+    "last_failure_at": None,
+    "last_error": None,
+    "failure_count": 0,
+}
+_BOT_TOKEN_REFRESH_STOP_EVENT = Event()
+_BOT_TOKEN_REFRESH_WORKER: Optional[Thread] = None
 
 engine = create_engine(DB_URL, connect_args={"check_same_thread": False} if DB_URL.startswith("sqlite") else {})
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
@@ -1103,6 +1117,8 @@ def _evaluate_ingress_guard(db: Session, now: datetime, *, apply_fallback: bool)
         degraded_reasons.append("invalid_signature")
     if not invariants["sender_token_subject_resolvable"]:
         degraded_reasons.append("preflight_token_subject_unresolved")
+    if not invariants.get("token_refresh_healthy", True):
+        degraded_reasons.append("token_refresh_unhealthy")
     degraded = bool(degraded_reasons)
     auto_fallback_enabled = _env_flag(get_setting("chat_ingress_guard_auto_fallback_enabled", "0"))
     fallback_applied = False
@@ -1163,6 +1179,203 @@ def _resolve_bot_sender_token_subject_cached(
     return subject_id
 
 
+def _record_bot_token_refresh_result(
+    *,
+    success: bool,
+    now: datetime,
+    error: Optional[str] = None,
+) -> None:
+    """Persist in-memory token refresh worker outcomes for health diagnostics.
+
+    Dependencies: Mutates ``_BOT_TOKEN_REFRESH_STATE`` under
+    ``_BOT_TOKEN_REFRESH_LOCK``.
+    Code customers: ``_refresh_bot_access_token_once`` and ingress guard
+    runtime invariant telemetry.
+    Used variables/origin: ``now`` comes from worker runtime clock and
+    ``error`` captures Twitch/token refresh failures.
+    """
+
+    with _BOT_TOKEN_REFRESH_LOCK:
+        _BOT_TOKEN_REFRESH_STATE["last_attempt_at"] = now
+        if success:
+            _BOT_TOKEN_REFRESH_STATE["last_success_at"] = now
+            _BOT_TOKEN_REFRESH_STATE["last_error"] = None
+            _BOT_TOKEN_REFRESH_STATE["failure_count"] = 0
+            return
+        _BOT_TOKEN_REFRESH_STATE["last_failure_at"] = now
+        _BOT_TOKEN_REFRESH_STATE["last_error"] = (error or "unknown_error").strip()[:300]
+        _BOT_TOKEN_REFRESH_STATE["failure_count"] = int(_BOT_TOKEN_REFRESH_STATE.get("failure_count", 0)) + 1
+
+
+def _refresh_deadline(cfg: "BotConfig", *, leeway_seconds: int = BOT_TOKEN_REFRESH_LEEWAY_SECONDS) -> datetime:
+    """Compute token refresh deadline from ``BotConfig.expires_at`` with leeway.
+
+    Dependencies: Uses persisted ``BotConfig.expires_at`` when present.
+    Code customers: ``_refresh_bot_access_token_once`` worker refresh gate.
+    Used variables/origin: ``cfg.expires_at`` is written by bot OAuth callback
+    and previous token refresh updates.
+    """
+
+    expiry = cfg.expires_at or datetime.utcnow()
+    return expiry - timedelta(seconds=max(int(leeway_seconds), 0))
+
+
+def _refresh_token_health_snapshot(*, now: datetime) -> dict[str, Any]:
+    """Return refresh-worker health state used by ingress runtime invariants.
+
+    Dependencies: Reads ``_BOT_TOKEN_REFRESH_STATE`` under lock and compares
+    timestamps with ``BOT_TOKEN_REFRESH_FAILURE_GRACE_SECONDS``.
+    Code customers: ``_evaluate_ingress_runtime_invariants`` and
+    ``/system/health`` ingress guard diagnostics.
+    Used variables/origin: ``now`` comes from guard/worker runtime clock.
+    """
+
+    with _BOT_TOKEN_REFRESH_LOCK:
+        state = dict(_BOT_TOKEN_REFRESH_STATE)
+    last_failure_at = state.get("last_failure_at")
+    last_success_at = state.get("last_success_at")
+    failure_recent = (
+        isinstance(last_failure_at, datetime)
+        and now - last_failure_at <= timedelta(seconds=BOT_TOKEN_REFRESH_FAILURE_GRACE_SECONDS)
+        and (not isinstance(last_success_at, datetime) or last_success_at < last_failure_at)
+    )
+    return {
+        "healthy": not failure_recent,
+        "last_attempt_at": state.get("last_attempt_at"),
+        "last_success_at": last_success_at,
+        "last_failure_at": last_failure_at,
+        "last_error": state.get("last_error"),
+        "failure_count": int(state.get("failure_count") or 0),
+        "failure_grace_seconds": BOT_TOKEN_REFRESH_FAILURE_GRACE_SECONDS,
+    }
+
+
+def _refresh_bot_access_token_once(*, now: Optional[datetime] = None) -> dict[str, Any]:
+    """Refresh persisted bot OAuth credentials when expiry approaches.
+
+    Dependencies: Reads/stores ``BotConfig`` via ``SessionLocal`` and calls
+    Twitch ``/oauth2/token`` refresh-token grant with configured client creds.
+    Code customers: Background refresh worker loop; can also be used by tests.
+    Used variables/origin: refresh credentials come from persisted
+    ``BotConfig.access_token``/``refresh_token``/``expires_at``.
+    """
+
+    current_time = now or datetime.utcnow()
+    db = SessionLocal()
+    try:
+        cfg = db.query(BotConfig).order_by(BotConfig.id.asc()).first()
+        if not cfg:
+            return {"status": "missing_config"}
+        refresh_token = str(cfg.refresh_token or "").strip()
+        access_token = str(cfg.access_token or "").strip()
+        if not refresh_token or not access_token:
+            return {"status": "missing_credentials"}
+        deadline = _refresh_deadline(cfg)
+        if current_time < deadline:
+            return {
+                "status": "not_due",
+                "refresh_due_at": deadline,
+                "expires_at": cfg.expires_at,
+            }
+        client_id = get_twitch_client_id()
+        client_secret = get_twitch_client_secret()
+        if not client_id or not client_secret:
+            reason = "twitch_oauth_not_configured"
+            _record_bot_token_refresh_result(success=False, now=current_time, error=reason)
+            return {"status": "error", "reason": reason}
+        response = requests.post(
+            "https://id.twitch.tv/oauth2/token",
+            data={
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+                "client_id": client_id,
+                "client_secret": client_secret,
+            },
+            timeout=10,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        next_access = str(payload.get("access_token") or "").strip()
+        next_refresh = str(payload.get("refresh_token") or "").strip() or refresh_token
+        if not next_access:
+            raise RuntimeError("missing_access_token_in_refresh_response")
+        expires_in = payload.get("expires_in")
+        refreshed_scopes = payload.get("scope")
+        expires_at = cfg.expires_at
+        if isinstance(expires_in, (int, float)) and int(expires_in) > 0:
+            expires_at = current_time + timedelta(seconds=int(expires_in))
+        cfg.access_token = next_access
+        cfg.refresh_token = next_refresh
+        cfg.expires_at = expires_at
+        if isinstance(refreshed_scopes, list):
+            normalized_scopes = _normalize_scope_list(refreshed_scopes)
+            cfg.scopes = " ".join(normalized_scopes) if normalized_scopes else cfg.scopes
+        cfg.updated_at = current_time
+        db.commit()
+        _record_bot_token_refresh_result(success=True, now=current_time)
+        logger.info(
+            "BOT_TOKEN_REFRESH_SUCCESS expires_at=%s",
+            expires_at.isoformat() if isinstance(expires_at, datetime) else "<unknown>",
+        )
+        return {
+            "status": "refreshed",
+            "expires_at": expires_at,
+            "refresh_due_at": _refresh_deadline(cfg),
+        }
+    except Exception as exc:
+        db.rollback()
+        _record_bot_token_refresh_result(success=False, now=current_time, error=str(exc))
+        logger.exception("BOT_TOKEN_REFRESH_FAILED error=%s", exc)
+        return {"status": "error", "reason": str(exc)}
+    finally:
+        db.close()
+
+
+def _bot_token_refresh_worker_loop(stop_event: Event) -> None:
+    """Run a backend-managed bot token refresh loop independent of websocket runtime.
+
+    Dependencies: Calls ``_refresh_bot_access_token_once`` on a fixed cadence
+    and uses ``threading.Event`` for cooperative process shutdown.
+    Code customers: ``start_bot_token_refresh_worker`` startup bootstrap.
+    Used variables/origin: cadence comes from
+    ``BOT_TOKEN_REFRESH_POLL_SECONDS``; credentials are read from ``BotConfig``.
+    """
+
+    logger.info(
+        "BOT_TOKEN_REFRESH_WORKER_STARTED poll_seconds=%s leeway_seconds=%s",
+        BOT_TOKEN_REFRESH_POLL_SECONDS,
+        BOT_TOKEN_REFRESH_LEEWAY_SECONDS,
+    )
+    while not stop_event.is_set():
+        _refresh_bot_access_token_once()
+        stop_event.wait(timeout=max(int(BOT_TOKEN_REFRESH_POLL_SECONDS), 10))
+
+
+def start_bot_token_refresh_worker() -> None:
+    """Start singleton background worker that keeps bot OAuth token refreshed.
+
+    Dependencies: Spawns daemon ``Thread`` targeting
+    ``_bot_token_refresh_worker_loop``.
+    Code customers: module startup path after ingress-guard bootstrap.
+    Used variables/origin: singleton thread reference stored in
+    ``_BOT_TOKEN_REFRESH_WORKER``.
+    """
+
+    global _BOT_TOKEN_REFRESH_WORKER
+    worker = _BOT_TOKEN_REFRESH_WORKER
+    if worker and worker.is_alive():
+        return
+    _BOT_TOKEN_REFRESH_STOP_EVENT.clear()
+    worker = Thread(
+        target=_bot_token_refresh_worker_loop,
+        args=(_BOT_TOKEN_REFRESH_STOP_EVENT,),
+        daemon=True,
+        name="bot-token-refresh-worker",
+    )
+    worker.start()
+    _BOT_TOKEN_REFRESH_WORKER = worker
+
+
 def _evaluate_ingress_runtime_invariants(db: Session, *, now: datetime) -> dict[str, Any]:
     """Evaluate critical conduit-secret and sender-token runtime invariants.
 
@@ -1214,13 +1427,17 @@ def _evaluate_ingress_runtime_invariants(db: Session, *, now: datetime) -> dict[
     bot_access_token = (cfg.access_token if cfg and cfg.access_token else "").strip()
     token_subject_id = _resolve_bot_sender_token_subject_cached(bot_access_token, now=now) if bot_access_token else None
 
+    refresh_health = _refresh_token_health_snapshot(now=now)
+
     return {
         "conduit_signature_secret_resolvable": not unresolved_assignments,
         "sender_token_subject_resolvable": bool(token_subject_id),
+        "token_refresh_healthy": bool(refresh_health["healthy"]),
         "active_assignment_count": len(assignment_pairs),
         "unresolved_assignment_count": len(unresolved_assignments),
         "unresolved_assignments": unresolved_assignments[:10],
         "bot_sender_subject_id": token_subject_id,
+        "token_refresh_health": refresh_health,
     }
 
 
@@ -3998,7 +4215,12 @@ def _validate_startup_symbol_order() -> None:
     startup execution ordering.
     """
 
-    required_symbols = ("_coerce_int", "_ingress_guard_thresholds", "run_ingress_guard_startup_check")
+    required_symbols = (
+        "_coerce_int",
+        "_ingress_guard_thresholds",
+        "run_ingress_guard_startup_check",
+        "start_bot_token_refresh_worker",
+    )
     missing = [name for name in required_symbols if name not in globals()]
     if missing:
         raise RuntimeError(f"Startup symbol order invalid; missing definitions: {', '.join(missing)}")
@@ -4011,6 +4233,7 @@ bootstrap_settings_from_env()
 cleanup_conduit_subscription_secret_semantics()
 _validate_startup_symbol_order()
 run_ingress_guard_startup_check()
+start_bot_token_refresh_worker()
 
 # =====================================
 # Schemas

@@ -51,9 +51,11 @@ This document summarizes the REST endpoints exposed by `backend_app.py`.
   - conduit shard status transitions,
   - last reply preflight failure reason (`last_errors.reply_preflight_failure_reason_code`),
   - recent callback throughput + last error timestamps/diagnostic snippets.
-- `eventsub.authoritative_guard` includes degradation reasons (`missing_healthy_shards`, `callback_errors_spike`) and whether fallback was applied.
+- `eventsub.authoritative_guard` includes degradation reasons (`missing_healthy_shards`, `callback_errors_spike`, `token_refresh_unhealthy`) and whether fallback was applied.
 - `eventsub.authoritative_guard.runtime_invariants` reports runtime checks for
-  conduit shard-secret resolvability and sender token-subject resolvability.
+  conduit shard-secret resolvability, sender token-subject resolvability, and
+  bot token refresh-worker health (`token_refresh_healthy`,
+  `token_refresh_health.*`).
 - Recommended operator thresholds:
   - callback error threshold: 5 errors / 5 minutes,
   - minimum healthy shards: 1 (or expected shard count for larger deployments).
@@ -302,6 +304,32 @@ Channel settings include queue intake controls:
   - Setup credentials in `/system/config` (`client_id`, `client_secret`).
   - Bot auth state in `/bot/config`.
   - Twitch `/oauth2/validate` responses for token subject/scope validation.
+
+### `token_refresh_unhealthy` troubleshooting runbook
+- **Description**: Recover backend-managed bot token refresh when authoritative
+  webhook mode no longer receives healthy refresh outcomes.
+- **Dependencies**: Stored `BotConfig` refresh credentials, Twitch OAuth token
+  endpoint, and ingress guard runtime invariants.
+- **Code-customers**: Operators responsible for webhook-conduit ingress
+  continuity while websocket runtime is disabled.
+- **Used variables/origin**:
+  - `eventsub.authoritative_guard.runtime_invariants.token_refresh_healthy`.
+  - `eventsub.authoritative_guard.runtime_invariants.token_refresh_health`.
+  - `BotConfig.expires_at` with refresh deadline (`expires_at - 5m`).
+- **Refresh cadence**:
+  1. Backend refresh worker polls every 60s.
+  2. Token refresh triggers at `T-5m` before `expires_at`.
+  3. On success, backend persists `access_token`, `refresh_token`,
+     `expires_at`, and refreshed `scopes`.
+- **Failure alarms**:
+  1. `token_refresh_healthy=false` in `/system/health`.
+  2. `token_refresh_unhealthy` appears in
+     `eventsub.authoritative_guard.reasons`.
+  3. Backend logs emit `BOT_TOKEN_REFRESH_FAILED`.
+- **Manual recovery flow**:
+  1. Validate Twitch app credentials in `/system/config`.
+  2. Re-run `/bot/config/oauth` authorization to reseed bot tokens.
+  3. Confirm `/system/health` shows `token_refresh_healthy=true`.
 
 ## Archive: migration and compatibility notes
 - `migrations/20240624_queue_caps.sql` introduced queue capacity columns and

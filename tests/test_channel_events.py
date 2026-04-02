@@ -33,11 +33,22 @@ def _wipe_db() -> None:
             backend_app.ChannelModerator,
             backend_app.ActiveChannel,
             backend_app.TwitchUser,
+            backend_app.BotConfig,
         ]:
             db.query(model).delete()
         db.commit()
     finally:
         db.close()
+    with backend_app._BOT_TOKEN_REFRESH_LOCK:
+        backend_app._BOT_TOKEN_REFRESH_STATE.update(
+            {
+                "last_attempt_at": None,
+                "last_success_at": None,
+                "last_failure_at": None,
+                "last_error": None,
+                "failure_count": 0,
+            }
+        )
 
 
 def _setup_channel() -> Dict[str, int]:
@@ -2070,6 +2081,83 @@ remove:
             self.assertTrue(guard["degraded"])
             self.assertTrue(guard["auto_fallback_applied"])
             self.assertEqual(backend_app.get_chat_ingress_mode(), "websocket")
+        finally:
+            db.close()
+
+    def test_backend_token_refresh_worker_persists_refreshed_bot_tokens(self) -> None:
+        """Refresh due bot credentials and persist replacement token fields.
+
+        Dependencies: BotConfig persistence, Twitch refresh-token grant API,
+        and ``_refresh_bot_access_token_once`` scheduler routine.
+        Code customers: backend token refresh worker in webhook_conduit mode.
+        Used variables/origin: stored ``BotConfig`` refresh credentials and
+        ``expires_at`` trigger refresh before expiry (T-5m).
+        """
+
+        db = backend_app.SessionLocal()
+        try:
+            db.query(backend_app.BotConfig).delete()
+            cfg = backend_app.BotConfig(
+                login="botlogin",
+                display_name="Bot Login",
+                access_token="old-access",
+                refresh_token="old-refresh",
+                scopes="user:bot",
+                expires_at=backend_app.datetime.utcnow() + backend_app.timedelta(minutes=3),
+                enabled=True,
+            )
+            db.add(cfg)
+            db.commit()
+        finally:
+            db.close()
+
+        response_mock = mock.Mock()
+        response_mock.raise_for_status.return_value = None
+        response_mock.json.return_value = {
+            "access_token": "new-access",
+            "refresh_token": "new-refresh",
+            "expires_in": 3600,
+            "scope": ["user:bot", "user:read:chat"],
+        }
+        with mock.patch.object(backend_app, "get_twitch_client_id", return_value="cid"), mock.patch.object(
+            backend_app, "get_twitch_client_secret", return_value="secret"
+        ), mock.patch.object(backend_app.requests, "post", return_value=response_mock):
+            result = backend_app._refresh_bot_access_token_once(now=backend_app.datetime.utcnow())
+        self.assertEqual(result.get("status"), "refreshed")
+
+        verify_db = backend_app.SessionLocal()
+        try:
+            refreshed = verify_db.query(backend_app.BotConfig).order_by(backend_app.BotConfig.id.asc()).first()
+            self.assertIsNotNone(refreshed)
+            assert refreshed
+            self.assertEqual(refreshed.access_token, "new-access")
+            self.assertEqual(refreshed.refresh_token, "new-refresh")
+            self.assertIn("user:read:chat", str(refreshed.scopes))
+            self.assertIsNotNone(refreshed.expires_at)
+        finally:
+            verify_db.close()
+
+    def test_ingress_guard_runtime_invariants_report_refresh_health(self) -> None:
+        """Expose token refresh worker health separately from callback health.
+
+        Dependencies: in-memory refresh worker state, ingress runtime invariant
+        evaluator, and guard degradation reason composition.
+        Code customers: `/system/health` operator diagnostics and guard alerting.
+        Used variables/origin: refresh failure timestamps in
+        ``_BOT_TOKEN_REFRESH_STATE`` are checked via
+        ``runtime_invariants.token_refresh_health``.
+        """
+
+        _setup_channel()
+        db = backend_app.SessionLocal()
+        now = backend_app.datetime.utcnow()
+        try:
+            backend_app._record_bot_token_refresh_result(success=False, now=now, error="synthetic_failure")
+            invariants = backend_app._evaluate_ingress_runtime_invariants(db, now=now)
+            self.assertFalse(invariants.get("token_refresh_healthy"))
+            self.assertEqual((invariants.get("token_refresh_health") or {}).get("last_error"), "synthetic_failure")
+            guard = backend_app._evaluate_ingress_guard(db, now, apply_fallback=False)
+            self.assertIn("token_refresh_unhealthy", guard.get("reasons", []))
         finally:
             db.close()
 

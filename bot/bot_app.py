@@ -589,6 +589,10 @@ class SongBot(commands.Bot):
             pass
 
     async def event_token_refreshed(self, payload: TokenRefreshedPayload) -> None:
+        # cleanup_candidate: token refresh events sourced from live websocket
+        # session lifecycle are now legacy because backend_app runs an
+        # authoritative refresh worker for webhook_conduit mode. Keep this path
+        # as rollback compatibility until worker stability is confirmed.
         self._user_token = payload.token
         self._refresh_token = payload.refresh_token
         self._scopes = list(payload.scopes)
