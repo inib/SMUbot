@@ -2,6 +2,15 @@
 
 This document summarizes the REST endpoints exposed by `backend_app.py`.
 
+## Canonical chat architecture
+- **Ingress**: EventSub webhook + conduit transport on
+  `/twitch/eventsub/callback`.
+- **Execution**: shared chat command core used by webhook and websocket parsing
+  paths for consistent command semantics.
+- **Outbound**: Twitch Send Chat Message API (`POST /helix/chat/messages`) for
+  bot replies.
+
+
 ## System
 | Method | Path | Description |
 |--------|------|-------------|
@@ -28,7 +37,6 @@ This document summarizes the REST endpoints exposed by `backend_app.py`.
   - `chat_ingress_shadow_mode?: boolean`
   - `chat_websocket_fallback_legacy_enabled?: boolean`
   - `chat_ingress_guard_auto_fallback_enabled?: boolean`
-- **Compatibility note**: Startup includes additive schema patching for staggered deployments so older SQLite/prod DBs can run until the dedicated migration is applied.
 
 ### `/system/health` ingress summary
 - `eventsub.ingress_summary` includes compact operational counters:
@@ -199,11 +207,6 @@ Channel settings include queue intake controls:
 - `prio_only`, `max_requests_per_user`, `allow_bumps`, `other_flags`, and `max_prio_points` behave as before and are reflected in `settings.updated` events.
 - `bot_message_level` controls how chatty the bot is in channel responses; allowed values are exactly `mute`, `normal`, `verbose`, and `debug` (default `normal`).
 - Priority point pricing is configurable: `prio_follow_enabled`, `prio_raid_enabled`, `prio_bits_per_point`, `prio_gifts_per_point`, and per-tier fields (`prio_sub_tier1_points`, `prio_sub_tier2_points`, `prio_sub_tier3_points`) control how many points events grant. Reset bonuses (`prio_reset_points_tier1`, `prio_reset_points_tier2`, `prio_reset_points_tier3`, `prio_reset_points_vip`, `prio_reset_points_mod`) are awarded when the queue resets for a new stream. Use `free_mod_priority_requests` to allow moderators to request priority without spending points.
-- Existing deployments should apply `migrations/20240624_queue_caps.sql` to add the new capacity columns and backfill defaults for legacy channels; the application also attempts to patch missing columns on startup for SQLite/legacy installs before enforcing queue caps.
-- EventSub conduit/replay storage is added in `migrations/20260330_eventsub_conduits.sql`:
-  - `eventsub_message_dedupe` for message idempotency (`message_id`, `received_at`, unique message IDs).
-  - `twitch_conduits` and `twitch_conduit_shards` for conduit/shard sync state.
-  - additive `event_subscriptions.conduit_id` and `event_subscriptions.shard_id` linkage columns.
 
 ### Queue Manager unified bot dropdown API mapping
 - Queue Manager uses a single state-aware dropdown model with options:
@@ -221,6 +224,64 @@ Channel settings include queue intake controls:
   - `/channels/{channel}` accepts only `join_active` values `0` or `1`.
   - `/channels/{channel}/settings` keeps `bot_message_level` strict to enum
     values `mute|normal|verbose|debug`.
+
+## Steady-state runbooks
+
+### Callback failure runbook
+- **Description**: Recover EventSub callback delivery reliability when webhook
+  status buckets indicate persistent `4xx` or `5xx`.
+- **Dependencies**: Public HTTPS callback URL, callback secret resolution, and
+  successful per-channel reconciliation endpoint access.
+- **Code-customers**: On-call backend operators handling EventSub ingress
+  incidents and channel onboarding failures.
+- **Used variables/origin**:
+  - `eventsub_callback_override` (runtime config override).
+  - `public_backend_origin` (derived callback origin).
+  - `eventsub.ingress_summary` callback counters from `GET /system/health`.
+
+### Shard degradation runbook
+- **Description**: Restore healthy conduit shard coverage when guard health
+  reports `missing_healthy_shards`.
+- **Dependencies**: Conduit reconcile APIs, guard thresholds in `/system/config`,
+  and shard metadata persistence.
+- **Code-customers**: Operators supervising authoritative webhook ingest during
+  production incidents.
+- **Used variables/origin**:
+  - `chat_ingress_guard_min_healthy_shards`.
+  - `chat_ingress_guard_auto_fallback_enabled`.
+  - `/channels/{channel}/eventsub/health` shard assignment output.
+
+### Send API 4xx/5xx handling runbook
+- **Description**: Triage and remediate Send Chat Message API failures for
+  webhook command replies.
+- **Dependencies**: Valid bot identity token, preflight validation guard rails,
+  and ingress summary reason counters.
+- **Code-customers**: Bot/backend maintainers responsible for chat response SLOs.
+- **Used variables/origin**:
+  - `send_api_failure_count` / `reply_sent_count`.
+  - Send failure reason counters (`sender_token_mismatch`,
+    `invalid_reply_parent_message_id`, `unknown_400`, transient classes).
+  - `event.message_id` from EventSub payload for reply threading.
+
+### Credential expiry remediation runbook
+- **Description**: Recover from expired/invalid app or bot credentials impacting
+  EventSub reconciliation or Send API calls.
+- **Dependencies**: Twitch token validation, setup credentials, and bot OAuth
+  callback flow.
+- **Code-customers**: Platform operators rotating credentials or remediating auth outages.
+- **Used variables/origin**:
+  - Setup credentials in `/system/config` (`client_id`, `client_secret`).
+  - Bot auth state in `/bot/config`.
+  - Twitch `/oauth2/validate` responses for token subject/scope validation.
+
+## Archive: migration and compatibility notes
+- `migrations/20240624_queue_caps.sql` introduced queue capacity columns and
+  default backfill guidance for legacy deployments.
+- `migrations/20260330_eventsub_conduits.sql` introduced EventSub dedupe and
+  conduit/shard storage plus additive subscription linkage columns.
+- Startup compatibility patching for legacy SQLite/prod schemas remains a
+  historical rollout aid and should not be treated as a long-term migration
+  substitute.
 
 ## Songs
 | Method | Path | Description |
