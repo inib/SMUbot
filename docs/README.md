@@ -235,8 +235,13 @@ Expected:
    - set `chat_websocket_fallback_legacy_enabled=true`,
    - optionally switch `chat_ingress_mode=websocket` if operator policy
      requires immediate handoff.
+   - keep a minimal staging rollback smoke harness enabled for one additional
+     release window (toggle websocket mode + legacy fallback and verify at
+     least one end-to-end command such as `!request` still recovers).
 4. After stabilization, disable rollback flag again and restore
    `chat_ingress_mode=webhook_conduit`.
+5. Only remove websocket rollback harness/tests when product explicitly
+   confirms **no websocket rollback supported** (rollback EOL).
 
 ### Maintenance checklist
 - Verify bot/app token refreshes complete successfully each day.
