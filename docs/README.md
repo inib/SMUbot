@@ -355,6 +355,30 @@ unlocks the API for the bot, queue manager, and public web frontend.
 3. Confirm conduit reconcile succeeds with app token auth.
 4. Confirm webhook command replies recover (Send API success + reduced 401s).
 
+#### 7) `token_refresh_unhealthy` (backend refresh worker path)
+**Symptoms**
+- `eventsub.authoritative_guard.reasons` includes `token_refresh_unhealthy`.
+- `runtime_invariants.token_refresh_healthy=false`.
+- Backend logs include `BOT_TOKEN_REFRESH_FAILED`.
+
+**Dependencies**
+- Persisted `/bot/config` credentials (`access_token`, `refresh_token`,
+  `expires_at`, `scopes`).
+- Twitch OAuth refresh-token grant endpoint.
+
+**Primary variables/origins to verify**
+- `runtime_invariants.token_refresh_health.last_success_at`.
+- `runtime_invariants.token_refresh_health.last_failure_at`.
+- Refresh deadline policy: `BotConfig.expires_at - 5 minutes`.
+
+**Procedure**
+1. Check `GET /system/health` and inspect
+   `eventsub.authoritative_guard.runtime_invariants.token_refresh_health`.
+2. Confirm backend refresh cadence (poll every 60s, refresh at `T-5m`) is
+   active in logs.
+3. If failures persist, re-run `/bot/config/oauth` to reseed tokens manually.
+4. Verify `token_refresh_healthy=true` and reason clears.
+
 ## Archive: migration and compatibility notes
 - Migration `migrations/20260330_eventsub_conduits.sql` added additive EventSub
   replay/conduit tables (`eventsub_message_dedupe`, `twitch_conduits`,
@@ -480,9 +504,15 @@ Expected:
 - In `chat_ingress_mode=webhook_conduit`, startup logs now explicitly state that
   webhook/conduit is the canonical ingress path and websocket chat subscriptions
   are rollback-only.
+- Backend now runs a dedicated token refresh worker (60s poll, refresh at
+  `expires_at - 5m`) so OAuth renewal remains active even when websocket bot
+  runtime stays idle in authoritative webhook mode.
 - Legacy websocket rollback keeps only minimal `subscribe_websocket` hooks;
   prior websocket subscription reuse/recovery loops are intentionally disabled
   to avoid accidental authoritative use during normal operations.
+- Legacy websocket-driven `event_token_refreshed` handling remains only as a
+  rollback compatibility path and is marked as a cleanup candidate after worker
+  stability is validated.
 - Honors each channel's `bot_message_level` (`mute`, `normal`, `verbose`,
   `debug`) when deciding whether to send chat output; suppressed messages still
   go to backend bot logs for observability.
