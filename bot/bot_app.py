@@ -1141,6 +1141,27 @@ class SongBot(commands.Bot):
         reply_to: Optional[str] = None,
         fallback_partial: Optional[object] = None,
     ) -> None:
+        """Send a websocket-runtime chat message using bot-user token contract.
+
+        Description: rollback-only websocket egress helper; authoritative
+        webhook/conduit ingress should use backend Send Chat transport instead.
+        Dependencies: TwitchIO ``PartialUser.send_message`` and runtime
+        ``self._websocket_fallback_enabled`` policy flag.
+        Code customers: websocket ingress command handlers and debug/catalog
+        responses emitted during rollback operation.
+        Used variables/origin: ``channel_login`` and ``message`` come from
+        command dispatch flows; ``self.bot_user_id`` is persisted bot identity
+        used for both ``sender`` and ``token_for`` in TwitchIO sends.
+        """
+
+        if not self._websocket_fallback_enabled:
+            await push_console_event(
+                'warning',
+                f'Skipped websocket send for {channel_login}: fallback mode disabled',
+                event='message_skipped',
+                metadata={**(metadata or {}), 'channel': channel_login, 'reason_code': 'websocket_fallback_disabled'},
+            )
+            return
         info = self._channel_info(channel_login)
         partial = None
         channel_label = channel_login
@@ -1154,6 +1175,14 @@ class SongBot(commands.Bot):
             partial = fallback_partial
             channel_label = getattr(fallback_partial, 'display_name', None) or getattr(fallback_partial, 'name', channel_login)
         if partial is None:
+            return
+        if not self.bot_user_id:
+            await push_console_event(
+                'error',
+                f'Failed to send message to {channel_label}: bot_user_id is missing',
+                event='message',
+                metadata={**(metadata or {}), 'channel': channel_label, 'reason_code': 'missing_bot_user_id'},
+            )
             return
         try:
             await partial.send_message(

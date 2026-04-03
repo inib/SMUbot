@@ -1362,6 +1362,75 @@ class ChannelEventTests(unittest.TestCase):
         finally:
             db.close()
 
+    def test_preflight_eventsub_chat_reply_payload_uses_app_auth_policy_headers(self) -> None:
+        """Use app-auth headers for Send Chat when auth policy selects app mode."""
+
+        details = _setup_channel()
+        db = backend_app.SessionLocal()
+        try:
+            channel = db.get(backend_app.ActiveChannel, details["channel_pk"])
+            self.assertIsNotNone(channel)
+            with mock.patch.object(
+                backend_app,
+                "get_twitch_send_chat_auth_mode",
+                return_value=backend_app.TWITCH_SEND_CHAT_AUTH_MODE_APP,
+            ), mock.patch.object(
+                backend_app,
+                "_eventsub_app_headers",
+                return_value={"Authorization": "Bearer app-token", "Client-Id": "cid"},
+            ) as mock_app_headers, mock.patch.object(
+                backend_app,
+                "_resolve_twitch_token_subject_id",
+            ) as mock_subject:
+                payload, reason_code, headers = backend_app._preflight_eventsub_chat_reply_payload(
+                    db,
+                    channel=channel,
+                    sender_id="bot-user-1",
+                    message="hello from webhook",
+                    reply_parent_message_id="parent-msg-id",
+                )
+            self.assertIsNone(reason_code)
+            self.assertEqual(payload["sender_id"], "bot-user-1")
+            self.assertEqual(headers, {"Authorization": "Bearer app-token", "Client-Id": "cid"})
+            self.assertEqual(mock_app_headers.call_count, 1)
+            self.assertEqual(mock_subject.call_count, 0)
+        finally:
+            db.close()
+
+    def test_preflight_eventsub_chat_reply_payload_skips_user_subject_checks_in_app_mode(self) -> None:
+        """Avoid user-token-only preflight failures when app-auth mode is selected."""
+
+        details = _setup_channel()
+        db = backend_app.SessionLocal()
+        try:
+            channel = db.get(backend_app.ActiveChannel, details["channel_pk"])
+            self.assertIsNotNone(channel)
+            with mock.patch.object(
+                backend_app,
+                "get_twitch_send_chat_auth_mode",
+                return_value=backend_app.TWITCH_SEND_CHAT_AUTH_MODE_APP,
+            ), mock.patch.object(
+                backend_app,
+                "_eventsub_app_headers",
+                return_value={"Authorization": "Bearer app-token", "Client-Id": "cid"},
+            ), mock.patch.object(
+                backend_app,
+                "_resolve_twitch_token_subject_id",
+                return_value=None,
+            ):
+                payload, reason_code, headers = backend_app._preflight_eventsub_chat_reply_payload(
+                    db,
+                    channel=channel,
+                    sender_id="bot-user-1",
+                    message="hello",
+                    reply_parent_message_id=None,
+                )
+            self.assertIsNone(reason_code)
+            self.assertIsNotNone(payload)
+            self.assertEqual(headers, {"Authorization": "Bearer app-token", "Client-Id": "cid"})
+        finally:
+            db.close()
+
     def test_send_eventsub_chat_reply_400_maps_reason_and_skips_retry(self) -> None:
         """Map deterministic Twitch 400 reply diagnostics and avoid retries."""
 

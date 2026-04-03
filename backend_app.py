@@ -2,7 +2,7 @@ from __future__ import annotations
 import math
 import contextlib
 from functools import lru_cache
-from typing import Optional, List, Any, Dict, Mapping, Iterable, Literal, Sequence
+from typing import Optional, List, Any, Dict, Mapping, Iterable, Literal, Sequence, cast
 from threading import Event, Lock, Thread
 import os
 import json
@@ -214,6 +214,9 @@ BOT_MESSAGE_DEFAULT_TEMPLATES: dict[str, str] = {
 }
 BOT_MESSAGE_LEVEL_RANK: dict[str, int] = {"mute": 0, "normal": 1, "verbose": 2, "debug": 3}
 TWITCH_SEND_CHAT_MESSAGE_MAX_LENGTH = 500
+TWITCH_SEND_CHAT_AUTH_MODE_APP = "app_token"
+TWITCH_SEND_CHAT_AUTH_MODE_BOT_USER = "bot_user_token"
+TWITCH_SEND_CHAT_AUTH_MODE_DEFAULT = TWITCH_SEND_CHAT_AUTH_MODE_BOT_USER
 
 _bot_log_listeners: set[asyncio.Queue[str]] = set()
 _bot_oauth_states: dict[str, Dict[str, Any]] = {}
@@ -953,6 +956,21 @@ def get_chat_websocket_fallback_legacy_enabled() -> bool:
     """
 
     return _env_flag(get_setting("chat_websocket_fallback_legacy_enabled", "0"))
+
+
+def get_twitch_send_chat_auth_mode() -> Literal["app_token", "bot_user_token"]:
+    """Return outbound Send Chat auth mode with deterministic fallback.
+
+    Dependencies: Reads optional persisted setting via ``get_setting``.
+    Code customers: EventSub webhook Send Chat preflight and header selection.
+    Used variables/origin: ``twitch_send_chat_auth_mode`` setting value, with
+    unsupported values normalized to ``TWITCH_SEND_CHAT_AUTH_MODE_DEFAULT``.
+    """
+
+    configured = (get_setting("twitch_send_chat_auth_mode", TWITCH_SEND_CHAT_AUTH_MODE_DEFAULT) or "").strip().lower()
+    if configured not in {TWITCH_SEND_CHAT_AUTH_MODE_APP, TWITCH_SEND_CHAT_AUTH_MODE_BOT_USER}:
+        return TWITCH_SEND_CHAT_AUTH_MODE_DEFAULT
+    return cast(Literal["app_token", "bot_user_token"], configured)
 
 
 def _coerce_int(value: Any, *, default: int = 0) -> int:
@@ -1852,6 +1870,40 @@ def _eventsub_app_headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {app_token}", "Client-Id": client_id}
 
 
+def _eventsub_send_chat_auth_headers(
+    db: Session,
+    *,
+    sender_id: str,
+) -> tuple[Optional[dict[str, str]], Optional[str], Literal["app_token", "bot_user_token"]]:
+    """Resolve Send Chat auth mode and compose matching Helix auth headers.
+
+    Dependencies: ``get_twitch_send_chat_auth_mode`` policy selector;
+    app-token mode uses ``_eventsub_app_headers``; bot-user mode reads
+    ``BotConfig`` and validates token subject via Twitch ``/oauth2/validate``.
+    Code customers: ``_preflight_eventsub_chat_reply_payload``.
+    Used variables/origin: ``sender_id`` comes from bot identity resolution;
+    ``BotConfig.access_token`` comes from bot OAuth callback persistence.
+    """
+
+    auth_mode = get_twitch_send_chat_auth_mode()
+    if auth_mode == TWITCH_SEND_CHAT_AUTH_MODE_APP:
+        try:
+            return _eventsub_app_headers(), None, auth_mode
+        except RuntimeError:
+            return None, "preflight_missing_app_access_token", auth_mode
+
+    cfg = db.query(BotConfig).order_by(BotConfig.id.asc()).first()
+    access_token = (cfg.access_token if cfg and cfg.access_token else "").strip()
+    if not access_token:
+        return None, "preflight_missing_bot_access_token", auth_mode
+    token_subject_id = _resolve_twitch_token_subject_id(access_token)
+    if not token_subject_id:
+        return None, "preflight_token_subject_unresolved", auth_mode
+    if token_subject_id != sender_id:
+        return None, "preflight_sender_token_subject_mismatch", auth_mode
+    return _eventsub_headers(access_token), None, auth_mode
+
+
 def ensure_eventsub_subscriptions(request: FastAPIRequest, channel_pk: int, db: Session) -> None:
     """Ensure required EventSub subscriptions are registered for a channel.
 
@@ -2210,8 +2262,8 @@ def _preflight_eventsub_chat_reply_payload(
 ) -> tuple[Optional[dict[str, Any]], Optional[str], Optional[dict[str, str]]]:
     """Validate deterministic Twitch send-chat inputs before HTTP requests.
 
-    Dependencies: Reads ``BotConfig`` for bot access token, validates token
-    subject via Twitch ``/oauth2/validate``, and assembles Helix headers.
+    Dependencies: Applies centralized Send Chat auth policy via
+    ``_eventsub_send_chat_auth_headers`` and assembles deterministic payload.
     Code customers: ``_send_eventsub_chat_reply`` deterministic preflight guard.
     Used variables/origin: broadcaster id from ``channel.channel_id``,
     ``sender_id`` from bot identity resolution, ``message`` from rendered reply,
@@ -2229,17 +2281,12 @@ def _preflight_eventsub_chat_reply_payload(
     if message_len < 1 or message_len > TWITCH_SEND_CHAT_MESSAGE_MAX_LENGTH:
         return None, "preflight_invalid_message_length", None
 
-    cfg = db.query(BotConfig).order_by(BotConfig.id.asc()).first()
-    access_token = (cfg.access_token if cfg and cfg.access_token else "").strip()
-    if not access_token:
-        return None, "preflight_missing_bot_access_token", None
-    token_subject_id = _resolve_twitch_token_subject_id(access_token)
-    if not token_subject_id:
-        return None, "preflight_token_subject_unresolved", None
-    if token_subject_id != normalized_sender_id:
-        return None, "preflight_sender_token_subject_mismatch", None
-
-    headers = _eventsub_headers(access_token)
+    headers, auth_reason_code, _ = _eventsub_send_chat_auth_headers(
+        db,
+        sender_id=normalized_sender_id,
+    )
+    if auth_reason_code or not headers:
+        return None, auth_reason_code or "preflight_auth_header_unresolved", None
     payload = _build_eventsub_chat_reply_payload(
         broadcaster_id=broadcaster_id,
         sender_id=normalized_sender_id,
@@ -6466,7 +6513,7 @@ def bot_oauth_callback(
             {
                 "type": "oauth_complete",
                 "level": "info",
-                "message": f"Bot app access token acquired for {login}",
+                "message": f"Bot user OAuth token acquired for {login}",
                 "timestamp": datetime.utcnow(),
             }
         )
