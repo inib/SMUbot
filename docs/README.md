@@ -352,7 +352,8 @@ unlocks the API for the bot, queue manager, and public web frontend.
 **Dependencies**
 - App access token flow for conduit API + transport subscriptions.
 - Send Chat auth mode (`bot_user_token` or `app_token`) configured for
-  webhook replies.
+  webhook replies. Startup backfills missing `twitch_send_chat_auth_mode`
+  settings to `app_token` so preflight defaults to app-auth headers.
 
 **Primary variables/origins to verify**
 - Twitch client credentials configured in setup (`client_id`, `client_secret`).

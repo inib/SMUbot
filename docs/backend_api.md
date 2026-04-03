@@ -304,7 +304,9 @@ Channel settings include queue intake controls:
 - **Description**: Recover from expired/invalid app or bot credentials impacting
   EventSub reconciliation or Send API calls.
 - **Dependencies**: Twitch token validation, setup credentials, and bot OAuth
-  callback flow.
+  callback flow. Startup backfills a missing `twitch_send_chat_auth_mode`
+  `AppSetting` row to `app_token` so preflight uses app-auth headers by
+  default.
 - **Code-customers**: Platform operators rotating credentials or remediating auth outages.
 - **Used variables/origin**:
   - Setup credentials in `/system/config` (`client_id`, `client_secret`).

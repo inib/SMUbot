@@ -85,6 +85,7 @@ SETTINGS_ENV_MAP: Dict[str, str] = {
 SETTINGS_DEFAULTS: Dict[str, Optional[str]] = {
     "twitch_scopes": "channel:bot channel:read:subscriptions channel:read:vips bits:read moderator:read:followers",
     "bot_app_scopes": "user:read:chat user:write:chat user:bot",
+    "twitch_send_chat_auth_mode": "app_token",
     "chat_ingress_mode": "webhook_conduit",
     "chat_ingress_shadow_mode": "0",
     "chat_websocket_fallback_legacy_enabled": "0",
@@ -216,7 +217,7 @@ BOT_MESSAGE_LEVEL_RANK: dict[str, int] = {"mute": 0, "normal": 1, "verbose": 2, 
 TWITCH_SEND_CHAT_MESSAGE_MAX_LENGTH = 500
 TWITCH_SEND_CHAT_AUTH_MODE_APP = "app_token"
 TWITCH_SEND_CHAT_AUTH_MODE_BOT_USER = "bot_user_token"
-TWITCH_SEND_CHAT_AUTH_MODE_DEFAULT = TWITCH_SEND_CHAT_AUTH_MODE_BOT_USER
+TWITCH_SEND_CHAT_AUTH_MODE_DEFAULT = TWITCH_SEND_CHAT_AUTH_MODE_APP
 
 _bot_log_listeners: set[asyncio.Queue[str]] = set()
 _bot_oauth_states: dict[str, Dict[str, Any]] = {}
@@ -636,6 +637,34 @@ def bootstrap_settings_from_env() -> None:
             changed = True
 
         if changed:
+            db.commit()
+        else:
+            db.rollback()
+    finally:
+        db.close()
+    settings_store.invalidate()
+
+
+def backfill_twitch_send_chat_auth_mode_setting() -> None:
+    """Ensure legacy databases always have an explicit Send Chat auth mode row.
+
+    Dependencies: Uses ``SessionLocal`` and the ``AppSetting`` ORM model.
+    Code customers: Startup migration/bootstrap path for EventSub reply
+    preflight policy reads.
+    Used variables/origin: Creates the ``twitch_send_chat_auth_mode`` key with
+    ``TWITCH_SEND_CHAT_AUTH_MODE_DEFAULT`` when the row is missing.
+    """
+
+    db = SessionLocal()
+    try:
+        row = db.get(AppSetting, "twitch_send_chat_auth_mode")
+        if row is None:
+            db.add(
+                AppSetting(
+                    key="twitch_send_chat_auth_mode",
+                    value=TWITCH_SEND_CHAT_AUTH_MODE_DEFAULT,
+                )
+            )
             db.commit()
         else:
             db.rollback()
@@ -4518,6 +4547,7 @@ ensure_channel_settings_schema()
 _ensure_playlist_schema()
 ensure_eventsub_conduit_schema()
 bootstrap_settings_from_env()
+backfill_twitch_send_chat_auth_mode_setting()
 cleanup_conduit_subscription_secret_semantics()
 _validate_startup_symbol_order()
 run_ingress_guard_startup_check()
