@@ -100,6 +100,11 @@ unlocks the API for the bot, queue manager, and public web frontend.
   - healthy conduit shards drop below `chat_ingress_guard_min_healthy_shards`,
   - callback 4xx/5xx volume in `chat_ingress_guard_window_seconds` exceeds
     `chat_ingress_guard_callback_error_threshold`.
+- Backend now includes an ingress guard repair watcher (60-second cadence) that
+  reads guard reasons (`callback_errors_spike`, `invalid_signature`, and shard
+  health), then applies least-disruptive repair in order
+  `reconcile -> shard_repair -> rebuild`, with cooldown + max-attempt caps to
+  prevent infinite repair loops.
 - Startup import now validates ingress-guard symbol availability before running
   the guard so symbol-order regressions fail fast during process boot.
 - Conduit shard metadata now persists `twitch_conduit_shards.transport_secret`

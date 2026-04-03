@@ -52,10 +52,16 @@ This document summarizes the REST endpoints exposed by `backend_app.py`.
   - last reply preflight failure reason (`last_errors.reply_preflight_failure_reason_code`),
   - recent callback throughput + last error timestamps/diagnostic snippets.
 - `eventsub.authoritative_guard` includes degradation reasons (`missing_healthy_shards`, `callback_errors_spike`, `token_refresh_unhealthy`) and whether fallback was applied.
+- The backend repair watcher evaluates these guard reasons every 60 seconds and
+  applies least-disruptive repair in order: `reconcile`, `shard_repair`,
+  `rebuild` (with cooldown + attempt caps to avoid loops).
 - `eventsub.authoritative_guard.runtime_invariants` reports runtime checks for
   conduit shard-secret resolvability, sender token-subject resolvability, and
   bot token refresh-worker health (`token_refresh_healthy`,
   `token_refresh_health.*`).
+- `eventsub.ingress_metrics.guard_repair_actions` and
+  `eventsub.ingress_metrics.guard_repair_outcomes` provide structured watcher
+  telemetry for each repair action and outcome.
 - Recommended operator thresholds:
   - callback error threshold: 5 errors / 5 minutes,
   - minimum healthy shards: 1 (or expected shard count for larger deployments).

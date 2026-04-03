@@ -2161,6 +2161,81 @@ remove:
         finally:
             db.close()
 
+    def test_ingress_guard_repair_action_selection_respects_cooldown_and_caps(self) -> None:
+        """Select next repair action using least-disruptive order and guard rails.
+
+        Dependencies: in-memory ``_INGRESS_GUARD_REPAIR_STATE`` and
+        ``_select_ingress_guard_repair_action`` policy evaluator.
+        Code customers: ingress guard repair watcher planning path.
+        Used variables/origin: degraded guard reasons and synthetic timestamps
+        model watcher cycles across cooldown and max-attempt limits.
+        """
+
+        now = backend_app.datetime.utcnow()
+        with backend_app._INGRESS_GUARD_REPAIR_LOCK:
+            for action in backend_app.INGRESS_GUARD_REPAIR_ACTION_ORDER:
+                backend_app._INGRESS_GUARD_REPAIR_STATE[action] = {"last_attempt_at": None, "attempt_count": 0}
+
+        first_action, _, _ = backend_app._select_ingress_guard_repair_action(
+            reasons=["callback_errors_spike"],
+            now=now,
+        )
+        self.assertEqual(first_action, "reconcile")
+
+        second_action, second_skip_reason, _ = backend_app._select_ingress_guard_repair_action(
+            reasons=["callback_errors_spike"],
+            now=now + backend_app.timedelta(seconds=5),
+        )
+        self.assertEqual(second_action, "rebuild")
+        self.assertIsNone(second_skip_reason)
+
+        for attempt in range(backend_app.INGRESS_GUARD_REPAIR_MAX_ATTEMPTS["rebuild"]):
+            _ = backend_app._select_ingress_guard_repair_action(
+                reasons=["callback_errors_spike"],
+                now=now + backend_app.timedelta(seconds=1200 + (attempt * 1200)),
+            )
+        blocked_action, blocked_reason, _ = backend_app._select_ingress_guard_repair_action(
+            reasons=["callback_errors_spike"],
+            now=now + backend_app.timedelta(seconds=9999),
+        )
+        self.assertIsNone(blocked_action)
+        self.assertEqual(blocked_reason, "cooldown_or_attempt_cap")
+
+    def test_ingress_guard_repair_cycle_emits_action_metrics(self) -> None:
+        """Record structured repair metrics when watcher executes an action.
+
+        Dependencies: ``run_ingress_guard_repair_cycle`` plus ingress telemetry
+        counters returned by ``_ingress_metrics_snapshot``.
+        Code customers: watcher observability and system-health dashboards.
+        Used variables/origin: mocked degraded guard reasons and repair action
+        outcome drive metric key increments.
+        """
+
+        _setup_channel()
+        cycle_now = backend_app.datetime.utcnow()
+        db = backend_app.SessionLocal()
+        try:
+            backend_app.set_settings(db, {"chat_ingress_mode": "webhook_conduit"})
+        finally:
+            db.close()
+        with backend_app._INGRESS_GUARD_REPAIR_LOCK:
+            for action in backend_app.INGRESS_GUARD_REPAIR_ACTION_ORDER:
+                backend_app._INGRESS_GUARD_REPAIR_STATE[action] = {"last_attempt_at": None, "attempt_count": 0}
+        with mock.patch.object(
+            backend_app,
+            "_evaluate_ingress_guard",
+            return_value={"degraded": True, "reasons": ["callback_errors_spike"]},
+        ), mock.patch.object(
+            backend_app,
+            "_run_ingress_guard_repair_action",
+            return_value={"status": "ok", "errors": []},
+        ):
+            outcome = backend_app.run_ingress_guard_repair_cycle(now=cycle_now)
+        self.assertEqual(outcome.get("status"), "executed")
+        snapshot = backend_app._ingress_metrics_snapshot(cycle_now + backend_app.timedelta(seconds=1))
+        self.assertGreaterEqual((snapshot.get("guard_repair_actions") or {}).get("reconcile", 0), 1)
+        self.assertGreaterEqual((snapshot.get("guard_repair_outcomes") or {}).get("reconcile:ok", 0), 1)
+
     def test_cleanup_conduit_subscription_secret_semantics_sets_placeholder(self) -> None:
         """Normalize conduit chat subscription secrets to non-authoritative placeholder."""
 
