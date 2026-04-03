@@ -174,6 +174,30 @@ def _create_chat_conduit_subscription(
         db.close()
 
 
+def _upsert_bot_config_token(*, access_token: str) -> None:
+    """Persist a deterministic bot token fixture for EventSub reply preflight tests.
+
+    Dependencies: ``BotConfig`` ORM row in the shared SQLite test database.
+    Code customers: send-chat preflight tests needing explicit bot token
+    presence/absence controls. Used variables/origin: ``access_token`` is
+    provided by each test scenario.
+    """
+
+    db = backend_app.SessionLocal()
+    try:
+        cfg = db.query(backend_app.BotConfig).order_by(backend_app.BotConfig.id.asc()).first()
+        if not cfg:
+            cfg = backend_app.BotConfig(access_token=access_token, refresh_token="refresh-token", enabled=True)
+            db.add(cfg)
+        else:
+            cfg.access_token = access_token
+            cfg.refresh_token = cfg.refresh_token or "refresh-token"
+            cfg.enabled = True
+        db.commit()
+    finally:
+        db.close()
+
+
 def _signed_eventsub_headers(secret: str, message_id: str, timestamp: str, raw_payload: bytes) -> Dict[str, str]:
     """Build Twitch EventSub callback headers with a valid HMAC signature.
 
@@ -195,6 +219,9 @@ def _signed_eventsub_headers(secret: str, message_id: str, timestamp: str, raw_p
 class ChannelEventTests(unittest.TestCase):
     def setUp(self) -> None:
         _wipe_db()
+        backend_app.BOT_USER_ID = None
+        with backend_app._BOT_TOKEN_SUBJECT_CACHE_LOCK:
+            backend_app._BOT_TOKEN_SUBJECT_CACHE.clear()
         self.client = TestClient(backend_app.app)
 
     def tearDown(self) -> None:
@@ -900,7 +927,7 @@ class ChannelEventTests(unittest.TestCase):
         timestamp = "2023-01-01T00:00:00Z"
         signature = hmac.new(secret.encode(), msg=(message_id + timestamp).encode() + raw, digestmod=hashlib.sha256)
         with mock.patch.object(backend_app, "get_bot_user_id", return_value="bot-user-1"), mock.patch.object(
-            backend_app, "_resolve_twitch_token_subject_id", return_value="bot-user-1"
+            backend_app, "_resolve_twitch_token_subject_id", return_value=("bot-user-1", "validated")
         ), mock.patch("backend_app.requests.post") as mock_send:
             mock_send.return_value.raise_for_status.return_value = None
             response = self.client.post(
@@ -973,7 +1000,7 @@ class ChannelEventTests(unittest.TestCase):
         signature = hmac.new(secret.encode(), msg=(message_id + timestamp).encode() + raw, digestmod=hashlib.sha256)
         with mock.patch.object(backend_app, "_fetch_youtube_oembed_title", return_value="Artist D - Song Four"), mock.patch.object(
             backend_app, "get_bot_user_id", return_value="bot-user-1"
-        ), mock.patch.object(backend_app, "_resolve_twitch_token_subject_id", return_value="bot-user-1"), mock.patch(
+        ), mock.patch.object(backend_app, "_resolve_twitch_token_subject_id", return_value=("bot-user-1", "validated")), mock.patch(
             "backend_app.requests.post"
         ) as mock_send:
             mock_send.return_value.raise_for_status.return_value = None
@@ -1046,7 +1073,7 @@ class ChannelEventTests(unittest.TestCase):
         signature = hmac.new(secret.encode(), msg=(message_id + timestamp).encode() + raw, digestmod=hashlib.sha256)
         with mock.patch.object(backend_app, "_fetch_youtube_oembed_title", return_value="Artist D - Song Four"), mock.patch.object(
             backend_app, "get_bot_user_id", return_value="bot-user-1"
-        ), mock.patch.object(backend_app, "_resolve_twitch_token_subject_id", return_value="bot-user-1"), mock.patch(
+        ), mock.patch.object(backend_app, "_resolve_twitch_token_subject_id", return_value=("bot-user-1", "validated")), mock.patch(
             "backend_app.requests.post"
         ) as mock_send:
             mock_send.return_value.raise_for_status.return_value = None
@@ -1118,7 +1145,7 @@ class ChannelEventTests(unittest.TestCase):
         timestamp = "2023-01-01T00:00:00Z"
         signature = hmac.new(secret.encode(), msg=(message_id + timestamp).encode() + raw, digestmod=hashlib.sha256)
         with mock.patch.object(backend_app, "get_bot_user_id", return_value="bot-user-1"), mock.patch.object(
-            backend_app, "_resolve_twitch_token_subject_id", return_value="bot-user-1"
+            backend_app, "_resolve_twitch_token_subject_id", return_value=("bot-user-1", "validated")
         ), mock.patch("backend_app.requests.post") as mock_send:
             mock_send.return_value.raise_for_status.return_value = None
             response = self.client.post(
@@ -1190,7 +1217,7 @@ class ChannelEventTests(unittest.TestCase):
         timestamp = "2023-01-01T00:00:00Z"
         signature = hmac.new(secret.encode(), msg=(header_message_id + timestamp).encode() + raw, digestmod=hashlib.sha256)
         with mock.patch.object(backend_app, "get_bot_user_id", return_value="bot-user-1"), mock.patch.object(
-            backend_app, "_resolve_twitch_token_subject_id", return_value="bot-user-1"
+            backend_app, "_resolve_twitch_token_subject_id", return_value=("bot-user-1", "validated")
         ), mock.patch("backend_app.requests.post") as mock_send:
             mock_send.return_value.raise_for_status.return_value = None
             response = self.client.post(
@@ -1248,7 +1275,7 @@ class ChannelEventTests(unittest.TestCase):
         timestamp = "2023-01-01T00:00:00Z"
         signature = hmac.new(secret.encode(), msg=(header_message_id + timestamp).encode() + raw, digestmod=hashlib.sha256)
         with mock.patch.object(backend_app, "get_bot_user_id", return_value="bot-user-1"), mock.patch.object(
-            backend_app, "_resolve_twitch_token_subject_id", return_value="bot-user-1"
+            backend_app, "_resolve_twitch_token_subject_id", return_value=("bot-user-1", "validated")
         ), mock.patch("backend_app.requests.post") as mock_send:
             mock_send.return_value.raise_for_status.return_value = None
             response = self.client.post(
@@ -1306,8 +1333,9 @@ class ChannelEventTests(unittest.TestCase):
         header_message_id = "header-message-id-sender-mismatch"
         timestamp = "2023-01-01T00:00:00Z"
         signature = hmac.new(secret.encode(), msg=(header_message_id + timestamp).encode() + raw, digestmod=hashlib.sha256)
+        _upsert_bot_config_token(access_token="bot-access-token-mismatch")
         with mock.patch.object(backend_app, "get_bot_user_id", return_value="bot-user-1"), mock.patch.object(
-            backend_app, "_resolve_twitch_token_subject_id", return_value="bot-user-2"
+            backend_app, "_resolve_twitch_token_subject_id", return_value=("bot-user-2", "validated")
         ), mock.patch("backend_app.requests.post") as mock_send:
             response = self.client.post(
                 "/twitch/eventsub/callback",
@@ -1321,6 +1349,67 @@ class ChannelEventTests(unittest.TestCase):
             )
             self.assertEqual(mock_send.call_count, 0)
         self.assertEqual(response.status_code, 200, response.text)
+        snapshot = backend_app._ingress_metrics_snapshot(backend_app.datetime.utcnow())
+        reasons = snapshot.get("send_api_failure_reasons") or {}
+        self.assertGreaterEqual(reasons.get("preflight_subject_mismatch", 0), 1)
+
+    def test_send_eventsub_chat_reply_preflight_valid_subject_sends(self) -> None:
+        """Send reply when resolved bot token subject matches configured bot identity."""
+
+        details = _setup_channel()
+        _upsert_bot_config_token(access_token="bot-access-token-valid")
+        db = backend_app.SessionLocal()
+        try:
+            channel = db.get(backend_app.ActiveChannel, details["channel_pk"])
+            self.assertIsNotNone(channel)
+            reply = {"status": "success", "template_key": "queue_open", "template_vars": {}, "visibility": "normal"}
+            with mock.patch.object(backend_app, "get_bot_user_id", return_value="bot-user-1"), mock.patch.object(
+                backend_app, "_resolve_twitch_token_subject_id", return_value=("bot-user-1", "validated")
+            ), mock.patch.object(
+                backend_app, "_eventsub_headers", return_value={"Authorization": "Bearer bot-access-token-valid", "Client-Id": "cid"}
+            ), mock.patch("backend_app.requests.post") as mock_send:
+                mock_send.return_value.raise_for_status.return_value = None
+                sent = backend_app._send_eventsub_chat_reply(
+                    db,
+                    channel,
+                    reply,
+                    reply_parent_message_id="event-message-id-valid",
+                )
+            self.assertTrue(sent)
+            self.assertEqual(mock_send.call_count, 1)
+            self.assertEqual(mock_send.call_args.kwargs["json"]["sender_id"], "bot-user-1")
+        finally:
+            db.close()
+
+    def test_send_eventsub_chat_reply_preflight_transient_validate_failure_recovers(self) -> None:
+        """Retry token subject validation once on transient failure before skipping send."""
+
+        details = _setup_channel()
+        _upsert_bot_config_token(access_token="bot-access-token-recover")
+        db = backend_app.SessionLocal()
+        try:
+            channel = db.get(backend_app.ActiveChannel, details["channel_pk"])
+            self.assertIsNotNone(channel)
+            reply = {"status": "success", "template_key": "queue_open", "template_vars": {}, "visibility": "normal"}
+            with mock.patch.object(backend_app, "get_bot_user_id", return_value="bot-user-1"), mock.patch.object(
+                backend_app,
+                "_resolve_twitch_token_subject_id",
+                side_effect=[(None, "validate_failed"), ("bot-user-1", "validated")],
+            ) as mock_resolve, mock.patch.object(
+                backend_app, "_eventsub_headers", return_value={"Authorization": "Bearer bot-access-token-recover", "Client-Id": "cid"}
+            ), mock.patch("backend_app.requests.post") as mock_send:
+                mock_send.return_value.raise_for_status.return_value = None
+                sent = backend_app._send_eventsub_chat_reply(
+                    db,
+                    channel,
+                    reply,
+                    reply_parent_message_id="event-message-id-recover",
+                )
+            self.assertTrue(sent)
+            self.assertEqual(mock_resolve.call_count, 2)
+            self.assertEqual(mock_send.call_count, 1)
+        finally:
+            db.close()
 
     def test_send_eventsub_chat_reply_preflight_invalid_message_length_skips_request(self) -> None:
         """Skip Send Chat API call when rendered message violates Twitch length limits."""
@@ -1338,7 +1427,7 @@ class ChannelEventTests(unittest.TestCase):
                 "visibility": "normal",
             }
             with mock.patch.object(backend_app, "get_bot_user_id", return_value="bot-user-1"), mock.patch.object(
-                backend_app, "_resolve_twitch_token_subject_id", return_value="bot-user-1"
+                backend_app, "_resolve_twitch_token_subject_id", return_value=("bot-user-1", "validated")
             ), mock.patch("backend_app.requests.post") as mock_send:
                 sent = backend_app._send_eventsub_chat_reply(
                     db,
@@ -1366,7 +1455,7 @@ class ChannelEventTests(unittest.TestCase):
             response._content = b'{"error":"Bad Request","status":400,"message":"reply_parent_message_id is invalid"}'
             error = requests.HTTPError(response=response)
             with mock.patch.object(backend_app, "get_bot_user_id", return_value="bot-user-1"), mock.patch.object(
-                backend_app, "_resolve_twitch_token_subject_id", return_value="bot-user-1"
+                backend_app, "_resolve_twitch_token_subject_id", return_value=("bot-user-1", "validated")
             ), mock.patch("backend_app.requests.post", side_effect=error) as mock_send:
                 sent = backend_app._send_eventsub_chat_reply(
                     db,
@@ -1397,7 +1486,7 @@ class ChannelEventTests(unittest.TestCase):
             response._content = b'{"error":"Service Unavailable","status":503,"message":"server overloaded"}'
             error = requests.HTTPError(response=response)
             with mock.patch.object(backend_app, "get_bot_user_id", return_value="bot-user-1"), mock.patch.object(
-                backend_app, "_resolve_twitch_token_subject_id", return_value="bot-user-1"
+                backend_app, "_resolve_twitch_token_subject_id", return_value=("bot-user-1", "validated")
             ), mock.patch("backend_app.requests.post", side_effect=error) as mock_send, mock.patch(
                 "backend_app.time.sleep", return_value=None
             ):

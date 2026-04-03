@@ -45,7 +45,9 @@ This document summarizes the REST endpoints exposed by `backend_app.py`.
   - dedupe hits,
   - Send Chat API failure reason counters (`invalid_reply_parent_message_id`,
     `sender_token_mismatch`, `invalid_sender_broadcaster_relation`,
-    `empty_or_invalid_message`, `unknown_400`, transient classes),
+    `empty_or_invalid_message`, `preflight_validate_failed`,
+    `preflight_missing_bot_token`, `preflight_subject_mismatch`, `unknown_400`,
+    transient classes),
   - per-channel webhook command dispatch outcomes,
   - conduit shard status transitions,
   - recent callback throughput + last error timestamps/diagnostic snippets.

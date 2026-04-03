@@ -110,7 +110,9 @@ unlocks the API for the bot, queue manager, and public web frontend.
   - `GET /system/health.eventsub.ingress_summary` adds compact runtime counters:
     callback 2xx/4xx/5xx, signature failures, dedupe hits, per-channel command
     dispatch outcomes, shard status transitions, Send Chat API failure reasons
-    (including mapped 400 validation classes), and last error timestamps.
+    (including mapped 400 validation classes plus preflight token-subject
+    classes `preflight_validate_failed`, `preflight_missing_bot_token`, and
+    `preflight_subject_mismatch`), and last error timestamps.
   - `GET /system/health.eventsub.authoritative_guard` reports degradation
     reasons and whether auto-fallback was applied.
   - `GET /channels/{channel}/eventsub/health` reports per-channel shard

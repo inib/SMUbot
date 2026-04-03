@@ -199,9 +199,12 @@ BOT_MESSAGE_DEFAULT_TEMPLATES: dict[str, str] = {
 }
 BOT_MESSAGE_LEVEL_RANK: dict[str, int] = {"mute": 0, "normal": 1, "verbose": 2, "debug": 3}
 TWITCH_SEND_CHAT_MESSAGE_MAX_LENGTH = 500
+TWITCH_TOKEN_SUBJECT_CACHE_TTL_SECONDS = 300
 
 _bot_log_listeners: set[asyncio.Queue[str]] = set()
 _bot_oauth_states: dict[str, Dict[str, Any]] = {}
+_BOT_TOKEN_SUBJECT_CACHE_LOCK = Lock()
+_BOT_TOKEN_SUBJECT_CACHE: dict[str, dict[str, Any]] = {}
 
 logger = logging.getLogger(__name__)
 
@@ -220,6 +223,9 @@ _INGRESS_METRICS: dict[str, Any] = {
         "sender_token_mismatch": 0,
         "invalid_sender_broadcaster_relation": 0,
         "empty_or_invalid_message": 0,
+        "preflight_validate_failed": 0,
+        "preflight_missing_bot_token": 0,
+        "preflight_subject_mismatch": 0,
         "unknown_400": 0,
         "transient_5xx": 0,
         "timeout": 0,
@@ -1573,10 +1579,16 @@ def _should_send_eventsub_reply(channel: ActiveChannel, visibility: str) -> bool
     return threshold_name != "mute" and message_rank <= threshold_rank
 
 
-def _resolve_twitch_token_subject_id(access_token: str, *, timeout: float = 6.0) -> Optional[str]:
-    """Resolve Twitch OAuth token subject user id via validation endpoint.
+def _resolve_twitch_token_subject_id(
+    access_token: str,
+    *,
+    timeout: float = 6.0,
+    force_revalidate: bool = False,
+) -> tuple[Optional[str], str]:
+    """Resolve and cache Twitch OAuth token subject user id from token validation.
 
-    Dependencies: Performs an HTTPS GET to Twitch ``/oauth2/validate``.
+    Dependencies: Uses in-process TTL cache and Twitch ``/oauth2/validate``
+    HTTPS GET fallback for cache misses/revalidation.
     Code customers: ``_preflight_eventsub_chat_reply_payload`` sender parity.
     Used variables/origin: ``access_token`` comes from persisted bot OAuth
     credentials and maps to validation response field ``user_id``.
@@ -1584,17 +1596,38 @@ def _resolve_twitch_token_subject_id(access_token: str, *, timeout: float = 6.0)
 
     token = (access_token or "").strip()
     if not token:
-        return None
-    response = requests.get(
-        "https://id.twitch.tv/oauth2/validate",
-        headers={"Authorization": f"OAuth {token}"},
-        timeout=timeout,
-    )
+        return None, "missing_bot_token"
+    now = time.time()
+    if not force_revalidate:
+        with _BOT_TOKEN_SUBJECT_CACHE_LOCK:
+            cached = _BOT_TOKEN_SUBJECT_CACHE.get(token)
+            if cached and float(cached.get("expires_at", 0)) > now:
+                cached_subject = str(cached.get("subject_id") or "").strip()
+                if cached_subject:
+                    return cached_subject, "cache_hit"
+    try:
+        response = requests.get(
+            "https://id.twitch.tv/oauth2/validate",
+            headers={"Authorization": f"OAuth {token}"},
+            timeout=timeout,
+        )
+    except requests.RequestException:
+        return None, "validate_failed"
     if response.status_code != 200:
-        return None
-    payload = response.json()
+        return None, "validate_failed"
+    try:
+        payload = response.json()
+    except ValueError:
+        return None, "validate_failed"
     subject_id = str(payload.get("user_id") or "").strip()
-    return subject_id or None
+    if not subject_id:
+        return None, "validate_failed"
+    with _BOT_TOKEN_SUBJECT_CACHE_LOCK:
+        _BOT_TOKEN_SUBJECT_CACHE[token] = {
+            "subject_id": subject_id,
+            "expires_at": now + TWITCH_TOKEN_SUBJECT_CACHE_TTL_SECONDS,
+        }
+    return subject_id, "validated"
 
 
 def _build_eventsub_chat_reply_payload(
@@ -1633,8 +1666,9 @@ def _preflight_eventsub_chat_reply_payload(
 ) -> tuple[Optional[dict[str, Any]], Optional[str], Optional[dict[str, str]]]:
     """Validate deterministic Twitch send-chat inputs before HTTP requests.
 
-    Dependencies: Reads ``BotConfig`` for bot access token, validates token
-    subject via Twitch ``/oauth2/validate``, and assembles Helix headers.
+    Dependencies: Reads ``BotConfig`` for bot access token, resolves/caches
+    token subject via ``_resolve_twitch_token_subject_id``, and assembles Helix
+    headers.
     Code customers: ``_send_eventsub_chat_reply`` deterministic preflight guard.
     Used variables/origin: broadcaster id from ``channel.channel_id``,
     ``sender_id`` from bot identity resolution, ``message`` from rendered reply,
@@ -1655,17 +1689,24 @@ def _preflight_eventsub_chat_reply_payload(
     cfg = db.query(BotConfig).order_by(BotConfig.id.asc()).first()
     access_token = (cfg.access_token if cfg and cfg.access_token else "").strip()
     if not access_token:
-        return None, "preflight_missing_bot_access_token", None
-    token_subject_id = _resolve_twitch_token_subject_id(access_token)
+        return None, "preflight_missing_bot_token", None
+    token_subject_id, resolution_status = _resolve_twitch_token_subject_id(access_token)
+    if not token_subject_id and resolution_status == "validate_failed":
+        # cleanup_candidate: collapse this explicit one-shot refresh path into
+        # shared bot-auth refresh orchestration once unified token management
+        # lands across EventSub preflight and admin OAuth maintenance.
+        token_subject_id, resolution_status = _resolve_twitch_token_subject_id(access_token, force_revalidate=True)
     if not token_subject_id:
-        return None, "preflight_token_subject_unresolved", None
+        return None, (
+            "preflight_missing_bot_token" if resolution_status == "missing_bot_token" else "preflight_validate_failed"
+        ), None
     if token_subject_id != normalized_sender_id:
-        return None, "preflight_sender_token_subject_mismatch", None
+        return None, "preflight_subject_mismatch", None
 
     headers = _eventsub_headers(access_token)
     payload = _build_eventsub_chat_reply_payload(
         broadcaster_id=broadcaster_id,
-        sender_id=normalized_sender_id,
+        sender_id=token_subject_id,
         message=normalized_message,
         reply_parent_message_id=(reply_parent_message_id or "").strip() or None,
     )
@@ -1750,8 +1791,8 @@ def _map_send_api_400_reason_code(*, status_code: Optional[int], message: str, e
 def _send_eventsub_chat_reply(db: Session, channel: ActiveChannel, reply: dict[str, Any], *, reply_parent_message_id: Optional[str]) -> bool:
     """Send webhook reply text through Twitch Send Chat Message API with retries.
 
-    Dependencies: Resolves sender identity via ``get_bot_user_id``, validates
-    deterministic payload constraints through
+    Dependencies: Resolves sender identity via ``get_bot_user_id`` (configured
+    bot identity), validates deterministic payload constraints through
     ``_preflight_eventsub_chat_reply_payload``, then POSTs
     ``/helix/chat/messages``.
     Code customers: ``_process_eventsub_chat_notification`` authoritative path.
@@ -1777,10 +1818,11 @@ def _send_eventsub_chat_reply(db: Session, channel: ActiveChannel, reply: dict[s
     )
     if preflight_reason_code or not payload or not headers:
         _record_ingress_metric("send_api_failure")
-        _record_ingress_metric("send_api_failure_reason", key="preflight_rejected")
+        tracked_reason = preflight_reason_code or "preflight_rejected"
+        _record_ingress_metric("send_api_failure_reason", key=tracked_reason)
         logger.warning(
             "Webhook reply send skipped by preflight: reason_code=%s channel=%s template_key=%s",
-            preflight_reason_code or "preflight_unknown_failure",
+            tracked_reason,
             channel.channel_name,
             reply.get("template_key"),
         )
