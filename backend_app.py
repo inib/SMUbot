@@ -118,6 +118,18 @@ BOT_USER_ID: Optional[str] = None
 BOT_TOKEN_REFRESH_POLL_SECONDS = 60
 BOT_TOKEN_REFRESH_LEEWAY_SECONDS = 300
 BOT_TOKEN_REFRESH_FAILURE_GRACE_SECONDS = 900
+INGRESS_GUARD_REPAIR_WATCHER_POLL_SECONDS = 60
+INGRESS_GUARD_REPAIR_ACTION_ORDER = ("reconcile", "shard_repair", "rebuild")
+INGRESS_GUARD_REPAIR_COOLDOWN_SECONDS: dict[str, int] = {
+    "reconcile": 120,
+    "shard_repair": 300,
+    "rebuild": 900,
+}
+INGRESS_GUARD_REPAIR_MAX_ATTEMPTS: dict[str, int] = {
+    "reconcile": 5,
+    "shard_repair": 3,
+    "rebuild": 2,
+}
 
 EVENTSUB_EVENT_MAP: dict[str, str] = {
     "channel.follow": "follow",
@@ -230,6 +242,8 @@ _INGRESS_METRICS: dict[str, Any] = {
         "preflight_rejected": 0,
     },
     "shard_status_transitions": {},
+    "guard_repair_actions": {},
+    "guard_repair_outcomes": {},
     "last_errors": {
         "signature_failure_at": None,
         "signature_failure_reason_code": None,
@@ -254,6 +268,13 @@ _BOT_TOKEN_REFRESH_STATE: dict[str, Any] = {
 }
 _BOT_TOKEN_REFRESH_STOP_EVENT = Event()
 _BOT_TOKEN_REFRESH_WORKER: Optional[Thread] = None
+_INGRESS_GUARD_REPAIR_LOCK = Lock()
+_INGRESS_GUARD_REPAIR_STATE: dict[str, dict[str, Any]] = {
+    action: {"last_attempt_at": None, "attempt_count": 0}
+    for action in INGRESS_GUARD_REPAIR_ACTION_ORDER
+}
+_INGRESS_GUARD_REPAIR_STOP_EVENT = Event()
+_INGRESS_GUARD_REPAIR_WORKER: Optional[Thread] = None
 
 engine = create_engine(DB_URL, connect_args={"check_same_thread": False} if DB_URL.startswith("sqlite") else {})
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
@@ -801,7 +822,7 @@ def normalize_eventsub_callback_override(value: Optional[str]) -> Optional[str]:
     return str(parsed.replace(query="", fragment=""))
 
 
-def _public_eventsub_callback_url(request: FastAPIRequest) -> tuple[Optional[str], Optional[str], dict[str, Any]]:
+def _public_eventsub_callback_url(request: Optional[FastAPIRequest]) -> tuple[Optional[str], Optional[str], dict[str, Any]]:
     """Build the webhook callback URL Twitch should register for EventSub.
 
     Dependencies: Reads settings via ``get_eventsub_callback_override`` and
@@ -812,8 +833,9 @@ def _public_eventsub_callback_url(request: FastAPIRequest) -> tuple[Optional[str
     shard reconciliation setup paths.
     Used variables/origin: Tries ``eventsub_callback_override`` first (exact
     callback path required), then ``public_backend_origin`` with the canonical
-    path appended, and finally the request-derived callback URL. Returns
-    structured warnings with source metadata for degraded reconciliation output.
+    path appended, and finally the request-derived callback URL (when request
+    context exists). Returns structured warnings with source metadata for
+    degraded reconciliation output.
     """
     details: dict[str, Any] = {"source": None, "warnings": []}
 
@@ -835,8 +857,9 @@ def _public_eventsub_callback_url(request: FastAPIRequest) -> tuple[Optional[str
                 str(base.replace(path="/twitch/eventsub/callback", query="", fragment="")),
             )
         )
-    route_url = URL(str(request.url_for("eventsub_callback")))
-    candidates.append(("request_url", str(route_url.replace(query="", fragment=""))))
+    if request is not None:
+        route_url = URL(str(request.url_for("eventsub_callback")))
+        candidates.append(("request_url", str(route_url.replace(query="", fragment=""))))
 
     for source, candidate in candidates:
         try:
@@ -1041,6 +1064,12 @@ def _record_ingress_metric(metric: str, *, key: Optional[str] = None, timestamp:
         elif metric == "shard_status_transition" and key:
             transitions = _INGRESS_METRICS["shard_status_transitions"]
             transitions[key] = int(transitions.get(key, 0)) + 1
+        elif metric == "guard_repair_action" and key:
+            actions = _INGRESS_METRICS["guard_repair_actions"]
+            actions[key] = int(actions.get(key, 0)) + 1
+        elif metric == "guard_repair_outcome" and key:
+            outcomes = _INGRESS_METRICS["guard_repair_outcomes"]
+            outcomes[key] = int(outcomes.get(key, 0)) + 1
         elif metric == "guard_degraded":
             _INGRESS_METRICS["last_errors"]["guard_degraded_at"] = now
         cutoff = now - timedelta(hours=1)
@@ -1078,6 +1107,8 @@ def _ingress_metrics_snapshot(now: datetime) -> dict[str, Any]:
             "send_api_failure_count": int(_INGRESS_METRICS["send_api_failure_count"]),
             "send_api_failure_reasons": dict(_INGRESS_METRICS["send_api_failure_reasons"]),
             "shard_status_transitions": dict(_INGRESS_METRICS["shard_status_transitions"]),
+            "guard_repair_actions": dict(_INGRESS_METRICS["guard_repair_actions"]),
+            "guard_repair_outcomes": dict(_INGRESS_METRICS["guard_repair_outcomes"]),
             "last_errors": dict(_INGRESS_METRICS["last_errors"]),
             "recent_callback_throughput": {
                 "window_seconds": int(thresholds["window_seconds"]),
@@ -1461,6 +1492,211 @@ def run_ingress_guard_startup_check() -> None:
         db.close()
 
 
+def _ingress_guard_reasons_to_actions(reasons: list[str]) -> list[str]:
+    """Translate ingress guard degradation reasons into repair action candidates.
+
+    Dependencies: Uses static reason-to-action mapping for
+    ``callback_errors_spike``, ``invalid_signature``, and shard-health issues.
+    Code customers: ``run_ingress_guard_repair_cycle`` repair planner.
+    Used variables/origin: ``reasons`` is sourced from
+    ``_evaluate_ingress_guard(...).reasons`` and ordered by severity.
+    """
+
+    reason_set = set(reasons)
+    actions: list[str] = []
+    if "callback_errors_spike" in reason_set:
+        actions.append("reconcile")
+    if "invalid_signature" in reason_set or "missing_healthy_shards" in reason_set:
+        actions.append("shard_repair")
+    if not actions and reason_set:
+        actions.append("reconcile")
+    actions.append("rebuild")
+    ordered_unique: list[str] = []
+    for action in INGRESS_GUARD_REPAIR_ACTION_ORDER:
+        if action in actions and action not in ordered_unique:
+            ordered_unique.append(action)
+    return ordered_unique
+
+
+def _select_ingress_guard_repair_action(
+    *,
+    reasons: list[str],
+    now: datetime,
+) -> tuple[Optional[str], Optional[str], dict[str, Any]]:
+    """Pick next least-disruptive repair action with cooldown and attempt caps.
+
+    Dependencies: Reads ``_INGRESS_GUARD_REPAIR_STATE`` under
+    ``_INGRESS_GUARD_REPAIR_LOCK`` and policy constants for cooldown/max
+    attempts.
+    Code customers: ``run_ingress_guard_repair_cycle`` action planning stage.
+    Used variables/origin: ``reasons`` comes from ingress guard results and
+    ``now`` is the watcher cycle timestamp.
+    """
+
+    candidates = _ingress_guard_reasons_to_actions(reasons)
+    with _INGRESS_GUARD_REPAIR_LOCK:
+        for action in candidates:
+            state = _INGRESS_GUARD_REPAIR_STATE.setdefault(action, {"last_attempt_at": None, "attempt_count": 0})
+            last_attempt_at = state.get("last_attempt_at")
+            attempt_count = int(state.get("attempt_count") or 0)
+            max_attempts = int(INGRESS_GUARD_REPAIR_MAX_ATTEMPTS.get(action, 1))
+            cooldown_seconds = int(INGRESS_GUARD_REPAIR_COOLDOWN_SECONDS.get(action, 60))
+            if attempt_count >= max_attempts:
+                continue
+            if isinstance(last_attempt_at, datetime) and now < (last_attempt_at + timedelta(seconds=cooldown_seconds)):
+                continue
+            state["last_attempt_at"] = now
+            state["attempt_count"] = attempt_count + 1
+            return action, None, {"action": action, "attempt": state["attempt_count"], "max_attempts": max_attempts}
+    return None, "cooldown_or_attempt_cap", {"candidates": candidates}
+
+
+def _run_ingress_guard_repair_action(action: str, *, db: Session) -> dict[str, Any]:
+    """Execute one ingress repair action and return structured outcome details.
+
+    Dependencies: Uses reconcile/conduit shard repair helpers plus SQLAlchemy
+    writes for rebuild preflight cleanup.
+    Code customers: ``run_ingress_guard_repair_cycle`` execution stage.
+    Used variables/origin: ``action`` is selected by
+    ``_select_ingress_guard_repair_action`` and constrained to watcher policy.
+    """
+
+    if action == "reconcile":
+        result = reconcile_eventsub_conduit_subscriptions(None, db)
+        return {"status": result.get("status", "unknown"), "errors": result.get("errors", [])}
+
+    channels = db.query(ActiveChannel).order_by(ActiveChannel.id.asc()).all()
+    channels_with_owner_tokens = [ch for ch in channels if ch.owner and ch.owner.access_token]
+    callback, callback_error, callback_meta = _public_eventsub_callback_url(None)
+    if callback_error or not callback:
+        return {
+            "status": "failed",
+            "errors": [callback_error or "callback_url_unresolved"],
+            "warnings": callback_meta.get("warnings", []),
+        }
+    headers = _eventsub_app_headers()
+    now = datetime.utcnow()
+    conduit_row, conduit_errors = _ensure_twitch_conduit(headers, len(channels_with_owner_tokens), db, now)
+    if not conduit_row:
+        return {"status": "failed", "errors": conduit_errors or ["conduit_unavailable"]}
+    assignment, shard_errors = _reconcile_twitch_conduit_shards(
+        headers,
+        conduit_row,
+        callback,
+        len(channels_with_owner_tokens),
+        db,
+        now,
+    )
+    if action == "shard_repair":
+        return {
+            "status": "ok" if not shard_errors else "degraded",
+            "errors": shard_errors,
+            "healthy_shards_seen": len(assignment),
+            "cleanup_candidates": [
+                "legacy webhook ensure path currently triggers ad-hoc conduit reconciliation (cleanup_candidate: migrate to watcher-owned repair orchestration)"
+            ],
+        }
+
+    # cleanup_candidate: this local delete-and-recreate rebuild path should be
+    # removed once a first-class Helix conduit replacement API workflow lands.
+    db.query(TwitchConduitShard).delete()
+    db.query(TwitchConduit).delete()
+    db.flush()
+    rebuilt = reconcile_eventsub_conduit_subscriptions(None, db)
+    return {"status": rebuilt.get("status", "unknown"), "errors": rebuilt.get("errors", [])}
+
+
+def run_ingress_guard_repair_cycle(*, now: Optional[datetime] = None) -> dict[str, Any]:
+    """Evaluate guard metrics and run one least-disruptive repair action.
+
+    Dependencies: Uses ``SessionLocal``, ``_evaluate_ingress_guard``,
+    ``_select_ingress_guard_repair_action``, and
+    ``_run_ingress_guard_repair_action``.
+    Code customers: ``_ingress_guard_repair_watcher_loop`` and focused tests.
+    Used variables/origin: ``now`` defaults to ``datetime.utcnow`` and feeds
+    both guard evaluation and cooldown/attempt accounting.
+    """
+
+    cycle_now = now or datetime.utcnow()
+    db = SessionLocal()
+    try:
+        if get_chat_ingress_mode() != "webhook_conduit":
+            return {"status": "skipped", "reason": "ingress_mode_not_webhook_conduit"}
+        guard = _evaluate_ingress_guard(db, cycle_now, apply_fallback=True)
+        reasons = [str(reason) for reason in guard.get("reasons", [])]
+        if not guard.get("degraded"):
+            return {"status": "healthy", "reasons": []}
+        action, skip_reason, policy = _select_ingress_guard_repair_action(reasons=reasons, now=cycle_now)
+        if not action:
+            _record_ingress_metric("guard_repair_outcome", key=f"skipped:{skip_reason}", timestamp=cycle_now)
+            logger.info(
+                "INGRESS_GUARD_REPAIR_SKIPPED reason=%s reasons=%s policy=%s",
+                skip_reason,
+                ",".join(reasons),
+                policy,
+            )
+            return {"status": "skipped", "reason": skip_reason, "guard_reasons": reasons, "policy": policy}
+        _record_ingress_metric("guard_repair_action", key=action, timestamp=cycle_now)
+        outcome = _run_ingress_guard_repair_action(action, db=db)
+        outcome_status = str(outcome.get("status") or "unknown")
+        _record_ingress_metric("guard_repair_outcome", key=f"{action}:{outcome_status}", timestamp=cycle_now)
+        logger.info(
+            "INGRESS_GUARD_REPAIR action=%s outcome=%s reasons=%s details=%s",
+            action,
+            outcome_status,
+            ",".join(reasons),
+            json.dumps(outcome, default=str),
+        )
+        return {"status": "executed", "action": action, "guard_reasons": reasons, "outcome": outcome}
+    except Exception as exc:
+        _record_ingress_metric("guard_repair_outcome", key="error:exception", timestamp=cycle_now)
+        logger.exception("INGRESS_GUARD_REPAIR_ERROR error=%s", exc)
+        return {"status": "error", "error": str(exc)}
+    finally:
+        db.close()
+
+
+def _ingress_guard_repair_watcher_loop(stop_event: Event) -> None:
+    """Run background ingress repair watcher every 60 seconds.
+
+    Dependencies: Calls ``run_ingress_guard_repair_cycle`` and waits on
+    ``threading.Event`` for cooperative shutdown.
+    Code customers: ``start_ingress_guard_repair_watcher`` startup bootstrap.
+    Used variables/origin: cadence comes from
+    ``INGRESS_GUARD_REPAIR_WATCHER_POLL_SECONDS``.
+    """
+
+    logger.info("INGRESS_GUARD_REPAIR_WATCHER_STARTED poll_seconds=%s", INGRESS_GUARD_REPAIR_WATCHER_POLL_SECONDS)
+    while not stop_event.is_set():
+        run_ingress_guard_repair_cycle()
+        stop_event.wait(timeout=max(int(INGRESS_GUARD_REPAIR_WATCHER_POLL_SECONDS), 30))
+
+
+def start_ingress_guard_repair_watcher() -> None:
+    """Start singleton ingress guard repair watcher thread.
+
+    Dependencies: Spawns daemon ``Thread`` targeting
+    ``_ingress_guard_repair_watcher_loop``.
+    Code customers: module startup path after token-refresh worker startup.
+    Used variables/origin: singleton thread reference stored in
+    ``_INGRESS_GUARD_REPAIR_WORKER``.
+    """
+
+    global _INGRESS_GUARD_REPAIR_WORKER
+    worker = _INGRESS_GUARD_REPAIR_WORKER
+    if worker and worker.is_alive():
+        return
+    _INGRESS_GUARD_REPAIR_STOP_EVENT.clear()
+    worker = Thread(
+        target=_ingress_guard_repair_watcher_loop,
+        args=(_INGRESS_GUARD_REPAIR_STOP_EVENT,),
+        daemon=True,
+        name="ingress-guard-repair-watcher",
+    )
+    worker.start()
+    _INGRESS_GUARD_REPAIR_WORKER = worker
+
+
 def _system_config_payload() -> Dict[str, Any]:
     return {
         "setup_complete": is_setup_complete(),
@@ -1741,6 +1977,9 @@ def ensure_eventsub_subscriptions(request: FastAPIRequest, channel_pk: int, db: 
         db.commit()
 
     if get_chat_ingress_mode() == "webhook_conduit" or get_chat_ingress_shadow_mode():
+        # cleanup_candidate: this immediate reconcile call predates the guarded
+        # watcher-based repair orchestration and should be folded into a single
+        # repair pipeline to avoid duplicate ad-hoc remediation paths.
         try:
             reconcile_eventsub_conduit_subscriptions(request, db)
         except Exception:
@@ -3566,7 +3805,7 @@ def _format_eventsub_http_error(exc: Exception, auth_mode: str) -> str:
     )
 
 
-def reconcile_eventsub_conduit_subscriptions(request: FastAPIRequest, db: Session) -> dict[str, Any]:
+def reconcile_eventsub_conduit_subscriptions(request: Optional[FastAPIRequest], db: Session) -> dict[str, Any]:
     """Reconcile conduit + shards + chat subscriptions for every active channel.
 
     Dependencies: Uses app-auth via ``_eventsub_app_headers`` for conduit/shard
@@ -3576,7 +3815,8 @@ def reconcile_eventsub_conduit_subscriptions(request: FastAPIRequest, db: Sessio
     Code customers: Health routes and onboarding setup call this to surface
     conduit alignment status without disabling websocket subscriptions.
     Used variables/origin: channel list comes from ``ActiveChannel`` rows and
-    callback URL resolves from ``_public_eventsub_callback_url``; chat
+    callback URL resolves from ``_public_eventsub_callback_url`` (request
+    context optional in background workers); chat
     ``condition.user_id`` is sourced from the bot account instead of per-channel
     owner identity.
 
@@ -4220,6 +4460,7 @@ def _validate_startup_symbol_order() -> None:
         "_ingress_guard_thresholds",
         "run_ingress_guard_startup_check",
         "start_bot_token_refresh_worker",
+        "start_ingress_guard_repair_watcher",
     )
     missing = [name for name in required_symbols if name not in globals()]
     if missing:
@@ -4234,6 +4475,7 @@ cleanup_conduit_subscription_secret_semantics()
 _validate_startup_symbol_order()
 run_ingress_guard_startup_check()
 start_bot_token_refresh_worker()
+start_ingress_guard_repair_watcher()
 
 # =====================================
 # Schemas
