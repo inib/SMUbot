@@ -81,6 +81,27 @@ class BotConfigApiTests(unittest.TestCase):
         self.assertEqual(data["scopes"], backend_app.get_bot_app_scopes())
         self.assertFalse(data["token_present"])
 
+    def test_backfill_twitch_send_chat_auth_mode_setting_inserts_default_row(self) -> None:
+        """Backfill startup helper should insert missing auth-mode app setting."""
+
+        db = backend_app.SessionLocal()
+        try:
+            db.query(backend_app.AppSetting).filter(backend_app.AppSetting.key == "twitch_send_chat_auth_mode").delete()
+            db.commit()
+        finally:
+            db.close()
+        backend_app.settings_store.invalidate()
+
+        backend_app.backfill_twitch_send_chat_auth_mode_setting()
+
+        db = backend_app.SessionLocal()
+        try:
+            row = db.get(backend_app.AppSetting, "twitch_send_chat_auth_mode")
+            self.assertIsNotNone(row)
+            self.assertEqual(row.value, backend_app.TWITCH_SEND_CHAT_AUTH_MODE_DEFAULT)
+        finally:
+            db.close()
+
     def test_existing_config_missing_required_scopes_is_healed(self) -> None:
         db = backend_app.SessionLocal()
         try:

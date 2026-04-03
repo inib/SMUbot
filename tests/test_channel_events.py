@@ -1397,6 +1397,72 @@ class ChannelEventTests(unittest.TestCase):
         finally:
             db.close()
 
+    def test_preflight_eventsub_chat_reply_payload_uses_app_headers_when_auth_mode_unset(self) -> None:
+        """Default missing auth-mode setting to app headers during preflight."""
+
+        details = _setup_channel()
+        db = backend_app.SessionLocal()
+        try:
+            db.query(backend_app.AppSetting).filter(backend_app.AppSetting.key == "twitch_send_chat_auth_mode").delete()
+            db.commit()
+            backend_app.settings_store.invalidate()
+            channel = db.get(backend_app.ActiveChannel, details["channel_pk"])
+            self.assertIsNotNone(channel)
+            with mock.patch.object(
+                backend_app,
+                "_eventsub_app_headers",
+                return_value={"Authorization": "Bearer app-token", "Client-Id": "cid"},
+            ) as mock_app_headers, mock.patch.object(
+                backend_app,
+                "_resolve_twitch_token_subject_id",
+            ) as mock_subject:
+                payload, reason_code, headers = backend_app._preflight_eventsub_chat_reply_payload(
+                    db,
+                    channel=channel,
+                    sender_id="bot-user-1",
+                    message="hello from webhook",
+                    reply_parent_message_id=None,
+                )
+            self.assertIsNone(reason_code)
+            self.assertIsNotNone(payload)
+            self.assertEqual(headers, {"Authorization": "Bearer app-token", "Client-Id": "cid"})
+            self.assertEqual(mock_app_headers.call_count, 1)
+            self.assertEqual(mock_subject.call_count, 0)
+        finally:
+            db.close()
+
+    def test_preflight_eventsub_chat_reply_payload_uses_app_headers_when_default_selected(self) -> None:
+        """Treat explicit default auth-mode value as app-header policy."""
+
+        details = _setup_channel()
+        db = backend_app.SessionLocal()
+        try:
+            backend_app.set_settings(db, {"twitch_send_chat_auth_mode": backend_app.TWITCH_SEND_CHAT_AUTH_MODE_DEFAULT})
+            channel = db.get(backend_app.ActiveChannel, details["channel_pk"])
+            self.assertIsNotNone(channel)
+            with mock.patch.object(
+                backend_app,
+                "_eventsub_app_headers",
+                return_value={"Authorization": "Bearer app-token", "Client-Id": "cid"},
+            ) as mock_app_headers, mock.patch.object(
+                backend_app,
+                "_resolve_twitch_token_subject_id",
+            ) as mock_subject:
+                payload, reason_code, headers = backend_app._preflight_eventsub_chat_reply_payload(
+                    db,
+                    channel=channel,
+                    sender_id="bot-user-1",
+                    message="hello from webhook",
+                    reply_parent_message_id=None,
+                )
+            self.assertIsNone(reason_code)
+            self.assertIsNotNone(payload)
+            self.assertEqual(headers, {"Authorization": "Bearer app-token", "Client-Id": "cid"})
+            self.assertEqual(mock_app_headers.call_count, 1)
+            self.assertEqual(mock_subject.call_count, 0)
+        finally:
+            db.close()
+
     def test_preflight_eventsub_chat_reply_payload_skips_user_subject_checks_in_app_mode(self) -> None:
         """Avoid user-token-only preflight failures when app-auth mode is selected."""
 
