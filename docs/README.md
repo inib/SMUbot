@@ -327,8 +327,12 @@ unlocks the API for the bot, queue manager, and public web frontend.
   reports `preflight_token_subject_unresolved`.
 - Webhook replies are skipped before Send Chat API call.
 
+> This preflight reason only applies when Send Chat auth mode is
+> `bot_user_token`. In `app_token` mode, sender/token subject parity checks are
+> intentionally skipped.
+
 **Dependencies**
-- Valid bot access token in `/bot/config`.
+- Valid bot user access token in `/bot/config`.
 - Reachable Twitch `/oauth2/validate` endpoint.
 
 **Primary variables/origins to verify**
@@ -347,7 +351,8 @@ unlocks the API for the bot, queue manager, and public web frontend.
 
 **Dependencies**
 - App access token flow for conduit API + transport subscriptions.
-- Bot user token for Send Chat Message API calls.
+- Send Chat auth mode (`bot_user_token` or `app_token`) configured for
+  webhook replies.
 
 **Primary variables/origins to verify**
 - Twitch client credentials configured in setup (`client_id`, `client_secret`).
@@ -355,8 +360,8 @@ unlocks the API for the bot, queue manager, and public web frontend.
 - Token/client pairing validity (`/oauth2/validate` metadata).
 
 **Procedure**
-1. Validate app and bot tokens independently against Twitch validation endpoint.
-2. Re-run bot OAuth flow if bot token subject/scopes are stale or expired.
+1. Validate app token health for conduit management APIs.
+2. If Send Chat mode is `bot_user_token`, validate bot OAuth token subject/scopes and re-run bot OAuth flow if stale.
 3. Confirm conduit reconcile succeeds with app token auth.
 4. Confirm webhook command replies recover (Send API success + reduced 401s).
 
@@ -555,10 +560,11 @@ The web container hosts files in `web/public/`, including a simple `index.html`,
 ## Authentication & Channel Access
 Songbot relies on two distinct OAuth flows that map to the two management panels:
 
-1. **Bot account authorization (Admin panel)** – The Admin control panel triggers a
-   client credentials grant using the scopes `user:read:chat user:write:chat user:bot`.
-   The resulting app access token is stored through `/bot/config` and allows the
-   backend and bot worker to act as the shared bot account when calling the API.
+1. **Bot account authorization (Admin panel)** – The Admin control panel starts an
+   authorization code grant for the shared bot account using scopes such as
+   `user:read:chat user:write:chat user:bot`. The resulting **bot user access
+   token** (plus refresh token) is stored through `/bot/config` and is used for
+   bot-user-auth Send Chat paths (for example websocket rollback runtime).
    The Admin panel is protected with HTTP basic authentication configured via
    the `ADMIN_BASIC_AUTH_USERNAME` and `ADMIN_BASIC_AUTH_PASSWORD` environment
    variables.
@@ -567,7 +573,7 @@ Songbot relies on two distinct OAuth flows that map to the two management panels
    Queue Manager UI and complete the authorization code grant with the
    `channel:bot channel:read:subscriptions channel:read:vips bits:read moderator:read:followers user:read:email` scopes. The
    backend records the channel during this handshake and subscribes to chat
-   events using the previously obtained app access token. Only channels that
+   events using the app-auth conduit transport. Only channels that
    complete this flow are joined by the bot. Bits and follower access enable
    pricing features tied to cheers and follow events.
 
