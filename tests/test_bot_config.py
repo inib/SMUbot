@@ -94,7 +94,7 @@ class BotConfigApiTests(unittest.TestCase):
         finally:
             db.close()
 
-        with patch.object(backend_app, "_send_eventsub_chat_reply", return_value=True) as send_reply:
+        with patch.object(backend_app, "_send_eventsub_chat_reply", return_value=(True, None)) as send_reply:
             response = self.client.post(
                 "/bot/runtime/announcements",
                 headers={"X-Admin-Token": backend_app.ADMIN_TOKEN},
@@ -113,6 +113,7 @@ class BotConfigApiTests(unittest.TestCase):
         payload = response.json()
         self.assertTrue(payload["success"])
         self.assertTrue(payload["sent"])
+        self.assertIsNone(payload.get("reason_code"))
         self.assertEqual(payload["delivery_path"], "send_chat_pipeline")
         self.assertEqual(payload["visibility"], "verbose")
         send_reply.assert_called_once()
@@ -133,7 +134,7 @@ class BotConfigApiTests(unittest.TestCase):
         finally:
             db.close()
 
-        with patch.object(backend_app, "_send_eventsub_chat_reply", return_value=True) as send_reply:
+        with patch.object(backend_app, "_send_eventsub_chat_reply", return_value=(True, None)) as send_reply:
             response = self.client.post(
                 "/bot/runtime/announcements",
                 headers={"X-Admin-Token": backend_app.ADMIN_TOKEN},
@@ -143,6 +144,29 @@ class BotConfigApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("unknown bot message_id", response.json().get("detail", ""))
         send_reply.assert_not_called()
+
+    def test_runtime_announcement_returns_reason_code_when_unsent(self) -> None:
+        """Runtime announcement payload should include backend send reason metadata."""
+
+        db = backend_app.SessionLocal()
+        try:
+            channel = backend_app.ActiveChannel(channel_id="12347", channel_name="ChannelThree")
+            db.add(channel)
+            db.commit()
+        finally:
+            db.close()
+
+        with patch.object(backend_app, "_send_eventsub_chat_reply", return_value=(False, "suppressed_by_level")):
+            response = self.client.post(
+                "/bot/runtime/announcements",
+                headers={"X-Admin-Token": backend_app.ADMIN_TOKEN},
+                json={"channel": "ChannelThree", "message_id": "queue_position_changed", "template_vars": {}},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertFalse(payload["sent"])
+        self.assertEqual(payload["reason_code"], "suppressed_by_level")
 
     def test_backfill_twitch_send_chat_auth_mode_setting_inserts_default_row(self) -> None:
         """Backfill startup helper should insert missing auth-mode app setting."""

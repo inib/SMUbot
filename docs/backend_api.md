@@ -197,6 +197,10 @@ This document summarizes the REST endpoints exposed by `backend_app.py`.
   - Builds the same reply contract used by webhook command replies (`template_key`, `template_vars`, `visibility`).
   - Sends through the authoritative Twitch Send Chat Message pipeline (`_send_eventsub_chat_reply`), which enforces the same auth-mode policy (`twitch_send_chat_auth_mode`) and channel `bot_message_level` threshold rules.
   - Returns send status metadata including `delivery_path: "send_chat_pipeline"`.
+  - When `sent=false`, includes `reason_code` with one of:
+    - `suppressed_by_level`: channel message-level threshold or empty rendered template suppressed the send.
+    - `preflight_rejected`: auth/header/payload preflight checks failed before calling Twitch Send Chat API.
+    - `api_failure`: Twitch Send Chat API request failed (HTTP/request/timeout path).
 - **Rollback note**
   - This endpoint is authoritative for non-chat runtime announcements.
   - Bot websocket `_send_message` remains rollback-only and should only be used when explicit fallback is required.

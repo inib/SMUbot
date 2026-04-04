@@ -1257,11 +1257,26 @@ class SongBot(commands.Bot):
         """
 
         try:
-            await backend.announce_runtime_event(
+            response = await backend.announce_runtime_event(
                 channel=channel,
                 message_id=message_id,
                 template_vars=template_vars or {},
             )
+            if not bool((response or {}).get('sent', True)):
+                await push_console_event(
+                    'warning',
+                    f"Backend runtime announcement suppressed for {channel} "
+                    f"(message_id={(response or {}).get('message_id', message_id)}, "
+                    f"visibility={(response or {}).get('visibility', 'unknown')})",
+                    event='runtime_announcement_suppressed',
+                    metadata={
+                        **(metadata or {}),
+                        'channel': channel,
+                        'message_id': (response or {}).get('message_id', message_id),
+                        'visibility': (response or {}).get('visibility'),
+                        'reason_code': (response or {}).get('reason_code'),
+                    },
+                )
             return
         except Exception as exc:
             await push_console_event(
