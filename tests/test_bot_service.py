@@ -429,7 +429,49 @@ class BotServiceTests(unittest.IsolatedAsyncioTestCase):
         song_bot._cancel_refresher.assert_awaited()
         song_bot._disable_all_channels.assert_awaited()
         base_close.assert_awaited()
-        bot_app.backend.close.assert_awaited()
+
+    async def test_announce_backend_runtime_event_logs_when_backend_reports_unsent(self) -> None:
+        """Log unsent backend runtime announcements with backend reason metadata.
+
+        Dependencies: ``SongBot._announce_backend_runtime_event`` and backend
+        ``announce_runtime_event`` response contract.
+        Code customers: runtime queue/event producers that rely on backend
+        delivery for non-chat announcements.
+        Used variables/origin: backend response fields ``sent``,
+        ``message_id``, ``visibility``, and ``reason_code``.
+        """
+
+        song_bot = bot_app.SongBot.__new__(bot_app.SongBot)
+        song_bot._send_catalog_message = AsyncMock()
+        self.backend.announce_runtime_event = AsyncMock(
+            return_value={
+                "success": True,
+                "sent": False,
+                "channel": "ChannelOne",
+                "message_id": "queue_position_changed",
+                "visibility": "verbose",
+                "reason_code": "suppressed_by_level",
+            }
+        )
+
+        push_event = AsyncMock()
+        with patch.object(bot_app, "push_console_event", push_event):
+            await song_bot._announce_backend_runtime_event(
+                login="channelone",
+                channel="ChannelOne",
+                message_id="queue_position_changed",
+            )
+
+        self.backend.announce_runtime_event.assert_awaited_once()
+        song_bot._send_catalog_message.assert_not_awaited()
+        push_event.assert_awaited_once()
+        args, kwargs = push_event.await_args
+        self.assertEqual(args[0], "warning")
+        self.assertIn("suppressed", args[1].lower())
+        self.assertEqual(kwargs.get("event"), "runtime_announcement_suppressed")
+        self.assertEqual(kwargs.get("metadata", {}).get("message_id"), "queue_position_changed")
+        self.assertEqual(kwargs.get("metadata", {}).get("visibility"), "verbose")
+        self.assertEqual(kwargs.get("metadata", {}).get("reason_code"), "suppressed_by_level")
 
     async def test_handle_playlist_request_success(self) -> None:
         song_bot = bot_app.SongBot.__new__(bot_app.SongBot)

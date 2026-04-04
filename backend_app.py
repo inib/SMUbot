@@ -2416,7 +2416,14 @@ def _map_send_api_400_reason_code(*, status_code: Optional[int], message: str, e
     return "unknown_400"
 
 
-def _send_eventsub_chat_reply(db: Session, channel: ActiveChannel, reply: dict[str, Any], *, reply_parent_message_id: Optional[str]) -> bool:
+def _send_eventsub_chat_reply(
+    db: Session,
+    channel: ActiveChannel,
+    reply: dict[str, Any],
+    *,
+    reply_parent_message_id: Optional[str],
+    return_reason: bool = False,
+) -> Any:
     """Send webhook reply text through Twitch Send Chat Message API with retries.
 
     Dependencies: Resolves sender identity via ``get_bot_user_id``, validates
@@ -2426,16 +2433,24 @@ def _send_eventsub_chat_reply(db: Session, channel: ActiveChannel, reply: dict[s
     Code customers: ``_process_eventsub_chat_notification`` authoritative path.
     Used variables/origin: ``reply`` contract is emitted by command executors;
     ``reply_parent_message_id`` comes from the inbound EventSub message id.
+    When ``return_reason=True``, returns ``(sent, reason_code)`` where
+    ``reason_code`` is one of ``suppressed_by_level``, ``preflight_rejected``,
+    or ``api_failure`` for non-send outcomes.
     """
+
+    def _finish(sent: bool, reason_code: Optional[str] = None) -> Any:
+        if return_reason:
+            return sent, reason_code
+        return sent
 
     visibility = str(reply.get("visibility") or "normal")
     if not _should_send_eventsub_reply(channel, visibility):
         _record_ingress_metric("reply_suppressed")
-        return False
+        return _finish(False, "suppressed_by_level")
     text = _render_eventsub_reply_text(reply)
     if not text:
         _record_ingress_metric("reply_suppressed")
-        return False
+        return _finish(False, "suppressed_by_level")
     sender_id = str(get_bot_user_id() or "").strip()
     payload, preflight_reason_code, headers = _preflight_eventsub_chat_reply_payload(
         db,
@@ -2454,7 +2469,7 @@ def _send_eventsub_chat_reply(db: Session, channel: ActiveChannel, reply: dict[s
             channel.channel_name,
             reply.get("template_key"),
         )
-        return False
+        return _finish(False, "preflight_rejected")
     delay_seconds = 0.3
     for attempt in range(3):
         try:
@@ -2466,7 +2481,7 @@ def _send_eventsub_chat_reply(db: Session, channel: ActiveChannel, reply: dict[s
             )
             response.raise_for_status()
             _record_ingress_metric("reply_sent")
-            return True
+            return _finish(True, None)
         except requests.HTTPError as exc:
             _record_ingress_metric("send_api_failure")
             status_code, reason_code, diagnostic_snippet = _extract_send_api_error_details(exc.response)
@@ -2483,7 +2498,7 @@ def _send_eventsub_chat_reply(db: Session, channel: ActiveChannel, reply: dict[s
                     reply.get("template_key"),
                     diagnostic_snippet,
                 )
-                return False
+                return _finish(False, "api_failure")
             if attempt == 2:
                 logger.exception(
                     "Webhook reply send failed after retries: reason_code=%s status_code=%s twitch_error=%s",
@@ -2492,7 +2507,7 @@ def _send_eventsub_chat_reply(db: Session, channel: ActiveChannel, reply: dict[s
                     diagnostic_snippet,
                     extra={"channel": channel.channel_name, "template_key": reply.get("template_key")},
                 )
-                return False
+                return _finish(False, "api_failure")
             time.sleep(delay_seconds)
             delay_seconds *= 2
         except requests.Timeout:
@@ -2503,7 +2518,7 @@ def _send_eventsub_chat_reply(db: Session, channel: ActiveChannel, reply: dict[s
                     "Webhook reply send failed after retries",
                     extra={"channel": channel.channel_name, "template_key": reply.get("template_key")},
                 )
-                return False
+                return _finish(False, "api_failure")
             time.sleep(delay_seconds)
             delay_seconds *= 2
         except requests.RequestException:
@@ -2514,8 +2529,8 @@ def _send_eventsub_chat_reply(db: Session, channel: ActiveChannel, reply: dict[s
                 channel.channel_name,
                 reply.get("template_key"),
             )
-            return False
-    return False
+            return _finish(False, "api_failure")
+    return _finish(False, "api_failure")
 
 
 def _fetch_youtube_oembed_title(url: str) -> Optional[str]:
@@ -4770,6 +4785,7 @@ class BotRuntimeAnnouncementOut(BaseModel):
     template_key: str
     visibility: Literal["mute", "normal", "verbose", "debug"]
     delivery_path: Literal["send_chat_pipeline"]
+    reason_code: Optional[Literal["suppressed_by_level", "preflight_rejected", "api_failure"]] = None
 
 
 class BotOAuthStartIn(BaseModel):
@@ -6662,11 +6678,12 @@ def push_bot_runtime_announcement(
         template_vars=payload.template_vars or {},
         visibility=cast(Literal["mute", "normal", "verbose", "debug"], visibility),
     )
-    sent = _send_eventsub_chat_reply(
+    sent, reason_code = _send_eventsub_chat_reply(
         db,
         channel,
         reply,
         reply_parent_message_id=None,
+        return_reason=True,
     )
     return BotRuntimeAnnouncementOut(
         success=True,
@@ -6676,6 +6693,7 @@ def push_bot_runtime_announcement(
         template_key=str(catalog_row.get("template_key") or message_id),
         visibility=cast(Literal["mute", "normal", "verbose", "debug"], visibility),
         delivery_path="send_chat_pipeline",
+        reason_code=cast(Optional[Literal["suppressed_by_level", "preflight_rejected", "api_failure"]], reason_code),
     )
 
 
