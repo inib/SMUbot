@@ -12,6 +12,14 @@ Use this ledger whenever websocket-only code/tests are removed.
 
 ## Entries
 
+### 2026-04-04 — Remove legacy `check_played` pre-rendered `msg` assignments
+- **removed modules/functions**: `bot/bot_app.py` local `msg` assignments in `BotService.check_played` (legacy websocket path)
+- **replacement path**: `BotService.check_played` now routes only through `_send_catalog_message(..., template_vars=...)`
+- **deprecation decision date**: 2026-04-04
+- **rollback implications**: low risk and non-behavioral; rollback by restoring direct `self.messages[...]` string formatting in legacy path.
+- **classification**: unused code removed
+- **archived rationale link**: [Archived websocket deprecation rationale](./archive/websocket_deprecation_rationale.md)
+
 ### 2026-04-02 — Remove BotService duplicate command parser/handlers
 - **removed modules/functions**: `bot/bot_app.py` `BotService.event_message`, `BotService.handle_request`, `BotService.handle_prioritize`, `BotService.handle_points`, `BotService.handle_remove`, `BotService.handle_archive`
 - **replacement path**: `SongBot.event_message` + `bot/chat_command_core.py` shared parser/dispatcher; webhook command dispatch in `backend_app._dispatch_eventsub_chat_command`
