@@ -2128,6 +2128,14 @@ class BotService:
         state['queue'] = new_queue
 
     async def check_played(self, ch_name: str, prev_queue: List[dict], new_queue: List[dict]):
+        """Announce newly played queue entries via catalog-templated websocket messages.
+
+        Dependencies: backend `get_song` and `get_user` lookups, plus
+        `_send_catalog_message` for message rendering and channel policy-aware
+        delivery. Code customers: legacy websocket queue polling path.
+        Used variables/origin: queue snapshots originate from poll_state loop,
+        while template vars come from current/next request song and user fields.
+        """
         prev_map = {q['id']: q for q in prev_queue}
         chan = self.get_channel(ch_name.lower())
         if not chan:
@@ -2142,25 +2150,21 @@ class BotService:
                     next_req = pending_prio[0]
                     next_song = await backend.get_song(ch_name, next_req['song_id'])
                     next_user = await backend.get_user(ch_name, next_req['user_id'])
-                    msg = self.messages['played_next'].format(
-                        artist=song.get('artist', '?'),
-                        title=song.get('title', '?'),
-                        user=user.get('username', '?'),
-                        next_artist=next_song.get('artist', '?'),
-                        next_title=next_song.get('title', '?'),
-                        next_user=next_user.get('username', '?'),
-                    )
                 else:
-                    msg = self.messages['played_last'].format(
-                        artist=song.get('artist', '?'),
-                        title=song.get('title', '?'),
-                        user=user.get('username', '?'),
-                        channel=ch_name,
-                    )
-                await self._send_bot_message(
+                    next_song = {}
+                    next_user = {}
+                await self._send_catalog_message(
                     chan,
-                    msg,
-                level=BotMessageLevel.NORMAL,
+                    'played_next' if pending_prio else 'played_last',
+                    template_vars={
+                        'artist': song.get('artist', '?'),
+                        'title': song.get('title', '?'),
+                        'user': user.get('username', '?'),
+                        'next_artist': next_song.get('artist', '?') if pending_prio else '',
+                        'next_title': next_song.get('title', '?') if pending_prio else '',
+                        'next_user': next_user.get('username', '?') if pending_prio else '',
+                        'channel': ch_name,
+                    },
                     metadata={'channel': ch_name, 'event': 'played'},
                 )
 
