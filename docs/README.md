@@ -18,14 +18,13 @@ The production architecture is now documented as a fixed three-stage flow:
 
 1. **Ingress**: Twitch EventSub webhook callbacks via conduit transport
    (`/twitch/eventsub/callback`).
-2. **Execution**: shared chat command core (`command_resolution.py`) used by
-   both webhook and websocket paths to keep command semantics aligned.
+2. **Execution**: shared chat command core (`command_resolution.py`) and
+   backend queue/event mutation handlers.
 3. **Outbound**: Twitch Send Chat Message API (`POST /helix/chat/messages`) for
-   user-visible bot replies.
+   user-visible bot replies and non-chat announcements.
 
-Legacy websocket-only ingress is retained strictly as an explicit rollback path
-under `chat_websocket_fallback_legacy_enabled`; it is not the canonical steady
-state.
+Webhook/conduit is authoritative for ingress, and backend-owned Send Chat
+handling is authoritative for outbound announcements.
 
 ## Admin panel bot message controls
 - Channel detail cards in the Admin panel now include a dedicated **Bot Messages**
@@ -84,16 +83,13 @@ desired scope overrides) the admin can mark the deployment as ready, which
 unlocks the API for the bot, queue manager, and public web frontend.
 
 ### Chat ingress defaults and staged rollout flags
-- `/system/config` now exposes `chat_ingress_mode` with:
-  - `webhook_conduit` (default, authoritative)
-  - `websocket` (legacy fallback only)
+- `/system/config` exposes `chat_ingress_mode` with `webhook_conduit` as the
+  authoritative ingress path.
 - `/system/config` also exposes `chat_ingress_shadow_mode` (default `false`) so
-  operators can run dual-path validation before a full ingress cutover.
-- Legacy rollback is explicit through `chat_websocket_fallback_legacy_enabled`.
-  Websocket EventSub chat subscriptions are suppressed in bot runtime when
-  `chat_ingress_mode=webhook_conduit` and this rollback flag is `false`.
-  In that authoritative mode, the bot worker now idles in a minimal credential
-  maintenance role and no longer performs steady-state `/bot/config` polling.
+  operators can run dual-path validation for ingress telemetry.
+- Backend mutation/event handlers now emit catalog announcements directly
+  through the authoritative Send Chat pipeline, independent of bot runtime
+  polling.
 - Startup/runtime ingress guard now evaluates conduit health with high-severity
   alerts and optional auto-fallback (`chat_ingress_guard_auto_fallback_enabled`)
   when:
@@ -508,16 +504,10 @@ Expected:
 
 ## Bot Highlights
 - Automatically discovers authorized channels from the backend and joins them.
-- Runtime activation is ingress-gated: websocket lifecycle is started only when
-  `chat_ingress_mode=websocket` or explicit rollback
-  (`chat_websocket_fallback_legacy_enabled=true`) is enabled; otherwise the bot
-  process remains idle and periodically rechecks only `/system/config`.
-- In `chat_ingress_mode=webhook_conduit`, startup logs now explicitly state that
-  webhook/conduit is the canonical ingress path and websocket chat subscriptions
-  are rollback-only.
+- Bot worker continuously applies `/bot/config` credentials and channel
+  membership state.
 - Backend now runs a dedicated token refresh worker (60s poll, refresh at
-  `expires_at - 5m`) so OAuth renewal remains active even when websocket bot
-  runtime stays idle in authoritative webhook mode.
+  `expires_at - 5m`) while webhook/conduit remains authoritative ingress.
 - Legacy websocket rollback keeps only minimal `subscribe_websocket` hooks;
   prior websocket subscription reuse/recovery loops are intentionally disabled
   to avoid accidental authoritative use during normal operations.

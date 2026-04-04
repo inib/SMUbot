@@ -6639,43 +6639,38 @@ def push_bot_log(event: BotLogEventIn):
     return {"success": True}
 
 
-@app.post(
-    "/bot/runtime/announcements",
-    response_model=BotRuntimeAnnouncementOut,
-    dependencies=[Depends(require_token)],
-)
-def push_bot_runtime_announcement(
-    payload: BotRuntimeAnnouncementIn,
-    db: Session = Depends(get_db),
-):
-    """Send bot runtime announcements through webhook Send Chat transport.
+def _send_catalog_announcement(
+    channel: ActiveChannel,
+    message_id: str,
+    template_vars: Optional[dict[str, Any]],
+    *,
+    db: Session,
+) -> BotRuntimeAnnouncementOut:
+    """Send a catalog-backed announcement through the backend Send Chat pipeline.
 
-    Dependencies: resolves channels via ``get_channel_pk`` and reuses the
-    authoritative webhook reply pipeline ``_send_eventsub_chat_reply``.
-    Code customers: ``SongBot`` non-chat producer hooks call this endpoint
-    instead of websocket sends for played/bump/event announcements.
-    Used variables/origin: ``message_id``/``template_vars`` come from bot
-    runtime queue/event diffs and map through ``BOT_MESSAGE_CATALOG``.
+    Dependencies: uses ``BOT_MESSAGE_CATALOG_BY_ID`` for message metadata,
+    ``_eventsub_response_contract`` for reply shaping, and
+    ``_send_eventsub_chat_reply`` for visibility-gated delivery.
+    Code customers: ``push_bot_runtime_announcement`` and queue/event mutation
+    handlers (``move_request``, ``mark_played``, ``_persist_channel_event``).
+    Used variables/origin: ``channel`` resolves destination login, ``message_id``
+    selects catalog template/visibility, and ``template_vars`` are endpoint or
+    event-derived payload fields needed by template rendering.
     """
 
-    channel_name = payload.channel.strip()
-    message_id = payload.message_id.strip()
-    channel_pk = get_channel_pk(channel_name, db)
-    channel = db.get(ActiveChannel, channel_pk)
-    if not channel:
-        raise HTTPException(status_code=404, detail="channel not found")
-
-    catalog_row = BOT_MESSAGE_CATALOG_BY_ID.get(message_id)
+    normalized_message_id = message_id.strip()
+    catalog_row = BOT_MESSAGE_CATALOG_BY_ID.get(normalized_message_id)
     if not catalog_row:
-        raise HTTPException(status_code=400, detail=f"unknown bot message_id: {message_id}")
+        raise HTTPException(status_code=400, detail=f"unknown bot message_id: {normalized_message_id}")
 
     visibility = str(catalog_row.get("level") or "normal").strip().lower()
     if visibility not in BOT_MESSAGE_LEVEL_RANK:
         visibility = "normal"
+    template_key = str(catalog_row.get("template_key") or normalized_message_id)
     reply = _eventsub_response_contract(
         "success",
-        template_key=str(catalog_row.get("template_key") or message_id),
-        template_vars=payload.template_vars or {},
+        template_key=template_key,
+        template_vars=template_vars or {},
         visibility=cast(Literal["mute", "normal", "verbose", "debug"], visibility),
     )
     sent, reason_code = _send_eventsub_chat_reply(
@@ -6689,11 +6684,44 @@ def push_bot_runtime_announcement(
         success=True,
         sent=bool(sent),
         channel=channel.channel_name,
-        message_id=message_id,
-        template_key=str(catalog_row.get("template_key") or message_id),
+        message_id=normalized_message_id,
+        template_key=template_key,
         visibility=cast(Literal["mute", "normal", "verbose", "debug"], visibility),
         delivery_path="send_chat_pipeline",
         reason_code=cast(Optional[Literal["suppressed_by_level", "preflight_rejected", "api_failure"]], reason_code),
+    )
+
+
+@app.post(
+    "/bot/runtime/announcements",
+    response_model=BotRuntimeAnnouncementOut,
+    dependencies=[Depends(require_token)],
+)
+def push_bot_runtime_announcement(
+    payload: BotRuntimeAnnouncementIn,
+    db: Session = Depends(get_db),
+):
+    """Send bot runtime announcements through webhook Send Chat transport.
+
+    Dependencies: resolves channels via ``get_channel_pk`` and delegates Send
+    Chat delivery to ``_send_catalog_announcement``.
+    Code customers: external/internal runtime callers that need catalog-templated
+    non-chat announcements.
+    Used variables/origin: ``payload.channel`` maps to an ``ActiveChannel`` row;
+    ``payload.message_id`` and ``payload.template_vars`` are forwarded unchanged.
+    """
+
+    channel_name = payload.channel.strip()
+    channel_pk = get_channel_pk(channel_name, db)
+    channel = db.get(ActiveChannel, channel_pk)
+    if not channel:
+        raise HTTPException(status_code=404, detail="channel not found")
+
+    return _send_catalog_announcement(
+        channel,
+        payload.message_id,
+        payload.template_vars or {},
+        db=db,
     )
 
 
@@ -10246,8 +10274,22 @@ def move_request(
         ).scalar_one_or_none()
     if not neighbor:
         return {"success": True}  # nothing to move
+    old_position = req.position + 1
     req.position, neighbor.position = neighbor.position, req.position
+    new_position = req.position + 1
     db.commit()
+    channel_row = db.get(ActiveChannel, channel_pk)
+    if channel_row:
+        _send_catalog_announcement(
+            channel_row,
+            "queue_position_changed",
+            {
+                "request_id": req.id,
+                "old_position": old_position,
+                "new_position": new_position,
+            },
+            db=db,
+        )
     publish_queue_changed(channel_pk)
     return {"success": True}
 
@@ -10382,6 +10424,37 @@ def mark_played(
     db.refresh(req)
     payload = _serialize_request_event(db, req)
     up_next = _next_pending_request(db, channel_pk, req.stream_id)
+    pending_prio = (
+        db.query(Request)
+        .filter(
+            Request.channel_id == channel_pk,
+            Request.stream_id == req.stream_id,
+            Request.played == 0,
+            Request.is_priority == 1,
+        )
+        .order_by(Request.position.asc())
+        .first()
+    )
+    played_song = db.get(Song, req.song_id)
+    played_user = db.get(User, req.user_id)
+    next_song = db.get(Song, pending_prio.song_id) if pending_prio else None
+    next_user = db.get(User, pending_prio.user_id) if pending_prio else None
+    channel_row = db.get(ActiveChannel, channel_pk)
+    if channel_row:
+        _send_catalog_announcement(
+            channel_row,
+            "played_next" if pending_prio else "played_last",
+            {
+                "artist": played_song.artist if played_song else "?",
+                "title": played_song.title if played_song else "?",
+                "user": played_user.username if played_user else "?",
+                "next_artist": next_song.artist if next_song else "",
+                "next_title": next_song.title if next_song else "",
+                "next_user": next_user.username if next_user else "",
+                "channel": channel,
+            },
+            db=db,
+        )
     publish_channel_event(
         channel_pk,
         "request.played",
@@ -10440,9 +10513,11 @@ def _persist_channel_event(db: Session, channel_pk: int, payload: EventIn) -> Ev
         tier_points = _priority_points_for_tier(settings, meta.get("tier"))
         points = tier_points * count
 
+    updated_user: Optional[User] = None
     if payload.user_id and points > 0:
         try:
             award_prio_points(db, channel_pk, payload.user_id, points)
+            updated_user = db.get(User, payload.user_id)
             logger.info(
                 "Awarded %s priority points to user %s for %s in channel %s",
                 points,
@@ -10459,6 +10534,41 @@ def _persist_channel_event(db: Session, channel_pk: int, payload: EventIn) -> Ev
             channel_pk,
             meta,
         )
+    if updated_user:
+        message_id = "vip_points_awarded" if payload.type == "vip" else f"award_{payload.type}"
+        if message_id in BOT_MESSAGE_CATALOG_BY_ID:
+            delta = 1
+            extra: Dict[str, int] = {}
+            if payload.type in {"gift_sub", "sub"}:
+                count = max(_coerce_int(meta.get("count"), default=1), 1)
+                delta = count
+                if payload.type == "gift_sub":
+                    extra["count"] = count
+            elif payload.type == "bits":
+                extra["amount"] = max(_coerce_int(meta.get("amount"), default=0), 0)
+            elif payload.type == "vip":
+                delta = max(_coerce_int(meta.get("count"), default=1), 1)
+            currency_singular = "point"
+            currency_plural = "points"
+            word = (
+                f"this {currency_singular}"
+                if delta == 1
+                else f"these {delta} {currency_plural}"
+            )
+            channel_row = db.get(ActiveChannel, channel_pk)
+            if channel_row:
+                _send_catalog_announcement(
+                    channel_row,
+                    message_id,
+                    {
+                        "username": updated_user.username,
+                        "word": word,
+                        "points": updated_user.prio_points,
+                        "currency_plural": currency_plural,
+                        **extra,
+                    },
+                    db=db,
+                )
     publish_queue_changed(channel_pk)
     return ev
 
