@@ -194,6 +194,9 @@ BOT_MESSAGE_CATALOG: list[dict[str, Any]] = [
     {"id": "token_refreshed", "level": "debug", "group": "lifecycle", "template_key": "token_refreshed", "description": "Token refresh succeeded.", "customizable": True},
     {"id": "action_failed_debug", "level": "debug", "group": "errors", "template_key": "action_failed_debug", "description": "Internal action failure diagnostic.", "customizable": True},
 ]
+BOT_MESSAGE_CATALOG_BY_ID: dict[str, dict[str, Any]] = {
+    str(row.get("id") or ""): row for row in BOT_MESSAGE_CATALOG if row.get("id")
+}
 BOT_MESSAGE_DEFAULT_TEMPLATES: dict[str, str] = {
     "channel_not_registered": "Channel not registered in backend",
     "request_added": "Added: {artist} - {title}",
@@ -212,6 +215,19 @@ BOT_MESSAGE_DEFAULT_TEMPLATES: dict[str, str] = {
     "archive_success": "Archived current queue and started new stream",
     "archive_denied": "Only channel owner or moderators can archive the queue",
     "failed": "Failed: {error}",
+    "bot_joined": "Song queue bot connected to chat.",
+    "bot_left": "Song queue bot disconnected from chat.",
+    "played_next": "This was {artist} - {title} requested by {user}. Next up {next_artist} - {next_title} requested by {next_user}",
+    "played_last": "This was {artist} - {title} requested by {user}. @{channel} no more bumped songs",
+    "bump_free": "{artist} - {title} got a free bump, congrats {user}",
+    "award_follow": "Thx for following {username}, take {word} - you have now {points} {currency_plural}",
+    "award_raid": "Thx for raiding {username}, take {word} - you have now {points} {currency_plural}",
+    "award_gift_sub": "Thx for gifting {count} subs {username}, take {word} - you have now {points} {currency_plural}",
+    "award_bits": "Thx for cheering {amount} bits {username}, take {word} - you have now {points} {currency_plural}",
+    "vip_points_awarded": "Thx for becoming a VIP {username}, take {word} - you have now {points} {currency_plural}",
+    "queue_position_changed": "Request #{request_id} moved from #{old_position} to #{new_position}",
+    "token_refreshed": "Bot token refreshed successfully.",
+    "action_failed_debug": "Debug failure in {action}: {error}",
 }
 BOT_MESSAGE_LEVEL_RANK: dict[str, int] = {"mute": 0, "normal": 1, "verbose": 2, "debug": 3}
 TWITCH_SEND_CHAT_MESSAGE_MAX_LENGTH = 500
@@ -4740,6 +4756,22 @@ class BotLogAckOut(BaseModel):
     success: bool
 
 
+class BotRuntimeAnnouncementIn(BaseModel):
+    channel: str = Field(..., min_length=1, max_length=255)
+    message_id: str = Field(..., min_length=1, max_length=128)
+    template_vars: Dict[str, Any] = Field(default_factory=dict)
+
+
+class BotRuntimeAnnouncementOut(BaseModel):
+    success: bool
+    sent: bool
+    channel: str
+    message_id: str
+    template_key: str
+    visibility: Literal["mute", "normal", "verbose", "debug"]
+    delivery_path: Literal["send_chat_pipeline"]
+
+
 class BotOAuthStartIn(BaseModel):
     return_url: Optional[str] = None
 
@@ -6589,6 +6621,62 @@ def push_bot_log(event: BotLogEventIn):
     }
     _broadcast_bot_log(payload)
     return {"success": True}
+
+
+@app.post(
+    "/bot/runtime/announcements",
+    response_model=BotRuntimeAnnouncementOut,
+    dependencies=[Depends(require_token)],
+)
+def push_bot_runtime_announcement(
+    payload: BotRuntimeAnnouncementIn,
+    db: Session = Depends(get_db),
+):
+    """Send bot runtime announcements through webhook Send Chat transport.
+
+    Dependencies: resolves channels via ``get_channel_pk`` and reuses the
+    authoritative webhook reply pipeline ``_send_eventsub_chat_reply``.
+    Code customers: ``SongBot`` non-chat producer hooks call this endpoint
+    instead of websocket sends for played/bump/event announcements.
+    Used variables/origin: ``message_id``/``template_vars`` come from bot
+    runtime queue/event diffs and map through ``BOT_MESSAGE_CATALOG``.
+    """
+
+    channel_name = payload.channel.strip()
+    message_id = payload.message_id.strip()
+    channel_pk = get_channel_pk(channel_name, db)
+    channel = db.get(ActiveChannel, channel_pk)
+    if not channel:
+        raise HTTPException(status_code=404, detail="channel not found")
+
+    catalog_row = BOT_MESSAGE_CATALOG_BY_ID.get(message_id)
+    if not catalog_row:
+        raise HTTPException(status_code=400, detail=f"unknown bot message_id: {message_id}")
+
+    visibility = str(catalog_row.get("level") or "normal").strip().lower()
+    if visibility not in BOT_MESSAGE_LEVEL_RANK:
+        visibility = "normal"
+    reply = _eventsub_response_contract(
+        "success",
+        template_key=str(catalog_row.get("template_key") or message_id),
+        template_vars=payload.template_vars or {},
+        visibility=cast(Literal["mute", "normal", "verbose", "debug"], visibility),
+    )
+    sent = _send_eventsub_chat_reply(
+        db,
+        channel,
+        reply,
+        reply_parent_message_id=None,
+    )
+    return BotRuntimeAnnouncementOut(
+        success=True,
+        sent=bool(sent),
+        channel=channel.channel_name,
+        message_id=message_id,
+        template_key=str(catalog_row.get("template_key") or message_id),
+        visibility=cast(Literal["mute", "normal", "verbose", "debug"], visibility),
+        delivery_path="send_chat_pipeline",
+    )
 
 
 @app.get("/bot/logs/stream", dependencies=[Depends(require_token)])

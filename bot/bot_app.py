@@ -306,6 +306,32 @@ class Backend:
         }
         return await self._req('POST', "/bot/logs", payload)
 
+    async def announce_runtime_event(
+        self,
+        *,
+        channel: str,
+        message_id: str,
+        template_vars: Optional[Dict[str, object]] = None,
+    ) -> Dict[str, object]:
+        """Send a runtime event announcement through backend Send Chat pipeline.
+
+        Dependencies: calls backend ``POST /bot/runtime/announcements`` with
+        admin-token auth.
+        Code customers: ``SongBot`` non-chat queue/event producer methods
+        (``check_played``, ``check_bumps``, ``check_queue_position_changes``,
+        ``announce_event``).
+        Used variables/origin: ``channel`` comes from backend queue polling
+        state, ``message_id`` selects the catalog entry, and ``template_vars``
+        carries formatter values from queue/event payload fields.
+        """
+
+        payload = {
+            'channel': channel,
+            'message_id': message_id,
+            'template_vars': template_vars or {},
+        }
+        return await self._req('POST', "/bot/runtime/announcements", payload)
+
     async def random_playlist_request(
         self,
         channel: str,
@@ -1212,6 +1238,45 @@ class SongBot(commands.Bot):
                     metadata={'channel': channel_label},
                 )
 
+    async def _announce_backend_runtime_event(
+        self,
+        *,
+        login: str,
+        channel: str,
+        message_id: str,
+        template_vars: Optional[Dict[str, object]] = None,
+        metadata: Optional[Dict[str, object]] = None,
+    ) -> None:
+        """Publish catalog announcements via backend; websocket send is rollback-only.
+
+        Dependencies: backend ``announce_runtime_event`` endpoint; websocket
+        `_send_catalog_message` is used only as emergency fallback.
+        Code customers: non-chat runtime producers (queue/event polling hooks).
+        Used variables/origin: arguments originate from queue/event diff
+        evaluators and are forwarded unchanged to backend templating payload.
+        """
+
+        try:
+            await backend.announce_runtime_event(
+                channel=channel,
+                message_id=message_id,
+                template_vars=template_vars or {},
+            )
+            return
+        except Exception as exc:
+            await push_console_event(
+                'warning',
+                f'Backend runtime announcement failed for {channel}: {exc}; using websocket rollback path',
+                event='runtime_announcement_fallback',
+                metadata={**(metadata or {}), 'channel': channel, 'message_id': message_id, 'error': str(exc)},
+            )
+        await self._send_catalog_message(
+            login,
+            message_id,
+            template_vars=template_vars or {},
+            metadata={**(metadata or {}), 'channel': channel, 'delivery_mode': 'websocket_rollback'},
+        )
+
     async def update_enabled(self, enabled: bool) -> None:
         if self.enabled == enabled:
             return
@@ -1554,24 +1619,15 @@ class SongBot(commands.Bot):
                     next_req = pending_prio[0]
                     next_song = await backend.get_song(channel, next_req['song_id'])
                     next_user = await backend.get_user(channel, next_req['user_id'])
-                    msg = self.messages['played_next'].format(
-                        artist=song.get('artist', '?'),
-                        title=song.get('title', '?'),
-                        user=user.get('username', '?'),
-                        next_artist=next_song.get('artist', '?'),
-                        next_title=next_song.get('title', '?'),
-                        next_user=next_user.get('username', '?'),
-                    )
                 else:
-                    msg = self.messages['played_last'].format(
-                        artist=song.get('artist', '?'),
-                        title=song.get('title', '?'),
-                        user=user.get('username', '?'),
-                        channel=channel,
-                    )
-                await self._send_catalog_message(
-                    login,
-                    'played_next' if pending_prio else 'played_last',
+                    # cleanup_candidate: pre-rendered websocket text removed; the
+                    # backend announcement pipeline now owns authoritative text rendering.
+                    next_song = {}
+                    next_user = {}
+                await self._announce_backend_runtime_event(
+                    login=login,
+                    channel=channel,
+                    message_id='played_next' if pending_prio else 'played_last',
                     template_vars={
                         'artist': song.get('artist', '?'),
                         'title': song.get('title', '?'),
@@ -1601,9 +1657,10 @@ class SongBot(commands.Bot):
             if new_prio and not was_prio:
                 song = await backend.get_song(channel, req['song_id'])
                 user = await backend.get_user(channel, req['user_id'])
-                await self._send_catalog_message(
-                    login,
-                    'bump_free',
+                await self._announce_backend_runtime_event(
+                    login=login,
+                    channel=channel,
+                    message_id='bump_free',
                     template_vars={
                         'artist': song.get('artist', '?'),
                         'title': song.get('title', '?'),
@@ -1636,9 +1693,10 @@ class SongBot(commands.Bot):
             old_position = prev_positions.get(int(req_id))
             if old_position is None or old_position == index:
                 continue
-            await self._send_catalog_message(
-                login,
-                'queue_position_changed',
+            await self._announce_backend_runtime_event(
+                login=login,
+                channel=channel,
+                message_id='queue_position_changed',
                 template_vars={
                     'request_id': req_id,
                     'old_position': old_position,
@@ -1676,9 +1734,10 @@ class SongBot(commands.Bot):
             else f"these {delta} {self.currency_plural}"
         )
         message_id = 'vip_points_awarded' if etype == 'vip' else f"award_{etype}"
-        await self._send_catalog_message(
-            login,
-            message_id,
+        await self._announce_backend_runtime_event(
+            login=login,
+            channel=channel,
+            message_id=message_id,
             template_vars={
                 'username': user.get('username', ''),
                 'word': word,
