@@ -4785,7 +4785,7 @@ class BotRuntimeAnnouncementOut(BaseModel):
     template_key: str
     visibility: Literal["mute", "normal", "verbose", "debug"]
     delivery_path: Literal["send_chat_pipeline"]
-    reason_code: Optional[Literal["suppressed_by_level", "preflight_rejected", "api_failure"]] = None
+    reason_code: Optional[Literal["suppressed_by_level", "suppressed_disconnected", "preflight_rejected", "api_failure"]] = None
 
 
 class BotOAuthStartIn(BaseModel):
@@ -6667,6 +6667,18 @@ def _send_catalog_announcement(
     if visibility not in BOT_MESSAGE_LEVEL_RANK:
         visibility = "normal"
     template_key = str(catalog_row.get("template_key") or normalized_message_id)
+    if not bool(getattr(channel, "join_active", 1)):
+        return BotRuntimeAnnouncementOut(
+            success=True,
+            sent=False,
+            channel=channel.channel_name,
+            message_id=normalized_message_id,
+            template_key=template_key,
+            visibility=cast(Literal["mute", "normal", "verbose", "debug"], visibility),
+            delivery_path="send_chat_pipeline",
+            reason_code="suppressed_disconnected",
+        )
+
     reply = _eventsub_response_contract(
         "success",
         template_key=template_key,
@@ -6688,7 +6700,7 @@ def _send_catalog_announcement(
         template_key=template_key,
         visibility=cast(Literal["mute", "normal", "verbose", "debug"], visibility),
         delivery_path="send_chat_pipeline",
-        reason_code=cast(Optional[Literal["suppressed_by_level", "preflight_rejected", "api_failure"]], reason_code),
+        reason_code=cast(Optional[Literal["suppressed_by_level", "suppressed_disconnected", "preflight_rejected", "api_failure"]], reason_code),
     )
 
 

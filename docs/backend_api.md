@@ -196,9 +196,11 @@ This document summarizes the REST endpoints exposed by `backend_app.py`.
   - Validates `message_id` against the shared bot message catalog.
   - Builds the same reply contract used by webhook command replies (`template_key`, `template_vars`, `visibility`).
   - Sends through the authoritative Twitch Send Chat Message pipeline (`_send_eventsub_chat_reply`), which enforces the same auth-mode policy (`twitch_send_chat_auth_mode`) and channel `bot_message_level` threshold rules.
+  - Suppresses chat sends when the channel is disconnected (`join_active = 0`) so runtime announcements remain silent until reconnect.
   - Returns send status metadata including `delivery_path: "send_chat_pipeline"`.
   - When `sent=false`, includes `reason_code` with one of:
     - `suppressed_by_level`: channel message-level threshold or empty rendered template suppressed the send.
+    - `suppressed_disconnected`: channel is disconnected (`join_active = 0`), so no runtime announcement is sent.
     - `preflight_rejected`: auth/header/payload preflight checks failed before calling Twitch Send Chat API.
     - `api_failure`: Twitch Send Chat API request failed (HTTP/request/timeout path).
 - **Rollback note**
@@ -255,6 +257,9 @@ Channel settings include queue intake controls:
   - `/channels/{channel}` accepts only `join_active` values `0` or `1`.
   - `/channels/{channel}/settings` keeps `bot_message_level` strict to enum
     values `mute|normal|verbose|debug`.
+- Behavioral difference:
+  - `disconnect` (`join_active=0`) is the stronger switch: channel command ingress subscriptions are removed in the bot runtime and backend runtime announcements are suppressed.
+  - `mute` (`bot_message_level="mute"`) keeps the bot connected for control-plane behavior but suppresses all chat message output by visibility policy.
 
 ## Steady-state runbooks
 
