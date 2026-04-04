@@ -21,6 +21,8 @@ class BotConfigApiTests(unittest.TestCase):
         self._settings_snapshot = backend_app.settings_store.snapshot()
         db = backend_app.SessionLocal()
         try:
+            db.query(backend_app.ChannelSettings).delete()
+            db.query(backend_app.ActiveChannel).delete()
             db.query(backend_app.BotConfig).delete()
             db.query(backend_app.TwitchUser).delete()
             db.query(backend_app.AppSetting).delete()
@@ -80,6 +82,67 @@ class BotConfigApiTests(unittest.TestCase):
         self.assertFalse(data["enabled"])
         self.assertEqual(data["scopes"], backend_app.get_bot_app_scopes())
         self.assertFalse(data["token_present"])
+
+    def test_runtime_announcement_uses_send_chat_pipeline(self) -> None:
+        """Runtime announcements should reuse the authoritative Send Chat path."""
+
+        db = backend_app.SessionLocal()
+        try:
+            channel = backend_app.ActiveChannel(channel_id="12345", channel_name="ChannelOne")
+            db.add(channel)
+            db.commit()
+        finally:
+            db.close()
+
+        with patch.object(backend_app, "_send_eventsub_chat_reply", return_value=True) as send_reply:
+            response = self.client.post(
+                "/bot/runtime/announcements",
+                headers={"X-Admin-Token": backend_app.ADMIN_TOKEN},
+                json={
+                    "channel": "ChannelOne",
+                    "message_id": "queue_position_changed",
+                    "template_vars": {
+                        "request_id": 55,
+                        "old_position": 8,
+                        "new_position": 3,
+                    },
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["success"])
+        self.assertTrue(payload["sent"])
+        self.assertEqual(payload["delivery_path"], "send_chat_pipeline")
+        self.assertEqual(payload["visibility"], "verbose")
+        send_reply.assert_called_once()
+        called_args, called_kwargs = send_reply.call_args
+        reply_payload = called_args[2] if len(called_args) > 2 else called_kwargs["reply"]
+        self.assertIsNone(called_kwargs["reply_parent_message_id"])
+        self.assertEqual(reply_payload["template_key"], "queue_position_changed")
+        self.assertEqual(reply_payload["visibility"], "verbose")
+
+    def test_runtime_announcement_rejects_unknown_message_id(self) -> None:
+        """Endpoint should fail fast for message IDs outside the shared catalog."""
+
+        db = backend_app.SessionLocal()
+        try:
+            channel = backend_app.ActiveChannel(channel_id="12346", channel_name="ChannelTwo")
+            db.add(channel)
+            db.commit()
+        finally:
+            db.close()
+
+        with patch.object(backend_app, "_send_eventsub_chat_reply", return_value=True) as send_reply:
+            response = self.client.post(
+                "/bot/runtime/announcements",
+                headers={"X-Admin-Token": backend_app.ADMIN_TOKEN},
+                json={"channel": "ChannelTwo", "message_id": "not_real", "template_vars": {}},
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("unknown bot message_id", response.json().get("detail", ""))
+        send_reply.assert_not_called()
 
     def test_backfill_twitch_send_chat_auth_mode_setting_inserts_default_row(self) -> None:
         """Backfill startup helper should insert missing auth-mode app setting."""

@@ -171,6 +171,7 @@ This document summarizes the REST endpoints exposed by `backend_app.py`.
 | PUT | `/bot/config` | Update bot settings such as scopes or enable flag (admin). |
 | POST | `/bot/config/oauth` | Start the OAuth authorization flow for the bot account (admin). |
 | GET | `/bot/config/oauth/callback` | Callback used by Twitch to finish the bot OAuth flow. |
+| POST | `/bot/runtime/announcements` | Authoritative runtime event announcement endpoint (admin/bot worker). |
 
 ### `/bot/messages/catalog`
 - **Authentication**: Requires admin authorization (`X-Admin-Token`, bearer token, or admin session cookie) via `require_token`.
@@ -187,6 +188,18 @@ This document summarizes the REST endpoints exposed by `backend_app.py`.
   - Posts `{"type":"bot-oauth-complete","success":<bool>,"error"?:<string>}` to the opener/parent window so the admin panel can render a success or error banner.
   - Auto-closes the popup only on success; failure responses stay open so the error message remains visible for debugging.
   - Includes a short CTA in the popup (`"You may close this window."` on failures).
+
+### `/bot/runtime/announcements`
+- **Authentication**: Requires admin authorization (`require_token`) and is intended for backend-trusted bot runtime callers.
+- **Request body**: `{ "channel": "<channel name>", "message_id": "<catalog id>", "template_vars": { ... } }`.
+- **Behavior**
+  - Validates `message_id` against the shared bot message catalog.
+  - Builds the same reply contract used by webhook command replies (`template_key`, `template_vars`, `visibility`).
+  - Sends through the authoritative Twitch Send Chat Message pipeline (`_send_eventsub_chat_reply`), which enforces the same auth-mode policy (`twitch_send_chat_auth_mode`) and channel `bot_message_level` threshold rules.
+  - Returns send status metadata including `delivery_path: "send_chat_pipeline"`.
+- **Rollback note**
+  - This endpoint is authoritative for non-chat runtime announcements.
+  - Bot websocket `_send_message` remains rollback-only and should only be used when explicit fallback is required.
 
 ## Bot Logs
 | Method | Path | Description |
