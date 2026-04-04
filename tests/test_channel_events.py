@@ -2440,6 +2440,99 @@ remove:
         finally:
             db.close()
 
+    def test_reconcile_eventsub_conduit_subscriptions_excludes_disconnected_channels(self) -> None:
+        """Reconcile conduit subscriptions using connected channels only.
+
+        Dependencies: ``ActiveChannel.join_active`` state, EventSub reconcile
+        helper calls, and mocked Helix subscription list responses.
+        Code customers: ingress repair/watcher reconcile paths that size conduit
+        shards and assign per-channel subscriptions.
+        Used variables/origin: creates one connected channel plus one
+        disconnected channel (both with owner tokens) to assert only connected
+        channels participate in shard sizing and subscription reconciliation.
+        """
+
+        connected_details = _setup_channel()
+        db = backend_app.SessionLocal()
+        try:
+            owner = backend_app.TwitchUser(
+                twitch_id="owner-disconnected",
+                username="owner_disconnected",
+                access_token="token-disconnected",
+                refresh_token="",
+                scopes="",
+            )
+            db.add(owner)
+            db.commit()
+            db.refresh(owner)
+            db.add(
+                backend_app.ActiveChannel(
+                    channel_id="cid-disconnected",
+                    channel_name="disconnected_channel",
+                    owner_id=owner.id,
+                    authorized=True,
+                    join_active=0,
+                )
+            )
+            db.commit()
+
+            with mock.patch.object(
+                backend_app,
+                "_public_eventsub_callback_url",
+                return_value=("https://example.com/twitch/eventsub/callback", None, {"source": "test", "warnings": []}),
+            ), mock.patch.object(
+                backend_app,
+                "_eventsub_app_headers",
+                return_value={"Authorization": "Bearer test", "Client-Id": "cid"},
+            ), mock.patch.object(
+                backend_app,
+                "get_bot_user_id",
+                return_value="bot-user-id",
+            ), mock.patch.object(
+                backend_app,
+                "_ensure_twitch_conduit",
+                return_value=(mock.Mock(conduit_id="conduit-1", status="enabled"), []),
+            ) as ensure_mock, mock.patch.object(
+                backend_app,
+                "_reconcile_twitch_conduit_shards",
+                return_value=({"0": "enabled"}, []),
+            ) as shards_mock, mock.patch.object(
+                backend_app.requests,
+                "get",
+                return_value=mock.Mock(
+                    json=lambda: {
+                        "data": [
+                            {
+                                "id": "remote-sub-1",
+                                "type": backend_app.EVENTSUB_CONDUIT_CHAT_TYPE,
+                                "condition": {
+                                    "broadcaster_user_id": "cid",
+                                    "user_id": "bot-user-id",
+                                },
+                                "transport": {"method": "conduit", "conduit_id": "conduit-1"},
+                                "status": "enabled",
+                            }
+                        ]
+                    },
+                    raise_for_status=lambda: None,
+                ),
+            ) as list_mock, mock.patch.object(backend_app.requests, "post") as post_mock:
+                result = backend_app.reconcile_eventsub_conduit_subscriptions(None, db)
+
+            self.assertEqual(result["channels_total"], 2)
+            self.assertEqual(result["connected_channels"], 1)
+            self.assertEqual(result["channels_with_owner_tokens"], 1)
+            self.assertEqual(len(result["subscriptions"]), 1)
+            self.assertEqual(result["subscriptions"][0]["channel"], connected_details["channel_name"])
+            ensure_mock.assert_called_once()
+            shards_mock.assert_called_once()
+            self.assertEqual(ensure_mock.call_args[0][1], 1)
+            self.assertEqual(shards_mock.call_args[0][3], 1)
+            self.assertEqual(list_mock.call_count, 1)
+            post_mock.assert_not_called()
+        finally:
+            db.close()
+
     def test_get_or_create_settings_backfills_queue_caps(self) -> None:
         """Ensure legacy channel settings rows gain default queue caps.
 

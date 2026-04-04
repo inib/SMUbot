@@ -3913,7 +3913,7 @@ def _format_eventsub_http_error(exc: Exception, auth_mode: str) -> str:
 
 
 def reconcile_eventsub_conduit_subscriptions(request: Optional[FastAPIRequest], db: Session) -> dict[str, Any]:
-    """Reconcile conduit + shards + chat subscriptions for every active channel.
+    """Reconcile conduit + shards + chat subscriptions for connected channels.
 
     Dependencies: Uses app-auth via ``_eventsub_app_headers`` for conduit/shard
     and chat-subscription Helix APIs, and bot identity via ``get_bot_user_id``;
@@ -3933,11 +3933,16 @@ def reconcile_eventsub_conduit_subscriptions(request: Optional[FastAPIRequest], 
     """
 
     channels = db.query(ActiveChannel).order_by(ActiveChannel.id.asc()).all()
-    channels_with_owner_tokens = [ch for ch in channels if ch.owner and ch.owner.access_token]
+    connected_channels = [
+        ch
+        for ch in channels
+        if ch.owner and ch.owner.access_token and int(getattr(ch, "join_active", 1) or 0) == 1
+    ]
     result: dict[str, Any] = {
         "run_at": datetime.utcnow().isoformat() + "Z",
         "channels_total": len(channels),
-        "channels_with_owner_tokens": len(channels_with_owner_tokens),
+        "channels_with_owner_tokens": len(connected_channels),
+        "connected_channels": len(connected_channels),
         "status": "ok",
         "degraded": False,
         "conduit": None,
@@ -3946,7 +3951,7 @@ def reconcile_eventsub_conduit_subscriptions(request: Optional[FastAPIRequest], 
         "warnings": [],
         "errors": [],
     }
-    if not channels_with_owner_tokens:
+    if not connected_channels:
         result["errors"].append("no_channels_with_owner_tokens")
         return result
 
@@ -3988,19 +3993,19 @@ def reconcile_eventsub_conduit_subscriptions(request: Optional[FastAPIRequest], 
         result["errors"].append(f"bot_identity_unavailable: {exc}")
         return result
 
-    conduit_row, conduit_errors = _ensure_twitch_conduit(headers, len(channels_with_owner_tokens), db, now)
+    conduit_row, conduit_errors = _ensure_twitch_conduit(headers, len(connected_channels), db, now)
     result["errors"].extend(conduit_errors)
     if not conduit_row:
         return result
     result["conduit"] = {"id": conduit_row.conduit_id, "status": conduit_row.status}
     assignment, shard_errors = _reconcile_twitch_conduit_shards(
-        headers, conduit_row, callback, len(channels_with_owner_tokens), db, now
+        headers, conduit_row, callback, len(connected_channels), db, now
     )
     result["errors"].extend(shard_errors)
     result["shards"] = [{"id": shard_id, "status": status} for shard_id, status in sorted(assignment.items())]
     shard_ids = sorted(assignment.keys()) or ["0"]
 
-    for index, channel in enumerate(channels_with_owner_tokens):
+    for index, channel in enumerate(connected_channels):
         channel_result: dict[str, Any] = {
             "channel": channel.channel_name,
             "channel_id": channel.channel_id,
