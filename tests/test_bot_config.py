@@ -168,6 +168,57 @@ class BotConfigApiTests(unittest.TestCase):
         self.assertFalse(payload["sent"])
         self.assertEqual(payload["reason_code"], "suppressed_by_level")
 
+    def test_runtime_announcement_respects_mute_level_without_send_attempt(self) -> None:
+        """Muted channels should suppress runtime announcements before Send Chat API calls."""
+
+        db = backend_app.SessionLocal()
+        try:
+            channel = backend_app.ActiveChannel(channel_id="12348", channel_name="ChannelMute")
+            db.add(channel)
+            db.flush()
+            settings = backend_app.get_or_create_settings(db, channel.id)
+            settings.bot_message_level = "mute"
+            db.commit()
+        finally:
+            db.close()
+
+        with patch("backend_app.requests.post") as send_api_post:
+            response = self.client.post(
+                "/bot/runtime/announcements",
+                headers={"X-Admin-Token": backend_app.ADMIN_TOKEN},
+                json={"channel": "ChannelMute", "message_id": "queue_position_changed", "template_vars": {}},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertFalse(payload["sent"])
+        self.assertEqual(payload["reason_code"], "suppressed_by_level")
+        send_api_post.assert_not_called()
+
+    def test_runtime_announcement_suppresses_when_channel_disconnected(self) -> None:
+        """Disconnected channels should suppress runtime announcements before Send Chat API calls."""
+
+        db = backend_app.SessionLocal()
+        try:
+            channel = backend_app.ActiveChannel(channel_id="12349", channel_name="ChannelDisconnected", join_active=0)
+            db.add(channel)
+            db.commit()
+        finally:
+            db.close()
+
+        with patch("backend_app.requests.post") as send_api_post:
+            response = self.client.post(
+                "/bot/runtime/announcements",
+                headers={"X-Admin-Token": backend_app.ADMIN_TOKEN},
+                json={"channel": "ChannelDisconnected", "message_id": "queue_position_changed", "template_vars": {}},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertFalse(payload["sent"])
+        self.assertEqual(payload["reason_code"], "suppressed_disconnected")
+        send_api_post.assert_not_called()
+
     def test_backfill_twitch_send_chat_auth_mode_setting_inserts_default_row(self) -> None:
         """Backfill startup helper should insert missing auth-mode app setting."""
 

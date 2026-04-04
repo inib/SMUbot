@@ -12,6 +12,22 @@ Use this ledger whenever websocket-only code/tests are removed.
 
 ## Entries
 
+### 2026-04-04 — Verify mute-level silence on backend runtime announcements
+- **removed modules/functions**: none (verification + automated coverage update)
+- **replacement path**: `POST /bot/runtime/announcements` -> `backend_app._send_catalog_announcement` -> `_send_eventsub_chat_reply` mute suppression gate.
+- **deprecation decision date**: 2026-04-04
+- **rollback implications**: none; this entry adds a regression guard to ensure muted channels do not emit chat via Send Chat API.
+- **classification**: unused code removed (tracking/coverage only; no runtime deletion)
+- **archived rationale link**: [Archived websocket deprecation rationale](./archive/websocket_deprecation_rationale.md)
+
+### 2026-04-04 — Suppress runtime announcements when bot is disconnected
+- **removed modules/functions**: none (behavioral guard + automated coverage update)
+- **replacement path**: `POST /bot/runtime/announcements` now short-circuits in `backend_app._send_catalog_announcement` when `join_active=0`, returning `reason_code=suppressed_disconnected`.
+- **deprecation decision date**: 2026-04-04
+- **rollback implications**: behavioral tightening; rollback would restore announcement sends even when the Queue Manager connect/disconnect control is set to disconnected.
+- **classification**: behavioral removal
+- **archived rationale link**: [Archived websocket deprecation rationale](./archive/websocket_deprecation_rationale.md)
+
 ### 2026-04-04 — Remove websocket runtime announcement rollback fallback/gate
 - **removed modules/functions**: `bot/bot_app.py` `SongBot._announce_backend_runtime_event` websocket fallback branch, `SongBot` queue/event polling announcers (`check_played`, `check_bumps`, `check_queue_position_changes`, `announce_event`), and `BotService._requires_runtime` gate branch from `BotService.run`.
 - **replacement path**: backend-authoritative catalog announcement dispatch in `backend_app._send_catalog_announcement`, called directly from `move_request`, `mark_played`, and `_persist_channel_event`.
