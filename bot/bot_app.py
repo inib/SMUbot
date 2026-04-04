@@ -1247,13 +1247,13 @@ class SongBot(commands.Bot):
         template_vars: Optional[Dict[str, object]] = None,
         metadata: Optional[Dict[str, object]] = None,
     ) -> None:
-        """Publish catalog announcements via backend; websocket send is rollback-only.
+        """Publish catalog announcements via backend authoritative transport.
 
-        Dependencies: backend ``announce_runtime_event`` endpoint; websocket
-        `_send_catalog_message` is used only as emergency fallback.
-        Code customers: non-chat runtime producers (queue/event polling hooks).
-        Used variables/origin: arguments originate from queue/event diff
-        evaluators and are forwarded unchanged to backend templating payload.
+        Dependencies: backend ``announce_runtime_event`` endpoint.
+        Code customers: transitional runtime producers while backend mutation
+        endpoints are being validated end-to-end.
+        Used variables/origin: arguments originate from queue/event diffs and
+        are forwarded unchanged to backend templating payload.
         """
 
         try:
@@ -1280,17 +1280,11 @@ class SongBot(commands.Bot):
             return
         except Exception as exc:
             await push_console_event(
-                'warning',
-                f'Backend runtime announcement failed for {channel}: {exc}; using websocket rollback path',
-                event='runtime_announcement_fallback',
+                'error',
+                f'Backend runtime announcement failed for {channel}: {exc}',
+                event='runtime_announcement_failed',
                 metadata={**(metadata or {}), 'channel': channel, 'message_id': message_id, 'error': str(exc)},
             )
-        await self._send_catalog_message(
-            login,
-            message_id,
-            template_vars=template_vars or {},
-            metadata={**(metadata or {}), 'channel': channel, 'delivery_mode': 'websocket_rollback'},
-        )
 
     async def update_enabled(self, enabled: bool) -> None:
         if self.enabled == enabled:
@@ -1598,170 +1592,11 @@ class SongBot(commands.Bot):
             last_event = state.get('last_event')
             new_queue = await backend.get_queue(ch_name, include_played=True)
 
-            await self.check_played(login, ch_name, prev_queue, new_queue)
-            await self.check_bumps(login, ch_name, prev_queue, new_queue)
-            await self.check_queue_position_changes(login, ch_name, prev_queue, new_queue)
-
-            events = await backend.get_events(ch_name, since=last_event) if last_event else await backend.get_events(ch_name)
-            if events:
-                for ev in reversed(events):
-                    ev_time = ev['event_time']
-                    if last_event and ev_time <= last_event:
-                        continue
-                    await self.announce_event(login, ch_name, ev)
-                state['last_event'] = max(ev['event_time'] for ev in events)
+            # Backend queue/event mutation endpoints now emit non-chat
+            # announcements authoritatively; runtime diff announcers are retired.
             state['queue'] = new_queue
             state['channel_name'] = ch_name
             self.state[login] = state
-
-    async def check_played(
-        self,
-        login: str,
-        channel: str,
-        prev_queue: List[dict],
-        new_queue: List[dict],
-    ) -> None:
-        if login not in self.joined:
-            return
-        prev_map = {q['id']: q for q in prev_queue}
-        for req in new_queue:
-            old = prev_map.get(req['id'])
-            if old and old['played'] == 0 and req['played'] == 1:
-                song = await backend.get_song(channel, req['song_id'])
-                user = await backend.get_user(channel, req['user_id'])
-                pending_prio = [q for q in new_queue if q['played'] == 0 and q['is_priority'] == 1]
-                if pending_prio:
-                    next_req = pending_prio[0]
-                    next_song = await backend.get_song(channel, next_req['song_id'])
-                    next_user = await backend.get_user(channel, next_req['user_id'])
-                else:
-                    # cleanup_candidate: pre-rendered websocket text removed; the
-                    # backend announcement pipeline now owns authoritative text rendering.
-                    next_song = {}
-                    next_user = {}
-                await self._announce_backend_runtime_event(
-                    login=login,
-                    channel=channel,
-                    message_id='played_next' if pending_prio else 'played_last',
-                    template_vars={
-                        'artist': song.get('artist', '?'),
-                        'title': song.get('title', '?'),
-                        'user': user.get('username', '?'),
-                        'next_artist': next_song.get('artist', '?') if pending_prio else '',
-                        'next_title': next_song.get('title', '?') if pending_prio else '',
-                        'next_user': next_user.get('username', '?') if pending_prio else '',
-                        'channel': channel,
-                    },
-                    metadata={'channel': channel, 'event': 'played'},
-                )
-
-    async def check_bumps(
-        self,
-        login: str,
-        channel: str,
-        prev_queue: List[dict],
-        new_queue: List[dict],
-    ) -> None:
-        if login not in self.joined:
-            return
-        prev_map = {q['id']: q for q in prev_queue}
-        for req in new_queue:
-            old = prev_map.get(req['id'])
-            new_prio = req['is_priority'] == 1 and req.get('priority_source') == 'admin'
-            was_prio = old and old['is_priority'] == 1 if old else False
-            if new_prio and not was_prio:
-                song = await backend.get_song(channel, req['song_id'])
-                user = await backend.get_user(channel, req['user_id'])
-                await self._announce_backend_runtime_event(
-                    login=login,
-                    channel=channel,
-                    message_id='bump_free',
-                    template_vars={
-                        'artist': song.get('artist', '?'),
-                        'title': song.get('title', '?'),
-                        'user': user.get('username', '?'),
-                    },
-                    metadata={'channel': channel, 'event': 'bump'},
-                )
-
-
-    async def check_queue_position_changes(
-        self,
-        login: str,
-        channel: str,
-        prev_queue: List[dict],
-        new_queue: List[dict],
-    ) -> None:
-        """Announce pending queue position changes for verbose/diagnostic tiers."""
-
-        if login not in self.joined:
-            return
-        prev_positions: Dict[int, int] = {
-            int(item['id']): idx + 1
-            for idx, item in enumerate([q for q in prev_queue if q.get('played') == 0])
-            if item.get('id') is not None
-        }
-        for index, req in enumerate([q for q in new_queue if q.get('played') == 0], start=1):
-            req_id = req.get('id')
-            if req_id is None:
-                continue
-            old_position = prev_positions.get(int(req_id))
-            if old_position is None or old_position == index:
-                continue
-            await self._announce_backend_runtime_event(
-                login=login,
-                channel=channel,
-                message_id='queue_position_changed',
-                template_vars={
-                    'request_id': req_id,
-                    'old_position': old_position,
-                    'new_position': index,
-                },
-                metadata={'channel': channel, 'event': 'queue_position_changed'},
-            )
-
-    async def announce_event(self, login: str, channel: str, ev: dict) -> None:
-        if login not in self.joined:
-            return
-        user = None
-        if ev.get('user_id'):
-            user = await backend.get_user(channel, ev['user_id'])
-        if not user:
-            return
-        meta = json.loads(ev.get('meta') or '{}')
-        etype = ev['type']
-        delta = 1
-        extra: Dict[str, int] = {}
-        if etype == 'gift_sub':
-            count = int(meta.get('count', 1))
-            delta = count
-            extra['count'] = count
-        elif etype == 'bits':
-            amount = int(meta.get('amount', 0))
-            extra['amount'] = amount
-        elif etype == 'vip':
-            delta = int(meta.get('count', 1) or 1)
-        elif etype not in ('follow', 'raid'):
-            return
-        word = (
-            f"this {self.currency_singular}"
-            if delta == 1
-            else f"these {delta} {self.currency_plural}"
-        )
-        message_id = 'vip_points_awarded' if etype == 'vip' else f"award_{etype}"
-        await self._announce_backend_runtime_event(
-            login=login,
-            channel=channel,
-            message_id=message_id,
-            template_vars={
-                'username': user.get('username', ''),
-                'word': word,
-                'points': user.get('prio_points', 0),
-                'currency_plural': self.currency_plural,
-                **extra,
-            },
-            metadata={'channel': channel, 'event': etype},
-        )
 class BotService:
     def __init__(
         self,
@@ -1788,24 +1623,17 @@ class BotService:
         self._current_scopes: List[str] = []
         self._credentials_available: Optional[bool] = None
         self._last_enabled: Optional[bool] = None
-        self._runtime_required: Optional[bool] = None
 
     async def run(self):
-        """Run the bot worker loop with ingress-aware runtime gating.
+        """Run the bot worker loop and continuously apply backend bot config.
 
-        Dependencies: backend ``/system/config`` and (when required)
-        ``/bot/config`` APIs. Code customers: ``main`` entrypoint process for
-        the bot container. Used variables/origin: ``chat_ingress_mode`` and
-        ``chat_websocket_fallback_legacy_enabled`` from backend system config to
-        avoid steady-state polling when websocket runtime is unnecessary.
+        Dependencies: backend ``/bot/config`` API and ``apply_settings``.
+        Code customers: ``main`` entrypoint process for the bot container.
+        Used variables/origin: poll cadence uses ``self.poll_interval`` and each
+        iteration applies the latest backend-managed credential settings.
         """
 
         while True:
-            runtime_required = await self._requires_runtime()
-            if not runtime_required:
-                await self._stop_bot(reason='runtime_not_required')
-                await asyncio.sleep(self.idle_recheck_interval)
-                continue
             try:
                 raw_config = await self.backend.get_bot_config()
             except Exception as exc:
@@ -1825,42 +1653,6 @@ class BotService:
                     event='config',
                 )
             await asyncio.sleep(self.poll_interval)
-
-    async def _requires_runtime(self) -> bool:
-        """Return whether websocket lifecycle support still requires bot runtime.
-
-        Dependencies: backend ``get_system_config`` API client.
-        Code customers: ``BotService.run`` polling loop gate.
-        Used variables/origin: ``chat_ingress_mode`` plus
-        ``chat_websocket_fallback_legacy_enabled`` determine websocket runtime
-        requirement; backend fetch failures default to ``True`` for safety.
-        """
-
-        try:
-            config = await self.backend.get_system_config()
-        except Exception as exc:
-            await push_console_event(
-                'error',
-                f'Failed to fetch system configuration; keeping bot runtime active: {exc}',
-                event='config',
-            )
-            return True
-        ingress_mode = str(config.get("chat_ingress_mode") or "webhook_conduit").strip().lower()
-        rollback_enabled = bool(config.get("chat_websocket_fallback_legacy_enabled"))
-        runtime_required = ingress_mode == "websocket" or rollback_enabled
-        if self._runtime_required is None or self._runtime_required != runtime_required:
-            await push_console_event(
-                'info',
-                'Bot runtime mode switched',
-                event='lifecycle',
-                metadata={
-                    'runtime_required': runtime_required,
-                    'chat_ingress_mode': ingress_mode,
-                    'chat_websocket_fallback_legacy_enabled': rollback_enabled,
-                },
-            )
-        self._runtime_required = runtime_required
-        return runtime_required
 
     async def apply_settings(self, settings: BotSettings):
         required_fields = {

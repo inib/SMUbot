@@ -95,7 +95,6 @@ class BotServiceTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(asyncio.CancelledError):
                 await service.run()
 
-        self.backend.get_system_config.assert_awaited()
         service.apply_settings.assert_awaited_once()
         args, kwargs = service.apply_settings.call_args
         settings = args[0]
@@ -107,30 +106,6 @@ class BotServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(settings.bot_user_id, "1234")
         self.assertEqual(settings.scopes, ["user:bot"])
         self.assertTrue(settings.enabled)
-
-    async def test_run_skips_bot_config_poll_when_runtime_not_required(self) -> None:
-        service = bot_app.BotService(
-            self.backend,
-            bot_factory=self.bot_factory,
-            task_factory=asyncio.create_task,
-        )
-        self.backend.get_system_config = AsyncMock(
-            return_value={
-                "chat_ingress_mode": "webhook_conduit",
-                "chat_websocket_fallback_legacy_enabled": False,
-            }
-        )
-        self.backend.get_bot_config = AsyncMock(side_effect=AssertionError("must not poll /bot/config"))
-        service.apply_settings = AsyncMock()
-        sleep_mock = AsyncMock(side_effect=asyncio.CancelledError())
-
-        with patch.object(bot_app.asyncio, "sleep", sleep_mock):
-            with self.assertRaises(asyncio.CancelledError):
-                await service.run()
-
-        self.backend.get_system_config.assert_awaited_once()
-        self.backend.get_bot_config.assert_not_awaited()
-        service.apply_settings.assert_not_awaited()
 
     async def test_settings_missing_credentials_disable_bot(self) -> None:
         service = bot_app.BotService(
@@ -311,83 +286,6 @@ class BotServiceTests(unittest.IsolatedAsyncioTestCase):
         self.backend.set_bot_status.assert_awaited_once_with("Foo", False, "boom")
         song_bot._announce_joined.assert_not_called()
 
-    async def test_sync_channels_disables_websocket_subscriptions_in_authoritative_mode(self) -> None:
-        song_bot = bot_app.SongBot.__new__(bot_app.SongBot)
-        song_bot.channel_map = {}
-        song_bot.state = {}
-        song_bot.listeners = {}
-        song_bot.joined = set()
-        song_bot._sync_lock = asyncio.Lock()
-        song_bot.enabled = True
-        song_bot._announce_joined = AsyncMock()
-        song_bot._announce_left = AsyncMock()
-        song_bot.listen_backend = AsyncMock(return_value=None)
-        song_bot._subscribe_for_channel = AsyncMock()
-        song_bot._unsubscribe_channel = AsyncMock()
-        song_bot._send_message = AsyncMock()
-
-        self.backend.get_system_config = AsyncMock(
-            return_value={"chat_ingress_mode": "webhook_conduit", "chat_websocket_fallback_legacy_enabled": False}
-        )
-        self.backend.get_channels = AsyncMock(
-            return_value=[{"channel_name": "Foo", "channel_id": "1", "authorized": True, "join_active": 1}]
-        )
-        self.backend.get_queue = AsyncMock(return_value=[])
-
-        def fake_create_task(coro):
-            coro.close()
-            return MagicMock()
-
-        with patch.object(bot_app.asyncio, "create_task", fake_create_task), patch.object(bot_app, "push_console_event", AsyncMock()):
-            await song_bot.sync_channels()
-
-        self.assertFalse(song_bot._websocket_fallback_enabled)
-
-    async def test_sync_channels_keeps_websocket_rollback_smoke_harness_enabled(self) -> None:
-        """Keep minimal websocket rollback smoke coverage during migration window.
-
-        Dependencies: ``sync_channels`` ingress mode fetch and websocket
-        subscription scheduling behavior.
-        Code customers: release rollout validation that needs a staging rollback
-        harness while websocket fallback support remains undecided.
-        Used variables/origin: system config toggles
-        ``chat_ingress_mode=websocket`` and
-        ``chat_websocket_fallback_legacy_enabled=true``.
-        """
-
-        song_bot = bot_app.SongBot.__new__(bot_app.SongBot)
-        song_bot.channel_map = {}
-        song_bot.state = {}
-        song_bot.listeners = {}
-        song_bot.joined = set()
-        song_bot._sync_lock = asyncio.Lock()
-        song_bot.enabled = True
-        song_bot._announce_joined = AsyncMock()
-        song_bot._announce_left = AsyncMock()
-        song_bot.listen_backend = AsyncMock(return_value=None)
-        song_bot._subscribe_for_channel = AsyncMock()
-        song_bot._unsubscribe_channel = AsyncMock()
-        song_bot._send_message = AsyncMock()
-
-        self.backend.get_system_config = AsyncMock(
-            return_value={"chat_ingress_mode": "websocket", "chat_websocket_fallback_legacy_enabled": True}
-        )
-        self.backend.get_channels = AsyncMock(
-            return_value=[{"channel_name": "Foo", "channel_id": "1", "authorized": True, "join_active": 1}]
-        )
-        self.backend.get_queue = AsyncMock(return_value=[])
-
-        def fake_create_task(coro):
-            coro.close()
-            return MagicMock()
-
-        with patch.object(bot_app.asyncio, "create_task", fake_create_task), patch.object(bot_app, "push_console_event", AsyncMock()):
-            await song_bot.sync_channels()
-
-        self.assertTrue(song_bot._websocket_fallback_enabled)
-        song_bot._subscribe_for_channel.assert_any_await("1")
-        self.assertGreaterEqual(song_bot._subscribe_for_channel.await_count, 1)
-
     async def test_songbot_does_not_assign_readonly_nick(self) -> None:
         commands_map = {k: ([v] if not isinstance(v, list) else v) for k, v in bot_app.DEFAULT_COMMANDS.items()}
         with patch.object(bot_app.commands.Bot, "__init__", return_value=None):
@@ -472,6 +370,25 @@ class BotServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs.get("metadata", {}).get("message_id"), "queue_position_changed")
         self.assertEqual(kwargs.get("metadata", {}).get("visibility"), "verbose")
         self.assertEqual(kwargs.get("metadata", {}).get("reason_code"), "suppressed_by_level")
+
+    async def test_announce_backend_runtime_event_no_websocket_fallback_on_error(self) -> None:
+        song_bot = bot_app.SongBot.__new__(bot_app.SongBot)
+        song_bot._send_catalog_message = AsyncMock()
+        self.backend.announce_runtime_event = AsyncMock(side_effect=RuntimeError("network"))
+
+        push_event = AsyncMock()
+        with patch.object(bot_app, "push_console_event", push_event):
+            await song_bot._announce_backend_runtime_event(
+                login="channelone",
+                channel="ChannelOne",
+                message_id="queue_position_changed",
+            )
+
+        song_bot._send_catalog_message.assert_not_awaited()
+        push_event.assert_awaited_once()
+        args, kwargs = push_event.await_args
+        self.assertEqual(args[0], "error")
+        self.assertEqual(kwargs.get("event"), "runtime_announcement_failed")
 
     async def test_handle_playlist_request_success(self) -> None:
         song_bot = bot_app.SongBot.__new__(bot_app.SongBot)

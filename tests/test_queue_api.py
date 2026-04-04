@@ -438,13 +438,21 @@ class QueueApiTests(unittest.TestCase):
             db.close()
 
         assert base_request_id is not None
-        response = self._client.get(
-            f"/channels/{channel_name}/queue/{base_request_id}/move",
-            params={"direction": "down"},
-            headers={"Authorization": f"Bearer {token}"},
-        )
+        with patch.object(backend_app, "_send_catalog_announcement") as send_announcement:
+            response = self._client.get(
+                f"/channels/{channel_name}/queue/{base_request_id}/move",
+                params={"direction": "down"},
+                headers={"Authorization": f"Bearer {token}"},
+            )
 
         self.assertEqual(response.status_code, 200, response.text)
+        send_announcement.assert_called_once()
+        _, args, kwargs = send_announcement.mock_calls[0]
+        self.assertEqual(args[1], "queue_position_changed")
+        self.assertEqual(args[2]["request_id"], base_request_id)
+        self.assertEqual(args[2]["old_position"], 1)
+        self.assertEqual(args[2]["new_position"], 2)
+        self.assertIn("db", kwargs)
 
         db = backend_app.SessionLocal()
         try:
@@ -488,22 +496,60 @@ class QueueApiTests(unittest.TestCase):
         finally:
             db.close()
 
-        response = self._client.get(
-            f"/channels/{channel_name}/queue/{base_request.id}/played",
-            headers={"Authorization": f"Bearer {token}"},
-        )
-
-        self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(response.headers.get("Cache-Control"), "no-store, max-age=0")
-        self.assertEqual(response.headers.get("Pragma"), "no-cache")
-
+    def test_mark_played_emits_played_last_when_no_priority_pending(self) -> None:
         db = backend_app.SessionLocal()
         try:
-            refreshed_request = db.get(backend_app.Request, base_request.id)
-            assert refreshed_request
-            self.assertEqual(refreshed_request.played, 1)
+            channel_name, token = _seed_queue_fixture(db)
+            base_request = db.query(backend_app.Request).first()
+            assert base_request
         finally:
             db.close()
+
+        with patch.object(backend_app, "_send_catalog_announcement") as send_announcement:
+            response = self._client.post(
+                f"/channels/{channel_name}/queue/{base_request.id}/played",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        send_announcement.assert_called_once()
+        _, args, _ = send_announcement.mock_calls[0]
+        self.assertEqual(args[1], "played_last")
+
+    def test_mark_played_emits_played_next_when_priority_pending(self) -> None:
+        db = backend_app.SessionLocal()
+        try:
+            channel_name, token = _seed_queue_fixture(db)
+            channel = db.query(backend_app.ActiveChannel).filter_by(channel_name=channel_name).one()
+            stream = db.query(backend_app.StreamSession).filter_by(channel_id=channel.id).one()
+            song = db.query(backend_app.Song).filter_by(channel_id=channel.id).first()
+            user = db.query(backend_app.User).filter_by(channel_id=channel.id).first()
+            assert song and user
+            base_request = db.query(backend_app.Request).first()
+            assert base_request
+            base_request_id = base_request.id
+            _add_request(
+                db,
+                channel_id=channel.id,
+                stream_id=stream.id,
+                song_id=song.id,
+                user_id=user.id,
+                position=2,
+                is_priority=1,
+            )
+        finally:
+            db.close()
+
+        with patch.object(backend_app, "_send_catalog_announcement") as send_announcement:
+            response = self._client.post(
+                f"/channels/{channel_name}/queue/{base_request_id}/played",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        send_announcement.assert_called_once()
+        _, args, _ = send_announcement.mock_calls[0]
+        self.assertEqual(args[1], "played_next")
 
     def test_next_nonpriority_handles_empty_queue(self) -> None:
         db = backend_app.SessionLocal()
@@ -726,4 +772,3 @@ class QueueApiTests(unittest.TestCase):
         )
         self.assertEqual(played_only.status_code, 200, played_only.text)
         self.assertEqual(played_only.json(), 1)
-

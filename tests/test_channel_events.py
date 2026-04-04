@@ -258,6 +258,7 @@ class ChannelEventTests(unittest.TestCase):
             bumped_event = ws.receive_json()
             self.assertEqual(bumped_event["type"], "request.bumped")
             self.assertEqual(bumped_event["payload"]["id"], second_request_id)
+
             self.assertTrue(bumped_event["payload"]["is_priority"])
 
             promote = self.client.post(
@@ -335,6 +336,39 @@ class ChannelEventTests(unittest.TestCase):
             self.assertEqual(award_payload["user"]["id"], details["user_one"])
             self.assertEqual(award_payload["delta"], 2)
             self.assertGreaterEqual(award_payload["prio_points"], 2)
+
+    def test_event_endpoint_emits_reward_catalog_announcement_for_bits(self) -> None:
+        details = _setup_channel()
+        channel = details["channel_name"]
+        headers = {"X-Admin-Token": backend_app.ADMIN_TOKEN}
+
+        with mock.patch.object(backend_app, "_send_catalog_announcement") as send_announcement:
+            response = self.client.post(
+                f"/channels/{channel}/events",
+                headers=headers,
+                json={"type": "bits", "user_id": details["user_two"], "meta": {"amount": 200}},
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        send_announcement.assert_called_once()
+        call_args = send_announcement.call_args[0]
+        self.assertEqual(call_args[1], "award_bits")
+        self.assertEqual(call_args[2]["amount"], 200)
+
+    def test_event_endpoint_skips_reward_announcement_when_no_points_awarded(self) -> None:
+        details = _setup_channel()
+        channel = details["channel_name"]
+        headers = {"X-Admin-Token": backend_app.ADMIN_TOKEN}
+
+        with mock.patch.object(backend_app, "_send_catalog_announcement") as send_announcement:
+            response = self.client.post(
+                f"/channels/{channel}/events",
+                headers=headers,
+                json={"type": "bits", "user_id": details["user_two"], "meta": {"amount": 1}},
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        send_announcement.assert_not_called()
 
     def test_eventsub_callback_logs_events(self) -> None:
         details = _setup_channel()
