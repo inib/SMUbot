@@ -964,43 +964,59 @@ def get_bot_app_scopes() -> list[str]:
 
 
 def get_chat_ingress_mode() -> str:
-    """Return the configured chat ingress mode with a safe fallback.
+    """Return the enforced authoritative ingress mode.
 
-    Dependencies: Reads persisted values through ``get_setting``.
-    Code customers: ``/system/config`` payload consumers and chat ingress
-    workers deciding websocket vs webhook/conduit intake.
-    Used variables/origin: Pulls the ``chat_ingress_mode`` app setting and
-    normalizes unsupported values back to ``websocket``.
+    Dependencies: Optionally reads legacy persisted setting for deprecation
+    logging only.
+    Code customers: ``/system/config`` payload consumers and webhook command
+    handlers that require deterministic authoritative mode semantics.
+    Used variables/origin: Legacy ``chat_ingress_mode`` setting is inspected to
+    surface stale non-authoritative values during migration cleanup.
     """
 
-    value = (get_setting("chat_ingress_mode", "websocket") or "websocket").strip().lower()
-    if value not in {"websocket", "webhook_conduit"}:
-        return "websocket"
-    return value
+    legacy_mode = (get_setting("chat_ingress_mode", "webhook_conduit") or "webhook_conduit").strip().lower()
+    if legacy_mode != "webhook_conduit":
+        logger.warning(
+            "Ignoring deprecated non-authoritative chat_ingress_mode setting value=%s; forcing webhook_conduit",
+            legacy_mode,
+        )
+    return "webhook_conduit"
 
 
 def get_chat_ingress_shadow_mode() -> bool:
-    """Return whether dual-run ingress shadow mode is enabled.
+    """Return the enforced shadow-mode state for webhook-only ingress.
 
-    Dependencies: Uses ``get_setting`` plus ``_env_flag`` for boolean parsing.
-    Code customers: ``/system/config`` responses and chat validation workers.
-    Used variables/origin: Reads the ``chat_ingress_shadow_mode`` app setting
-    and interprets string truthy values such as ``1``/``true``/``yes``.
+    Dependencies: Optionally reads legacy persisted setting for deprecation
+    logging only.
+    Code customers: ``/system/config`` and chat-notification execution paths.
+    Used variables/origin: Legacy ``chat_ingress_shadow_mode`` setting is read
+    only to warn when stale toggles still exist.
     """
 
-    return _env_flag(get_setting("chat_ingress_shadow_mode", "0"))
+    legacy_shadow = _env_flag(get_setting("chat_ingress_shadow_mode", "0"))
+    if legacy_shadow:
+        logger.warning(
+            "Ignoring deprecated chat_ingress_shadow_mode=true setting; shadow mode is removed in webhook-only operation",
+        )
+    return False
 
 
 def get_chat_websocket_fallback_legacy_enabled() -> bool:
-    """Return whether legacy websocket ingress fallback is explicitly enabled.
+    """Return the enforced websocket-fallback state after deprecation.
 
-    Dependencies: Uses ``get_setting`` and ``_env_flag``.
-    Code customers: Bot runtime subscription gating and ``/system/config``.
-    Used variables/origin: Reads ``chat_websocket_fallback_legacy_enabled`` from
-    app settings to keep rollback explicit and operator-controlled.
+    Dependencies: Optionally reads legacy persisted setting for deprecation
+    warning visibility.
+    Code customers: ``/system/config`` diagnostics and ingress-guard payload.
+    Used variables/origin: Legacy setting is inspected only to flag stale
+    rollout-era configuration that is now ignored.
     """
 
-    return _env_flag(get_setting("chat_websocket_fallback_legacy_enabled", "0"))
+    legacy_enabled = _env_flag(get_setting("chat_websocket_fallback_legacy_enabled", "0"))
+    if legacy_enabled:
+        logger.warning(
+            "Ignoring deprecated chat_websocket_fallback_legacy_enabled=true setting; websocket fallback is retired",
+        )
+    return False
 
 
 def get_twitch_send_chat_auth_mode() -> Literal["app_token", "bot_user_token"]:
@@ -1214,7 +1230,7 @@ def _evaluate_ingress_guard(db: Session, now: datetime, *, apply_fallback: bool)
     if not invariants.get("token_refresh_healthy", True):
         degraded_reasons.append("token_refresh_unhealthy")
     degraded = bool(degraded_reasons)
-    auto_fallback_enabled = _env_flag(get_setting("chat_ingress_guard_auto_fallback_enabled", "0"))
+    auto_fallback_enabled = False
     fallback_applied = False
     if degraded:
         _record_ingress_metric("guard_degraded", timestamp=now)
@@ -1224,10 +1240,8 @@ def _evaluate_ingress_guard(db: Session, now: datetime, *, apply_fallback: bool)
             healthy_shards,
             callback_errors,
         )
-        if apply_fallback and auto_fallback_enabled and get_chat_ingress_mode() == "webhook_conduit":
-            set_settings(db, {"chat_ingress_mode": "websocket"})
-            fallback_applied = True
-            logger.error("INGRESS_GUARD_AUTO_FALLBACK applied chat_ingress_mode=websocket")
+        if apply_fallback:
+            logger.info("INGRESS_GUARD_AUTO_FALLBACK_DISABLED webhook_only_mode=true")
     return {
         "degraded": degraded,
         "reasons": degraded_reasons,
@@ -1613,7 +1627,7 @@ def run_ingress_guard_startup_check() -> dict[str, Any]:
     try:
         if get_chat_ingress_mode() != "webhook_conduit":
             return {"status": "skipped", "reason": "ingress_mode_not_webhook_conduit"}
-        guard = _evaluate_ingress_guard(db, datetime.utcnow(), apply_fallback=True)
+        guard = _evaluate_ingress_guard(db, datetime.utcnow(), apply_fallback=False)
         return {"status": "ok", "guard": guard}
     except Exception:
         logger.exception("Ingress guard startup check failed")
@@ -1874,6 +1888,16 @@ def start_ingress_guard_repair_watcher() -> None:
 
 
 def _system_config_payload() -> Dict[str, Any]:
+    """Return runtime system configuration with webhook-only ingress semantics.
+
+    Dependencies: pulls persisted setup/OAuth values through helper getters and
+    normalizes deprecated ingress toggles to fixed authoritative values.
+    Code customers: ``GET /system/config`` and response payload reuse in
+    ``PUT /system/config``.
+    Used variables/origin: Reads persisted settings for credentials/URLs/scopes;
+    ingress-mode fields are emitted as enforced constants.
+    """
+
     return {
         "setup_complete": is_setup_complete(),
         "twitch_client_id": get_twitch_client_id(),
@@ -1887,7 +1911,7 @@ def _system_config_payload() -> Dict[str, Any]:
         "chat_ingress_mode": get_chat_ingress_mode(),
         "chat_ingress_shadow_mode": get_chat_ingress_shadow_mode(),
         "chat_websocket_fallback_legacy_enabled": get_chat_websocket_fallback_legacy_enabled(),
-        "chat_ingress_guard_auto_fallback_enabled": _env_flag(get_setting("chat_ingress_guard_auto_fallback_enabled", "0")),
+        "chat_ingress_guard_auto_fallback_enabled": False,
     }
 
 
@@ -3424,7 +3448,7 @@ def _process_eventsub_chat_notification(
         else:
             outcome = _eventsub_outcome("rejected", command=None, reason_code="parse_non_command")
             webhook_result = "ignored_non_command"
-    elif webhook_authoritative:
+    else:
         try:
             outcome = _dispatch_eventsub_chat_command(db, channel, parsed=parsed, event_payload=event_payload)
             reply_contract = ((outcome.get("metadata") or {}).get("response") if isinstance(outcome.get("metadata"), dict) else None)
@@ -3481,14 +3505,6 @@ def _process_eventsub_chat_notification(
                 "EventSub authoritative chat command execution failed",
                 extra={"eventsub_message_id": message_id, "channel": channel.channel_name, "parsed": parsed},
             )
-    else:
-        outcome = _eventsub_outcome(
-            "rejected",
-            command=parsed.get("canonical"),
-            reason_code="shadow_mode_observe_only",
-            detail="authoritative execution disabled",
-        )
-        webhook_result = "shadow_observe_only"
 
     canonical_command = str(
         outcome.get("command")
@@ -4235,7 +4251,14 @@ def reconcile_eventsub_conduit_subscriptions(request: Optional[FastAPIRequest], 
     )
     result["errors"].extend(shard_errors)
     result["shards"] = [{"id": shard_id, "status": status} for shard_id, status in sorted(assignment.items())]
-    shard_ids = sorted(assignment.keys()) or ["0"]
+    enabled_shard_ids = [
+        shard_id
+        for shard_id, status in sorted(assignment.items())
+        if str(status or "").strip().lower() == "enabled"
+    ]
+    if not enabled_shard_ids:
+        result["warnings"].append("no_enabled_shards_available_for_assignment")
+    shard_ids = enabled_shard_ids or (sorted(assignment.keys()) or ["0"])
 
     for index, channel in enumerate(connected_channels):
         channel_result: dict[str, Any] = {
@@ -5040,7 +5063,7 @@ class SystemConfigOut(BaseModel):
     public_backend_origin: Optional[str]
     twitch_scopes: List[str]
     bot_app_scopes: List[str]
-    chat_ingress_mode: Literal["websocket", "webhook_conduit"]
+    chat_ingress_mode: Literal["webhook_conduit"]
     chat_ingress_shadow_mode: bool
     chat_websocket_fallback_legacy_enabled: bool
     chat_ingress_guard_auto_fallback_enabled: bool
@@ -5055,7 +5078,7 @@ class SystemConfigUpdate(BaseModel):
     public_backend_origin: Optional[str] = None
     twitch_scopes: Optional[List[str]] = None
     bot_app_scopes: Optional[List[str]] = None
-    chat_ingress_mode: Optional[Literal["websocket", "webhook_conduit"]] = None
+    chat_ingress_mode: Optional[Literal["webhook_conduit"]] = None
     chat_ingress_shadow_mode: Optional[bool] = None
     chat_websocket_fallback_legacy_enabled: Optional[bool] = None
     chat_ingress_guard_auto_fallback_enabled: Optional[bool] = None
@@ -6906,6 +6929,11 @@ def _send_catalog_announcement(
         visibility = "normal"
     template_key = str(catalog_row.get("template_key") or normalized_message_id)
     if not bool(getattr(channel, "join_active", 1)):
+        logger.info(
+            "Runtime announcement decision channel=%s message_id=%s result=suppressed reason_code=suppressed_disconnected",
+            channel.channel_name,
+            normalized_message_id,
+        )
         return BotRuntimeAnnouncementOut(
             success=True,
             sent=False,
@@ -6929,6 +6957,13 @@ def _send_catalog_announcement(
         reply,
         reply_parent_message_id=None,
         return_reason=True,
+    )
+    logger.info(
+        "Runtime announcement decision channel=%s message_id=%s result=%s reason_code=%s",
+        channel.channel_name,
+        normalized_message_id,
+        "sent" if sent else "suppressed_or_failed",
+        reason_code or "unknown",
     )
     return BotRuntimeAnnouncementOut(
         success=True,
@@ -8093,6 +8128,15 @@ def update_system_config(
     payload: SystemConfigUpdate,
     x_admin_token: Optional[str] = Header(None),
 ):
+    """Update mutable system configuration with webhook-only ingress enforcement.
+
+    Dependencies: validates admin token, normalizes payload fields, and writes
+    persisted settings via ``set_settings``.
+    Code customers: Queue Manager/admin setup and operations tooling.
+    Used variables/origin: ``payload`` values come from validated request JSON;
+    deprecated ingress toggles are accepted for compatibility but ignored.
+    """
+
     if x_admin_token != ADMIN_TOKEN:
         raise HTTPException(status_code=401, detail="invalid admin token")
 
@@ -8122,14 +8166,17 @@ def update_system_config(
     if payload.bot_app_scopes is not None:
         normalized_bot_scopes = _normalize_scope_list(payload.bot_app_scopes)
         updates["bot_app_scopes"] = " ".join(normalized_bot_scopes) if normalized_bot_scopes else None
-    if payload.chat_ingress_mode is not None:
-        updates["chat_ingress_mode"] = payload.chat_ingress_mode
-    if payload.chat_ingress_shadow_mode is not None:
-        updates["chat_ingress_shadow_mode"] = "1" if payload.chat_ingress_shadow_mode else "0"
-    if payload.chat_websocket_fallback_legacy_enabled is not None:
-        updates["chat_websocket_fallback_legacy_enabled"] = "1" if payload.chat_websocket_fallback_legacy_enabled else "0"
-    if payload.chat_ingress_guard_auto_fallback_enabled is not None:
-        updates["chat_ingress_guard_auto_fallback_enabled"] = "1" if payload.chat_ingress_guard_auto_fallback_enabled else "0"
+    # Enforce webhook-only ingress and ignore deprecated transition toggles.
+    updates["chat_ingress_mode"] = "webhook_conduit"
+    updates["chat_ingress_shadow_mode"] = "0"
+    updates["chat_websocket_fallback_legacy_enabled"] = "0"
+    updates["chat_ingress_guard_auto_fallback_enabled"] = "0"
+    if payload.chat_ingress_shadow_mode is not None and payload.chat_ingress_shadow_mode:
+        logger.warning("Ignoring deprecated system config update chat_ingress_shadow_mode=true")
+    if payload.chat_websocket_fallback_legacy_enabled is not None and payload.chat_websocket_fallback_legacy_enabled:
+        logger.warning("Ignoring deprecated system config update chat_websocket_fallback_legacy_enabled=true")
+    if payload.chat_ingress_guard_auto_fallback_enabled is not None and payload.chat_ingress_guard_auto_fallback_enabled:
+        logger.warning("Ignoring deprecated system config update chat_ingress_guard_auto_fallback_enabled=true")
 
     current = settings_store.snapshot()
     merged: Dict[str, Optional[str]] = dict(current)
