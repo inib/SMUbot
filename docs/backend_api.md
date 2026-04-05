@@ -258,7 +258,8 @@ Channel settings include queue intake controls:
   - `/channels/{channel}/settings` keeps `bot_message_level` strict to enum
     values `mute|normal|verbose|debug`.
 - Behavioral difference:
-  - `disconnect` (`join_active=0`) is the stronger switch: channel command ingress subscriptions are removed in the bot runtime and backend runtime announcements are suppressed.
+  - `disconnect` (`join_active=0`) is the stronger switch: channel command ingress subscriptions are removed in the bot runtime, conduit-backed `channel.chat.message` `EventSubscription` rows are locally marked `disabled`, and backend runtime announcements are suppressed.
+  - `connect` (`join_active=1`) restores runtime connectivity and immediately triggers conduit reconciliation to refresh authoritative EventSub state for the channel.
   - `mute` (`bot_message_level="mute"`) keeps the bot connected for control-plane behavior but suppresses all chat message output by visibility policy.
 
 ## Steady-state runbooks
