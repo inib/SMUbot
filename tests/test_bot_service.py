@@ -29,6 +29,7 @@ class BotServiceTests(unittest.IsolatedAsyncioTestCase):
             bot.close = AsyncMock()
             bot.shutdown = AsyncMock()
             bot.update_enabled = AsyncMock()
+            bot.refresh_runtime_tokens = AsyncMock()
             ready_event = asyncio.Event()
             ready_event.set()
             bot.ready_event = ready_event
@@ -196,6 +197,113 @@ class BotServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         bot.shutdown.assert_awaited()
         bot.close.assert_not_awaited()
+
+    async def test_apply_settings_token_delta_hot_swaps_without_restart(self) -> None:
+        service = bot_app.BotService(
+            self.backend,
+            bot_factory=self.bot_factory,
+            task_factory=asyncio.create_task,
+        )
+        bot = MagicMock()
+        bot.update_enabled = AsyncMock()
+        bot.refresh_runtime_tokens = AsyncMock()
+        service._bot = bot
+        service._current_token = "old-token"
+        service._current_refresh = "old-refresh"
+        service._current_login = "nick"
+        service._current_client_id = "client"
+        service._current_client_secret = "secret"
+        service._current_bot_id = "1"
+        service._current_scopes = ["scope"]
+        service._restart_bot = AsyncMock()
+
+        await service.apply_settings(
+            bot_app.BotSettings(
+                token="new-token",
+                refresh_token="new-refresh",
+                login="nick",
+                client_id="client",
+                client_secret="secret",
+                bot_user_id="1",
+                scopes=["scope"],
+                enabled=True,
+            )
+        )
+
+        service._restart_bot.assert_not_awaited()
+        bot.refresh_runtime_tokens.assert_awaited_once()
+        self.assertEqual(service._current_token, "new-token")
+        self.assertEqual(service._current_refresh, "new-refresh")
+
+    async def test_apply_settings_identity_change_still_restarts(self) -> None:
+        service = bot_app.BotService(
+            self.backend,
+            bot_factory=self.bot_factory,
+            task_factory=asyncio.create_task,
+        )
+        bot = MagicMock()
+        bot.update_enabled = AsyncMock()
+        bot.refresh_runtime_tokens = AsyncMock()
+        service._bot = bot
+        service._current_token = "token"
+        service._current_refresh = "refresh"
+        service._current_login = "nick"
+        service._current_client_id = "client"
+        service._current_client_secret = "secret"
+        service._current_bot_id = "1"
+        service._current_scopes = ["scope"]
+        service._restart_bot = AsyncMock()
+
+        await service.apply_settings(
+            bot_app.BotSettings(
+                token="token",
+                refresh_token="refresh",
+                login="newnick",
+                client_id="client",
+                client_secret="secret",
+                bot_user_id="1",
+                scopes=["scope"],
+                enabled=True,
+            )
+        )
+
+        service._restart_bot.assert_awaited_once()
+        bot.refresh_runtime_tokens.assert_not_awaited()
+
+    async def test_apply_settings_hot_swap_failure_falls_back_to_restart(self) -> None:
+        service = bot_app.BotService(
+            self.backend,
+            bot_factory=self.bot_factory,
+            task_factory=asyncio.create_task,
+        )
+        bot = MagicMock()
+        bot.update_enabled = AsyncMock()
+        bot.refresh_runtime_tokens = AsyncMock(side_effect=RuntimeError("boom"))
+        service._bot = bot
+        service._current_token = "token"
+        service._current_refresh = "refresh"
+        service._current_login = "nick"
+        service._current_client_id = "client"
+        service._current_client_secret = "secret"
+        service._current_bot_id = "1"
+        service._current_scopes = ["scope"]
+        service._restart_bot = AsyncMock()
+
+        await service.apply_settings(
+            bot_app.BotSettings(
+                token="token-new",
+                refresh_token="refresh-new",
+                login="nick",
+                client_id="client",
+                client_secret="secret",
+                bot_user_id="1",
+                scopes=["scope"],
+                enabled=True,
+            )
+        )
+
+        bot.refresh_runtime_tokens.assert_awaited_once()
+        service._restart_bot.assert_awaited_once()
 
     async def test_sync_channels_subscribes_backend_channels(self) -> None:
         song_bot = bot_app.SongBot.__new__(bot_app.SongBot)

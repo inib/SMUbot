@@ -12,6 +12,14 @@ Use this ledger whenever websocket-only code/tests are removed.
 
 ## Entries
 
+### 2026-04-05 — Stop restarting bot on token-only backend refresh churn
+- **removed modules/functions**: `bot/bot_app.py` `BotService.apply_settings` token-delta restart requirement (`access_token` / `refresh_token` changes no longer force `_restart_bot`).
+- **replacement path**: token-only updates now execute `SongBot.refresh_runtime_tokens` hot-swap (`add_token` registration + backend token persistence), with restart fallback only on hot-swap failure.
+- **deprecation decision date**: 2026-04-05
+- **rollback implications**: behavioral removal; rollback would restore restart-on-token-delta churn and increased stop/start disruption during backend refresh-worker cadence.
+- **classification**: behavioral removal
+- **archived rationale link**: [Archived websocket deprecation rationale](./archive/websocket_deprecation_rationale.md)
+
 ### 2026-04-05 — Remove websocket rollback subscription gates and webhook random-request transition
 - **removed modules/functions**: `bot/bot_app.py` `SongBot._extract_subscription_id`, `SongBot._find_existing_subscription_id`, and rollback-only websocket subscription management paths (`_subscribe_for_channel`, `_unsubscribe_channel`, `_websocket_fallback_enabled`, `_subscription_ids`); `backend_app.py` legacy webhook rejection branch for canonical `random_request` plus transitional TODO(removal) command-unification note in `_dispatch_eventsub_chat_command`.
 - **replacement path**: bot channel sync now relies solely on backend queue-stream listeners (`SongBot.sync_channels` + `SongBot.listen_backend`), while webhook chat commands execute `random_request` through `backend_app._eventsub_execute_random_request_command` -> `random_playlist_request`.
