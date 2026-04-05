@@ -716,6 +716,16 @@ class SongBot(commands.Bot):
                     allowed[login] = row
             current_keys = set(self.channel_map.keys())
             allowed_keys = set(allowed.keys())
+            added_preview = sorted(allowed_keys - current_keys)
+            removed_preview = sorted(current_keys - allowed_keys)
+            logger.info(
+                "CHANNEL_SYNC_SUMMARY considered=%s listened=%s rollback_websocket=%s added=%s removed=%s",
+                len(rows),
+                len(current_keys),
+                rollback_enabled,
+                added_preview,
+                removed_preview,
+            )
 
             removed = current_keys - allowed_keys
             for key in removed:

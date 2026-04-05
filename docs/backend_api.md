@@ -66,6 +66,33 @@ This document summarizes the REST endpoints exposed by `backend_app.py`.
   - callback error threshold: 5 errors / 5 minutes,
   - minimum healthy shards: 1 (or expected shard count for larger deployments).
 
+### Startup/operator log events (non-API)
+- `INGRESS_STARTUP_HEALTH` (backend startup):
+  - `ingress_mode`: effective startup mode (`webhook_conduit` or `websocket`).
+  - `guard.startup_status`: startup check result (`ok`, `skipped`, `error`).
+  - `guard.status`: normalized guard health (`healthy`, `degraded`, `skipped`).
+  - `guard.reasons`: degradation/skip reasons (if any).
+  - `conduit_shards`: startup conduit/shard snapshot:
+    - `conduit_ids` (active conduit IDs seen in enabled chat subscriptions),
+    - `assignment_count`,
+    - `shards_total`,
+    - `shards_healthy`,
+    - `unresolved_assignment_count`.
+  - `connected_channels`: startup channel connectivity summary:
+    - `count`,
+    - `channels` (channel names),
+    - `channel_ids` (Twitch broadcaster IDs).
+  - `workers`: startup worker alive flags:
+    - `bot_token_refresh_worker_alive`,
+    - `ingress_guard_repair_watcher_alive`.
+
+- `CHANNEL_SYNC_SUMMARY` (bot runtime `sync_channels` cycle):
+  - `considered`: number of backend channel rows evaluated this cycle.
+  - `listened`: channels currently tracked/listened by bot before diff apply.
+  - `rollback_websocket`: value of `chat_websocket_fallback_legacy_enabled`.
+  - `added`: channels entering allowed set this cycle.
+  - `removed`: channels leaving allowed set this cycle.
+
 ### EventSub callback URL reliability requirements
 - Twitch EventSub webhook registration must use a **publicly reachable HTTPS callback URL**.
 - Callback validation enforces:
