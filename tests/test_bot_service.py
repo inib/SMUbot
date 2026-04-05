@@ -208,8 +208,6 @@ class BotServiceTests(unittest.IsolatedAsyncioTestCase):
         song_bot._announce_joined = AsyncMock()
         song_bot._announce_left = AsyncMock()
         song_bot.listen_backend = AsyncMock(return_value=None)
-        song_bot._subscribe_for_channel = AsyncMock()
-        song_bot._unsubscribe_channel = AsyncMock()
         song_bot._send_message = AsyncMock()
 
         channel_rows = [
@@ -239,15 +237,13 @@ class BotServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("bar", song_bot.joined)
         self.backend.set_bot_status.assert_any_await("Foo", True)
         self.backend.set_bot_status.assert_any_await("Bar", True)
-        song_bot._subscribe_for_channel.assert_any_await("1")
-        song_bot._subscribe_for_channel.assert_any_await("2")
         song_bot.listen_backend.assert_any_call("Foo")
         song_bot.listen_backend.assert_any_call("Bar")
         song_bot._announce_joined.assert_any_call("foo")
         song_bot._announce_joined.assert_any_call("bar")
         self.assertEqual(len(create_tasks), 4)
 
-    async def test_sync_channels_logs_subscription_errors(self) -> None:
+    async def test_sync_channels_emits_join_events_without_subscription_hooks(self) -> None:
         song_bot = bot_app.SongBot.__new__(bot_app.SongBot)
         song_bot.channel_map = {}
         song_bot.state = {}
@@ -255,8 +251,6 @@ class BotServiceTests(unittest.IsolatedAsyncioTestCase):
         song_bot.joined = set()
         song_bot._sync_lock = asyncio.Lock()
         song_bot.enabled = True
-        song_bot._subscribe_for_channel = AsyncMock(side_effect=RuntimeError("boom"))
-        song_bot._unsubscribe_channel = AsyncMock()
         song_bot.listen_backend = AsyncMock()
         song_bot._announce_joined = AsyncMock()
         song_bot._announce_left = AsyncMock()
@@ -277,14 +271,14 @@ class BotServiceTests(unittest.IsolatedAsyncioTestCase):
             await song_bot.sync_channels()
 
         self.assertGreaterEqual(push_event.await_count, 1)
-        args, kwargs = push_event.await_args_list[0]
-        self.assertEqual(args[0], "error")
-        self.assertIn("Failed to subscribe channel Foo", args[1])
-        self.assertEqual(kwargs.get("metadata"), {"channel": "Foo", "error": "boom"})
-        self.assertEqual(kwargs.get("event"), "join_error")
-        self.assertNotIn("foo", song_bot.joined)
-        self.backend.set_bot_status.assert_awaited_once_with("Foo", False, "boom")
-        song_bot._announce_joined.assert_not_called()
+        join_event = push_event.await_args_list[0]
+        self.assertEqual(join_event.args[0], "info")
+        self.assertIn("Subscribed channel Foo", join_event.args[1])
+        self.assertEqual(join_event.kwargs.get("metadata"), {"channel": "Foo"})
+        self.assertEqual(join_event.kwargs.get("event"), "join")
+        self.assertIn("foo", song_bot.joined)
+        self.backend.set_bot_status.assert_awaited_once_with("Foo", True)
+        song_bot._announce_joined.assert_called_once_with("foo")
 
     async def test_songbot_does_not_assign_readonly_nick(self) -> None:
         commands_map = {k: ([v] if not isinstance(v, list) else v) for k, v in bot_app.DEFAULT_COMMANDS.items()}

@@ -2941,6 +2941,74 @@ def _eventsub_execute_playlist_request_command(
     )
 
 
+def _eventsub_execute_random_request_command(
+    db: Session,
+    channel: ActiveChannel,
+    *,
+    chatter_user_id: str,
+    chatter_login: str,
+    args: str,
+    actor: dict[str, bool],
+) -> dict[str, Any]:
+    """Execute canonical ``random_request`` command via webhook parity path.
+
+    Description: routes random playlist picks through the canonical
+    ``random_playlist_request`` backend API helper used by authenticated HTTP
+    clients, preserving queue-limit and priority award behavior.
+    Dependencies: ``random_playlist_request`` endpoint helper and
+    ``RandomPlaylistRequestIn`` payload schema.
+    Code customers: ``_dispatch_eventsub_chat_command``.
+    Used variables/origin: chatter identity/flags from EventSub payload and
+    optional keyword text from parsed command args.
+    """
+
+    payload = RandomPlaylistRequestIn(
+        keyword=(args or "").strip() or None,
+        twitch_id=chatter_user_id,
+        username=chatter_login,
+        is_subscriber=bool(actor.get("is_subscriber")),
+    )
+    try:
+        response = random_playlist_request(channel.channel_name, payload, db=db)
+    except HTTPException as exc:
+        detail = str(exc.detail)
+        reason = "not_found" if exc.status_code == 404 else "invalid_args"
+        template_key = "random_not_found" if reason == "not_found" else "failed"
+        template_vars: dict[str, object] = {"error": detail}
+        if reason == "not_found":
+            template_vars = {"keyword": payload.keyword or "default"}
+        return _eventsub_outcome(
+            "rejected",
+            command="random_request",
+            reason_code=reason,
+            detail=detail,
+            metadata={
+                "response": _eventsub_response_contract(
+                    "error",
+                    template_key=template_key,
+                    template_vars=template_vars,
+                    visibility="normal",
+                )
+            },
+        )
+    return _eventsub_outcome(
+        "executed",
+        command="random_request",
+        reason_code="ok",
+        metadata={
+            "mutated": True,
+            "request_id": response.request_id,
+            "playlist_item_id": response.playlist_item_id,
+            "response": _eventsub_response_contract(
+                "success",
+                template_key="random_request_added",
+                template_vars={"artist": response.song.artist, "title": response.song.title},
+                visibility="normal",
+            ),
+        },
+    )
+
+
 def _eventsub_actor_context(event_payload: dict[str, Any], channel: ActiveChannel) -> dict[str, bool]:
     """Normalize EventSub chatter permission flags for command rule parity.
 
@@ -3278,10 +3346,15 @@ def _dispatch_eventsub_chat_command(
             chatter_login=chatter_login,
         ),
         "archive": lambda: _eventsub_outcome("rejected", command="archive", reason_code="permission_denied", detail="archive requires moderator authorization"),
-        "random_request": lambda: _eventsub_outcome("rejected", command="random_request", reason_code="legacy_websocket_only", detail="cleanup_candidate: migrate websocket-only random request routine"),
+        "random_request": lambda: _eventsub_execute_random_request_command(
+            db,
+            channel,
+            chatter_user_id=chatter_user_id,
+            chatter_login=chatter_login,
+            args=args,
+            actor=actor,
+        ),
     }
-    # TODO(removal): fold per-command webhook executors into a unified shared
-    # command context once DB/session adapters are parity-tested.
     handler = resolve_command_handler(str(canonical or ""), dispatch_map)
     if not handler:
         return _eventsub_outcome("rejected", command=canonical, reason_code="parse_unknown_alias")

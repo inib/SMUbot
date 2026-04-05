@@ -12,6 +12,14 @@ Use this ledger whenever websocket-only code/tests are removed.
 
 ## Entries
 
+### 2026-04-05 — Remove websocket rollback subscription gates and webhook random-request transition
+- **removed modules/functions**: `bot/bot_app.py` `SongBot._extract_subscription_id`, `SongBot._find_existing_subscription_id`, and rollback-only websocket subscription management paths (`_subscribe_for_channel`, `_unsubscribe_channel`, `_websocket_fallback_enabled`, `_subscription_ids`); `backend_app.py` legacy webhook rejection branch for canonical `random_request` plus transitional TODO(removal) command-unification note in `_dispatch_eventsub_chat_command`.
+- **replacement path**: bot channel sync now relies solely on backend queue-stream listeners (`SongBot.sync_channels` + `SongBot.listen_backend`), while webhook chat commands execute `random_request` through `backend_app._eventsub_execute_random_request_command` -> `random_playlist_request`.
+- **deprecation decision date**: 2026-04-05
+- **rollback implications**: behavioral removal; restoring websocket rollback now requires reintroducing EventSub websocket subscription lifecycle code in `SongBot` and re-adding the webhook `legacy_websocket_only` random-request rejection branch.
+- **classification**: behavioral removal
+- **archived rationale link**: [Archived websocket deprecation rationale](./archive/websocket_deprecation_rationale.md)
+
 ### 2026-04-04 — Verify mute-level silence on backend runtime announcements
 - **removed modules/functions**: none (verification + automated coverage update)
 - **replacement path**: `POST /bot/runtime/announcements` -> `backend_app._send_catalog_announcement` -> `_send_eventsub_chat_reply` mute suppression gate.
