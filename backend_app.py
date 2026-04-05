@@ -2434,13 +2434,22 @@ def _send_eventsub_chat_reply(
     Used variables/origin: ``reply`` contract is emitted by command executors;
     ``reply_parent_message_id`` comes from the inbound EventSub message id.
     When ``return_reason=True``, returns ``(sent, reason_code)`` where
-    ``reason_code`` is one of ``suppressed_by_level``, ``preflight_rejected``,
-    or ``api_failure`` for non-send outcomes.
+    ``reason_code`` is one of ``success``, ``suppressed_by_level``,
+    ``preflight_rejected``, or ``api_failure``.
     """
 
     def _finish(sent: bool, reason_code: Optional[str] = None) -> Any:
+        normalized_reason = str(reason_code or ("success" if sent else "api_failure")).strip() or "api_failure"
+        logger.info(
+            "EventSub reply delivery decision",
+            extra={
+                "channel": channel.channel_name,
+                "decision_result": "sent" if sent else "not_sent",
+                "reason_code": normalized_reason,
+            },
+        )
         if return_reason:
-            return sent, reason_code
+            return sent, normalized_reason
         return sent
 
     visibility = str(reply.get("visibility") or "normal")
@@ -2481,7 +2490,7 @@ def _send_eventsub_chat_reply(
             )
             response.raise_for_status()
             _record_ingress_metric("reply_sent")
-            return _finish(True, None)
+            return _finish(True, "success")
         except requests.HTTPError as exc:
             _record_ingress_metric("send_api_failure")
             status_code, reason_code, diagnostic_snippet = _extract_send_api_error_details(exc.response)
@@ -3295,9 +3304,38 @@ def _process_eventsub_chat_notification(
         )
         webhook_result = "shadow_observe_only"
 
-    _record_ingress_metric(
-        "command_dispatch_outcome",
-        key=f"{channel.channel_name}:{webhook_result}",
+    canonical_command = str(
+        outcome.get("command")
+        or parsed.get("canonical")
+        or ""
+    ).strip() or None
+    reason_code = str(outcome.get("reason_code") or "").strip() or None
+    status = str(outcome.get("status") or "").strip().lower()
+    if status == "executed":
+        outcome_category = "passed"
+    elif reason_code == "parse_non_command":
+        outcome_category = "rejected_non_command"
+    elif reason_code in {"shadow_mode_observe_only", "suppressed_by_level", "suppressed_disconnected"}:
+        outcome_category = "suppressed"
+    elif status == "error":
+        outcome_category = "failed"
+    elif status == "rejected":
+        outcome_category = "suppressed"
+    else:
+        outcome_category = "failed"
+
+    _record_ingress_metric("command_dispatch_outcome", key=f"{channel.channel_name}:{webhook_result}")
+
+    logger.info(
+        "EventSub chat command decision",
+        extra={
+            "channel": channel.channel_name,
+            "canonical_command": canonical_command or "<none>",
+            "eventsub_message_id": message_id,
+            "outcome_category": outcome_category,
+            "reason_code": reason_code,
+            "decision_result": webhook_result,
+        },
     )
 
     logger.info(
@@ -3310,9 +3348,17 @@ def _process_eventsub_chat_notification(
             "websocket_authoritative": not webhook_authoritative,
             "webhook_authoritative": webhook_authoritative,
             "chatter_login": chatter_login,
-            "webhook_parse": parsed,
+            "webhook_parse": {
+                "canonical": parsed.get("canonical"),
+                "alias": parsed.get("alias"),
+                "parse_reason": parsed.get("parse_reason"),
+            },
             "webhook_execution_result": webhook_result,
-            "webhook_outcome": outcome,
+            "webhook_outcome": {
+                "status": outcome.get("status"),
+                "command": outcome.get("command"),
+                "reason_code": outcome.get("reason_code"),
+            },
             "websocket_result": "authoritative_path_external_to_callback_deprecated",
         },
     )
@@ -4790,7 +4836,7 @@ class BotRuntimeAnnouncementOut(BaseModel):
     template_key: str
     visibility: Literal["mute", "normal", "verbose", "debug"]
     delivery_path: Literal["send_chat_pipeline"]
-    reason_code: Optional[Literal["suppressed_by_level", "suppressed_disconnected", "preflight_rejected", "api_failure"]] = None
+    reason_code: Optional[Literal["success", "suppressed_by_level", "suppressed_disconnected", "preflight_rejected", "api_failure"]] = None
 
 
 class BotOAuthStartIn(BaseModel):
@@ -6705,7 +6751,7 @@ def _send_catalog_announcement(
         template_key=template_key,
         visibility=cast(Literal["mute", "normal", "verbose", "debug"], visibility),
         delivery_path="send_chat_pipeline",
-        reason_code=cast(Optional[Literal["suppressed_by_level", "suppressed_disconnected", "preflight_rejected", "api_failure"]], reason_code),
+        reason_code=cast(Optional[Literal["success", "suppressed_by_level", "suppressed_disconnected", "preflight_rejected", "api_failure"]], reason_code),
     )
 
 

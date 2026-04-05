@@ -197,8 +197,9 @@ This document summarizes the REST endpoints exposed by `backend_app.py`.
   - Builds the same reply contract used by webhook command replies (`template_key`, `template_vars`, `visibility`).
   - Sends through the authoritative Twitch Send Chat Message pipeline (`_send_eventsub_chat_reply`), which enforces the same auth-mode policy (`twitch_send_chat_auth_mode`) and channel `bot_message_level` threshold rules.
   - Suppresses chat sends when the channel is disconnected (`join_active = 0`) so runtime announcements remain silent until reconnect.
-  - Returns send status metadata including `delivery_path: "send_chat_pipeline"`.
-  - When `sent=false`, includes `reason_code` with one of:
+  - Returns send status metadata including `delivery_path: "send_chat_pipeline"` and a stable `reason_code` decision enum.
+  - `reason_code` values:
+    - `success`: Twitch Send Chat API accepted the message.
     - `suppressed_by_level`: channel message-level threshold or empty rendered template suppressed the send.
     - `suppressed_disconnected`: channel is disconnected (`join_active = 0`), so no runtime announcement is sent.
     - `preflight_rejected`: auth/header/payload preflight checks failed before calling Twitch Send Chat API.
@@ -636,6 +637,9 @@ Certain events award priority points and are fed by EventSub subscriptions creat
   - Deterministic preflight validation now runs before Send Chat API calls to prevent guaranteed 400 retries: non-empty `broadcaster_id`, non-empty `sender_id`, message length `1-500`, and `sender_id` equality with bot token subject (`/oauth2/validate` `user_id`).
   - Preflight failures emit explicit reason codes and skip HTTP requests/retries.
   - Reply rendering uses the same message-catalog template semantics as websocket bot command responses.
+  - Reply send logging now emits a sanitized structured decision record with destination `channel`, `decision_result`, and `reason_code` only (no payload/body text).
+  - Command ingress logging now emits a sanitized structured decision record with `channel`, canonical command, EventSub message id, and normalized outcome category (`passed`, `suppressed`, `failed`, `rejected_non_command`) plus optional reason code.
+  - Webhook comparison telemetry excludes raw message/payload text and retains only parse/outcome summary keys.
   - Channel `bot_message_level` thresholds still gate webhook replies exactly like bot/websocket mode (`mute` suppresses all, `normal`/`verbose`/`debug` thresholds allow <= level).
   - In `chat_ingress_shadow_mode=true`, webhook command notifications stay observe-only and do not send chat replies or mutate queue state.
   - `random_request` remains a websocket-only execution path for now and is marked as a cleanup candidate to remove once authoritative migration completes.
