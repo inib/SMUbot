@@ -2230,8 +2230,53 @@ remove:
         finally:
             db.close()
 
-    def test_ingress_guard_degradation_can_auto_fallback_websocket_mode(self) -> None:
-        """Auto-fallback to websocket mode when authoritative ingress is degraded."""
+    def test_runtime_invariant_detects_enabled_subscription_on_pending_shard(self) -> None:
+        """Flag enabled chat assignments mapped to non-enabled conduit shards.
+
+        Dependencies: Persists conduit + shard metadata and enabled chat
+        subscription linkage.
+        Code customers: ingress guard degradation reasons and repair watcher
+        planner when subscriptions remain on pending shards.
+        Used variables/origin: assignment conduit/shard IDs come from enabled
+        ``EventSubscription`` rows while shard status is set to
+        ``webhook_callback_verification_pending``.
+        """
+
+        details = _setup_channel()
+        db = backend_app.SessionLocal()
+        try:
+            conduit = backend_app.TwitchConduit(conduit_id="conduit-pending", status="enabled")
+            db.add(conduit)
+            db.flush()
+            shard = backend_app.TwitchConduitShard(
+                conduit_fk=conduit.id,
+                shard_id="7",
+                status="webhook_callback_verification_pending",
+                transport_secret="pending-secret",
+                current_secret="pending-secret",
+            )
+            db.add(shard)
+            db.add(
+                backend_app.EventSubscription(
+                    channel_id=details["channel_pk"],
+                    twitch_subscription_id="sub-pending-shard",
+                    type=backend_app.EVENTSUB_CONDUIT_CHAT_TYPE,
+                    status="enabled",
+                    secret=backend_app.EVENTSUB_CONDUIT_SECRET_PLACEHOLDER,
+                    callback="https://example.invalid/callback",
+                    transport="conduit",
+                    conduit_id="conduit-pending",
+                    shard_id="7",
+                )
+            )
+            db.commit()
+            invariants = backend_app._evaluate_ingress_runtime_invariants(db, now=backend_app.datetime.utcnow())
+            self.assertGreaterEqual(invariants.get("unhealthy_shard_assignment_count", 0), 1)
+        finally:
+            db.close()
+
+    def test_ingress_guard_degradation_keeps_webhook_authoritative_mode(self) -> None:
+        """Guard degradation should not switch away from webhook-conduit mode."""
 
         _setup_channel()
         db = backend_app.SessionLocal()
@@ -2248,8 +2293,8 @@ remove:
             backend_app._record_ingress_metric("callback_status", key="5xx")
             guard = backend_app._evaluate_ingress_guard(db, backend_app.datetime.utcnow(), apply_fallback=True)
             self.assertTrue(guard["degraded"])
-            self.assertTrue(guard["auto_fallback_applied"])
-            self.assertEqual(backend_app.get_chat_ingress_mode(), "websocket")
+            self.assertFalse(guard["auto_fallback_applied"])
+            self.assertEqual(backend_app.get_chat_ingress_mode(), "webhook_conduit")
         finally:
             db.close()
 

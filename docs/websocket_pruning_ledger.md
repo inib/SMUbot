@@ -36,6 +36,14 @@ Use this ledger whenever websocket-only code/tests are removed.
 - **classification**: behavioral removal
 - **archived rationale link**: [Archived websocket deprecation rationale](./archive/websocket_deprecation_rationale.md)
 
+### 2026-04-05 — Enforce webhook-only ingress and disable transition toggles
+- **removed modules/functions**: `backend_app.py` websocket/shadow runtime fallback behavior in ingress mode getters and guard auto-fallback branch (`_evaluate_ingress_guard` mode-switch path)
+- **replacement path**: webhook-conduit authoritative execution in `backend_app._process_eventsub_chat_notification` and fixed `/system/config` webhook-only emission
+- **deprecation decision date**: 2026-04-05
+- **rollback implications**: behavioral tightening; rollback would require restoring configurable ingress mode/shadow/fallback toggles and websocket fallback branch.
+- **classification**: behavioral removal
+- **archived rationale link**: [Archived websocket deprecation rationale](./archive/websocket_deprecation_rationale.md)
+
 ### 2026-04-04 — Remove websocket runtime announcement rollback fallback/gate
 - **removed modules/functions**: `bot/bot_app.py` `SongBot._announce_backend_runtime_event` websocket fallback branch, `SongBot` queue/event polling announcers (`check_played`, `check_bumps`, `check_queue_position_changes`, `announce_event`), and `BotService._requires_runtime` gate branch from `BotService.run`.
 - **replacement path**: backend-authoritative catalog announcement dispatch in `backend_app._send_catalog_announcement`, called directly from `move_request`, `mark_played`, and `_persist_channel_event`.
