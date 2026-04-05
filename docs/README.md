@@ -521,6 +521,12 @@ Expected:
   membership state.
 - Backend now runs a dedicated token refresh worker (60s poll, refresh at
   `expires_at - 5m`) while webhook/conduit remains authoritative ingress.
+- Token-only credential deltas (`access_token` / `refresh_token`) are hot-swapped
+  in-place via TwitchIO `add_token` registration and no longer force a full bot
+  restart when identity/config fields are unchanged.
+- Bot restarts are still required for identity/config deltas (`login`,
+  `client_id`, `client_secret`, `bot_user_id`, `scopes`) or when token hot-swap
+  fails and the runtime falls back to the safe restart path.
 - Legacy websocket rollback keeps only minimal `subscribe_websocket` hooks;
   prior websocket subscription reuse/recovery loops are intentionally disabled
   to avoid accidental authoritative use during normal operations.

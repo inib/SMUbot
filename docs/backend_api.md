@@ -367,6 +367,8 @@ Channel settings include queue intake controls:
   2. Token refresh triggers at `T-5m` before `expires_at`.
   3. On success, backend persists `access_token`, `refresh_token`,
      `expires_at`, and refreshed `scopes`.
+  4. Bot runtime polling applies token-only deltas through in-place hot-swap;
+     identity/config changes still trigger a full bot restart.
 - **Failure alarms**:
   1. `token_refresh_healthy=false` in `/system/health`.
   2. `token_refresh_unhealthy` appears in

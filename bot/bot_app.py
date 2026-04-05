@@ -558,6 +558,14 @@ class SongBot(commands.Bot):
         return self._configured_login
 
     async def load_tokens(self, path: Optional[str] = None) -> None:
+        """Register startup tokens with TwitchIO and persist normalized metadata.
+
+        Dependencies: TwitchIO ``add_token`` API and backend ``update_bot_tokens``.
+        Code customers: initial bot startup and credential bootstrap paths.
+        Used variables/origin: reads ``self._user_token`` / ``self._refresh_token``
+        set from backend `/bot/config` settings and stores refreshed scopes/expiry.
+        """
+
         if not self._user_token or not self._refresh_token:
             raise RuntimeError('Bot credentials are unavailable')
         payload = await super().add_token(self._user_token, self._refresh_token)
@@ -572,6 +580,39 @@ class SongBot(commands.Bot):
     async def save_tokens(self, path: Optional[str] = None) -> None:
         # Tokens are persisted to the backend, so skip file writes.
         return None
+
+    async def refresh_runtime_tokens(
+        self,
+        *,
+        access_token: str,
+        refresh_token: str,
+        scopes: Optional[List[str]] = None,
+        expires_in: Optional[int] = None,
+    ) -> None:
+        """Hot-swap runtime tokens without rebuilding the bot process.
+
+        Dependencies: TwitchIO ``add_token`` registration and backend token
+        persistence.
+        Code customers: ``BotService.apply_settings`` token-only credential churn
+        path and websocket rollback ``event_token_refreshed`` compatibility flow.
+        Used variables/origin: accepts backend-provided bot token deltas and
+        optional scope/expiry metadata, then updates in-memory token state.
+        """
+
+        if not access_token or not refresh_token:
+            raise RuntimeError('Bot token hot-swap requires access and refresh tokens')
+        payload = await super().add_token(access_token, refresh_token)
+        normalized_scopes = sorted(dict.fromkeys(scopes if scopes is not None else list(payload.scopes)))
+        resolved_expires_in = expires_in if expires_in is not None else payload.expires_in
+        self._user_token = access_token
+        self._refresh_token = refresh_token
+        self._scopes = normalized_scopes
+        await self._persist_tokens(
+            access_token=access_token,
+            refresh_token=refresh_token,
+            expires_in=resolved_expires_in,
+            scopes=normalized_scopes,
+        )
 
     async def _persist_tokens(
         self,
@@ -604,14 +645,11 @@ class SongBot(commands.Bot):
         # session lifecycle are now legacy because backend_app runs an
         # authoritative refresh worker for webhook_conduit mode. Keep this path
         # as rollback compatibility until worker stability is confirmed.
-        self._user_token = payload.token
-        self._refresh_token = payload.refresh_token
-        self._scopes = list(payload.scopes)
-        await self._persist_tokens(
+        await self.refresh_runtime_tokens(
             access_token=payload.token,
             refresh_token=payload.refresh_token,
+            scopes=list(payload.scopes),
             expires_in=payload.expires_in,
-            scopes=self._scopes,
         )
         for login in list(self.joined):
             await self._send_catalog_message(
@@ -1482,6 +1520,16 @@ class BotService:
             await asyncio.sleep(self.poll_interval)
 
     async def apply_settings(self, settings: BotSettings):
+        """Apply backend bot settings and decide between restart vs hot-swap.
+
+        Dependencies: backend `/bot/config` polling loop, ``SongBot`` lifecycle
+        methods (restart/shutdown/token hot-swap), and lifecycle console logging.
+        Code customers: ``BotService.run`` periodic reconciliation loop.
+        Used variables/origin: compares backend-provided credential/identity
+        fields against cached ``self._current_*`` state to choose safe runtime
+        transition behavior.
+        """
+
         required_fields = {
             'access_token': settings.token,
             'refresh_token': settings.refresh_token,
@@ -1529,17 +1577,16 @@ class BotService:
         token = _format_token(settings.token)
         refresh = settings.refresh_token or ''
         scopes_sorted = sorted(settings.scopes or [])
-        requires_restart = (
+        requires_identity_restart = (
             self._bot is None
-            or token != self._current_token
-            or refresh != self._current_refresh
             or settings.login != self._current_login
             or settings.client_id != self._current_client_id
             or settings.client_secret != self._current_client_secret
             or settings.bot_user_id != self._current_bot_id
             or scopes_sorted != self._current_scopes
         )
-        if requires_restart:
+        token_changed_only = token != self._current_token or refresh != self._current_refresh
+        if requires_identity_restart:
             await self._restart_bot(
                 token=token,
                 refresh_token=refresh,
@@ -1550,6 +1597,44 @@ class BotService:
                 bot_user_id=settings.bot_user_id,
                 scopes=settings.scopes or [],
             )
+        elif token_changed_only and self._bot:
+            try:
+                await self._bot.refresh_runtime_tokens(
+                    access_token=token,
+                    refresh_token=refresh,
+                    scopes=settings.scopes or [],
+                )
+                self._current_token = token
+                self._current_refresh = refresh
+                await push_console_event(
+                    'info',
+                    'Bot token hot-swap applied without restart',
+                    event='lifecycle',
+                    metadata={
+                        'event': 'token_hot_swap_succeeded',
+                        'reason_code': 'token_changed_only',
+                    },
+                )
+            except Exception as exc:
+                await push_console_event(
+                    'error',
+                    f'Bot token hot-swap failed; falling back to restart ({exc})',
+                    event='lifecycle',
+                    metadata={
+                        'event': 'token_hot_swap_failed',
+                        'reason_code': 'token_hot_swap_failed',
+                    },
+                )
+                await self._restart_bot(
+                    token=token,
+                    refresh_token=refresh,
+                    login=settings.login,
+                    enabled=settings.enabled,
+                    client_id=settings.client_id,
+                    client_secret=settings.client_secret,
+                    bot_user_id=settings.bot_user_id,
+                    scopes=settings.scopes or [],
+                )
         elif self._bot:
             await self._bot.update_enabled(settings.enabled)
 
