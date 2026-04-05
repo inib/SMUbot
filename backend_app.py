@@ -1225,6 +1225,8 @@ def _evaluate_ingress_guard(db: Session, now: datetime, *, apply_fallback: bool)
         degraded_reasons.append("callback_errors_spike")
     if not invariants["conduit_signature_secret_resolvable"]:
         degraded_reasons.append("invalid_signature")
+    if int(invariants.get("unhealthy_shard_assignment_count") or 0) > 0:
+        degraded_reasons.append("subscriptions_on_unhealthy_shards")
     if not invariants["sender_token_subject_resolvable"]:
         degraded_reasons.append("preflight_token_subject_unresolved")
     if not invariants.get("token_refresh_healthy", True):
@@ -1511,6 +1513,7 @@ def _evaluate_ingress_runtime_invariants(db: Session, *, now: datetime) -> dict[
         if str(conduit_id or "").strip() and str(shard_id or "").strip()
     }
     unresolved_assignments: list[dict[str, str]] = []
+    unhealthy_shard_assignments: list[dict[str, str]] = []
     for conduit_id, shard_id in sorted(assignment_pairs):
         shard_row = (
             db.query(TwitchConduitShard)
@@ -1526,6 +1529,16 @@ def _evaluate_ingress_runtime_invariants(db: Session, *, now: datetime) -> dict[
                 {"conduit_id": conduit_id, "shard_id": shard_id, "reason_code": "unknown_conduit_shard"}
             )
             continue
+        shard_status = str(shard_row.status or "").strip().lower()
+        if shard_status != "enabled":
+            unhealthy_shard_assignments.append(
+                {
+                    "conduit_id": conduit_id,
+                    "shard_id": shard_id,
+                    "reason_code": "shard_not_enabled",
+                    "status": shard_status or "unknown",
+                }
+            )
         if not _active_conduit_shard_secret_candidates(shard_row, now=now):
             unresolved_assignments.append(
                 {"conduit_id": conduit_id, "shard_id": shard_id, "reason_code": "missing_shard_secret"}
@@ -1544,6 +1557,8 @@ def _evaluate_ingress_runtime_invariants(db: Session, *, now: datetime) -> dict[
         "active_assignment_count": len(assignment_pairs),
         "unresolved_assignment_count": len(unresolved_assignments),
         "unresolved_assignments": unresolved_assignments[:10],
+        "unhealthy_shard_assignment_count": len(unhealthy_shard_assignments),
+        "unhealthy_shard_assignments": unhealthy_shard_assignments[:10],
         "bot_sender_subject_id": token_subject_id,
         "token_refresh_health": refresh_health,
     }
@@ -1611,6 +1626,7 @@ def _startup_conduit_shard_health_summary(db: Session, guard: dict[str, Any]) ->
         "shards_total": len(shard_rows),
         "shards_healthy": healthy_shards,
         "unresolved_assignment_count": int(runtime_invariants.get("unresolved_assignment_count") or 0),
+        "unhealthy_shard_assignment_count": int(runtime_invariants.get("unhealthy_shard_assignment_count") or 0),
     }
 
 
@@ -1686,7 +1702,8 @@ def _ingress_guard_reasons_to_actions(reasons: list[str]) -> list[str]:
     """Translate ingress guard degradation reasons into repair action candidates.
 
     Dependencies: Uses static reason-to-action mapping for
-    ``callback_errors_spike``, ``invalid_signature``, and shard-health issues.
+    ``callback_errors_spike``, signature errors, unhealthy subscription shard
+    placement, and shard-health issues.
     Code customers: ``run_ingress_guard_repair_cycle`` repair planner.
     Used variables/origin: ``reasons`` is sourced from
     ``_evaluate_ingress_guard(...).reasons`` and ordered by severity.
@@ -1696,7 +1713,11 @@ def _ingress_guard_reasons_to_actions(reasons: list[str]) -> list[str]:
     actions: list[str] = []
     if "callback_errors_spike" in reason_set:
         actions.append("reconcile")
-    if "invalid_signature" in reason_set or "missing_healthy_shards" in reason_set:
+    if (
+        "invalid_signature" in reason_set
+        or "missing_healthy_shards" in reason_set
+        or "subscriptions_on_unhealthy_shards" in reason_set
+    ):
         actions.append("shard_repair")
     if not actions and reason_set:
         actions.append("reconcile")

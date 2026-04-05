@@ -48,13 +48,14 @@ This document summarizes the REST endpoints exposed by `backend_app.py`.
   - conduit shard status transitions,
   - last reply preflight failure reason (`last_errors.reply_preflight_failure_reason_code`),
   - recent callback throughput + last error timestamps/diagnostic snippets.
-- `eventsub.authoritative_guard` includes degradation reasons (`missing_healthy_shards`, `callback_errors_spike`, `token_refresh_unhealthy`) in webhook-only mode (no websocket fallback path).
+- `eventsub.authoritative_guard` includes degradation reasons (`missing_healthy_shards`, `callback_errors_spike`, `subscriptions_on_unhealthy_shards`, `token_refresh_unhealthy`) in webhook-only mode (no websocket fallback path).
 - The backend repair watcher evaluates these guard reasons every 60 seconds and
   applies least-disruptive repair in order: `reconcile`, `shard_repair`,
   `rebuild` (with cooldown + attempt caps to avoid loops).
 - `eventsub.authoritative_guard.runtime_invariants` reports runtime checks for
   conduit shard-secret resolvability, sender token-subject resolvability, and
-  bot token refresh-worker health (`token_refresh_healthy`,
+  enabled-subscription shard placement health
+  (`unhealthy_shard_assignment_count`), and bot token refresh-worker health (`token_refresh_healthy`,
   `token_refresh_health.*`).
 - `eventsub.ingress_metrics.guard_repair_actions` and
   `eventsub.ingress_metrics.guard_repair_outcomes` provide structured watcher
