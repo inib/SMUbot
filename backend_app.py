@@ -8098,18 +8098,78 @@ def add_channel(payload: ChannelIn, db: Session = Depends(get_db)):
     publish_queue_changed(channel_pk)
     return ch
 
+def _set_channel_conduit_subscription_state(
+    db: Session,
+    channel_pk: int,
+    *,
+    enabled: bool,
+) -> int:
+    """Set persisted conduit chat EventSub state for a single channel.
+
+    Dependencies: Mutates ``EventSubscription`` rows using the provided
+    SQLAlchemy ``Session`` and shared ``EVENTSUB_CONDUIT_CHAT_TYPE`` constant.
+    Code customers: ``update_channel_status`` and planned admin/operator flows
+    that need explicit conduit chat subscription state transitions.
+    Used variables/origin: ``channel_pk`` is the resolved ``ActiveChannel``
+    primary key, while ``enabled`` maps to local row status semantics
+    (disconnect => ``disabled``, reconnect path currently leaves local row as-is
+    until reconcile repopulates authoritative state).
+    """
+
+    rows = (
+        db.query(EventSubscription)
+        .filter(
+            EventSubscription.channel_id == channel_pk,
+            EventSubscription.type == EVENTSUB_CONDUIT_CHAT_TYPE,
+            EventSubscription.transport == "conduit",
+        )
+        .all()
+    )
+    if enabled:
+        return len(rows)
+    now = datetime.utcnow()
+    for row in rows:
+        row.status = "disabled"
+        row.last_verified_at = None
+        row.updated_at = now
+    return len(rows)
+
 @app.put("/channels/{channel}", dependencies=[Depends(require_token)])
 def update_channel_status(
     channel: str,
     join_active: int = Query(..., ge=0, le=1),
     db: Session = Depends(get_db),
 ):
+    """Update channel connect/disconnect state and sync conduit subscriptions.
+
+    Dependencies: Resolves channel identity via ``get_channel_pk``, mutates
+    ``ActiveChannel.join_active``, toggles conduit-backed chat subscription rows
+    through ``_set_channel_conduit_subscription_state``, and may trigger
+    ``reconcile_eventsub_conduit_subscriptions`` for reconnects.
+    Code customers: Queue Manager connect/disconnect controls and admin channel
+    status automation.
+    Used variables/origin: ``join_active`` comes from validated query input
+    (`0|1`); ``channel`` is channel slug/name/ID routed path input.
+    """
+
     channel_pk = get_channel_pk(channel, db)
     ch = db.get(ActiveChannel, channel_pk)
     if not ch:
         raise HTTPException(404, "channel not found")
     ch.join_active = join_active
+    _set_channel_conduit_subscription_state(db, channel_pk, enabled=(join_active == 1))
     db.commit()
+    if join_active == 1 and (
+        get_chat_ingress_mode() == "webhook_conduit" or get_chat_ingress_shadow_mode()
+    ):
+        try:
+            reconcile_eventsub_conduit_subscriptions(None, db)
+        except Exception:
+            logger.warning(
+                "Conduit reconciliation failed after channel reconnect",
+                extra={"channel_id": channel_pk, "channel_name": ch.channel_name},
+                exc_info=True,
+            )
     publish_queue_changed(channel_pk)
     return {"success": True}
 

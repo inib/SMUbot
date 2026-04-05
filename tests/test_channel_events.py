@@ -2674,11 +2674,36 @@ remove:
         self.assertEqual(invalid.status_code, 422, invalid.text)
 
     def test_channel_status_route_controls_join_active_and_rejects_invalid_values(self) -> None:
-        """Connect/disconnect should use `/channels/{channel}` with strict join_active validation."""
+        """Connect/disconnect should mutate join_active and conduit EventSub state.
+
+        Dependencies: Exercises ``/channels/{channel}`` update route,
+        ``EventSubscription`` persistence, and reconnect-driven conduit
+        reconcile hooks.
+        Code customers: Queue Manager bot connect/disconnect dropdown and admin
+        workflows that toggle channel runtime state.
+        Used variables/origin: seeds one conduit chat ``EventSubscription`` row
+        and patches reconcile dependencies to emulate a successful reconnect
+        refresh from Twitch.
+        """
 
         details = _setup_channel()
         channel = details["channel_name"]
         headers = {"X-Admin-Token": backend_app.ADMIN_TOKEN}
+        with backend_app.SessionLocal() as db:
+            db.add(
+                backend_app.EventSubscription(
+                    channel_id=details["channel_pk"],
+                    twitch_subscription_id="sub-channel-toggle",
+                    type=backend_app.EVENTSUB_CONDUIT_CHAT_TYPE,
+                    status="enabled",
+                    secret=backend_app.EVENTSUB_CONDUIT_SECRET_PLACEHOLDER,
+                    callback="https://example/callback",
+                    transport="conduit",
+                    conduit_id="conduit-toggle",
+                    shard_id="0",
+                )
+            )
+            db.commit()
 
         disconnect = self.client.put(
             f"/channels/{channel}",
@@ -2690,13 +2715,72 @@ remove:
         with backend_app.SessionLocal() as db:
             stored = db.query(backend_app.ActiveChannel).filter_by(channel_name=channel).one()
             self.assertEqual(stored.join_active, 0)
+            sub = (
+                db.query(backend_app.EventSubscription)
+                .filter(backend_app.EventSubscription.twitch_subscription_id == "sub-channel-toggle")
+                .one()
+            )
+            self.assertEqual(sub.status, "disabled")
 
-        reconnect = self.client.put(
-            f"/channels/{channel}",
-            params={"join_active": 1},
-            headers=headers,
-        )
+        with mock.patch.object(
+            backend_app,
+            "_public_eventsub_callback_url",
+            return_value=("https://example.com/twitch/eventsub/callback", None, {"source": "test", "warnings": []}),
+        ), mock.patch.object(
+            backend_app,
+            "_eventsub_app_headers",
+            return_value={"Authorization": "Bearer app", "Client-Id": "client"},
+        ), mock.patch.object(
+            backend_app,
+            "get_bot_user_id",
+            return_value="bot-user-id",
+        ), mock.patch.object(
+            backend_app,
+            "_ensure_twitch_conduit",
+            return_value=(mock.Mock(conduit_id="conduit-toggle", status="enabled"), []),
+        ), mock.patch.object(
+            backend_app,
+            "_reconcile_twitch_conduit_shards",
+            return_value=({"0": "enabled"}, []),
+        ), mock.patch.object(
+            backend_app.requests,
+            "get",
+            return_value=mock.Mock(
+                json=lambda: {
+                    "data": [
+                        {
+                            "id": "sub-channel-toggle",
+                            "type": backend_app.EVENTSUB_CONDUIT_CHAT_TYPE,
+                            "condition": {
+                                "broadcaster_user_id": details["channel_id"],
+                                "user_id": "bot-user-id",
+                            },
+                            "transport": {"method": "conduit", "conduit_id": "conduit-toggle"},
+                            "status": "enabled",
+                        }
+                    ]
+                },
+                raise_for_status=lambda: None,
+            ),
+        ), mock.patch.object(backend_app.requests, "post") as post_mock:
+            reconnect = self.client.put(
+                f"/channels/{channel}",
+                params={"join_active": 1},
+                headers=headers,
+            )
         self.assertEqual(reconnect.status_code, 200, reconnect.text)
+        post_mock.assert_not_called()
+
+        with backend_app.SessionLocal() as db:
+            stored = db.query(backend_app.ActiveChannel).filter_by(channel_name=channel).one()
+            self.assertEqual(stored.join_active, 1)
+            sub = (
+                db.query(backend_app.EventSubscription)
+                .filter(backend_app.EventSubscription.twitch_subscription_id == "sub-channel-toggle")
+                .one()
+            )
+            self.assertEqual(sub.status, "enabled")
+            self.assertEqual(sub.transport, "conduit")
 
         invalid = self.client.put(
             f"/channels/{channel}",
