@@ -8,7 +8,6 @@ from datetime import datetime, timedelta
 from command_resolution import default_commands_map, load_commands_map
 
 import aiohttp
-from twitchio import eventsub
 from twitchio.ext import commands
 from twitchio.payloads import TokenRefreshedPayload
 if __package__:
@@ -163,18 +162,6 @@ class Backend:
 
     async def get_channels(self):
         return await self._req('GET', "/channels")
-
-    async def get_system_config(self) -> dict:
-        """Return backend system config used for ingress runtime gating.
-
-        Dependencies: calls the backend ``/system/config`` endpoint.
-        Code customers: ``SongBot.sync_channels`` websocket fallback decisions.
-        Used variables/origin: uses admin-authenticated API response fields such
-        as ``chat_ingress_mode`` and ``chat_websocket_fallback_legacy_enabled``.
-        """
-
-        payload = await self._req('GET', "/system/config")
-        return payload if isinstance(payload, dict) else {}
 
     async def add_channel(self, channel_name: str, channel_id: str, join_active: int = 1):
         return await self._req('POST', "/channels", {
@@ -563,10 +550,8 @@ class SongBot(commands.Bot):
         self._user_token = token
         self._refresh_token = refresh_token
         self._scopes = list(scopes or [])
-        self._subscription_ids: Dict[str, str] = {}
         self._update_locks: Dict[str, asyncio.Lock] = {}
         self._refresher_task: Optional[asyncio.Task] = None
-        self._websocket_fallback_enabled = False
 
     @property
     def configured_login(self) -> Optional[str]:
@@ -679,33 +664,21 @@ class SongBot(commands.Bot):
         return self.channel_map.get(self._channel_login(login))
 
     async def sync_channels(self) -> None:
-        """Synchronize channel listeners and optional websocket rollback hooks.
+        """Synchronize channel listeners and backend queue stream tasks.
 
         Description: refresh channel authorization state, keep backend queue
-        listeners aligned, and only enable websocket chat subscriptions when an
-        explicit rollback flag allows legacy ingress.
-        Dependencies: backend ``/system/config`` and ``/channels`` APIs plus
-        SongBot listener/subscription lifecycle helpers.
+        listeners aligned, and start/stop per-channel queue listeners.
+        Dependencies: backend ``/channels`` API plus SongBot listener lifecycle
+        helpers.
         Code customers: ``event_ready``, periodic ``channel_refresher``, and
         runtime enable/disable transitions.
-        Used variables/origin: ``chat_ingress_mode`` and
-        ``chat_websocket_fallback_legacy_enabled`` from system config drive
-        websocket fallback gating; channel rows from ``backend.get_channels``.
+        Used variables/origin: channel rows from ``backend.get_channels``.
         """
 
         if not self.enabled:
             await self._disable_all_channels()
             return
         async with self._sync_lock:
-            config = await backend.get_system_config()
-            ingress_mode = str(config.get("chat_ingress_mode") or "").strip().lower()
-            rollback_enabled = bool(config.get("chat_websocket_fallback_legacy_enabled"))
-            self._websocket_fallback_enabled = rollback_enabled
-            if ingress_mode == "webhook_conduit":
-                logger.info(
-                    "Canonical chat ingress is webhook_conduit; websocket EventSub chat subscriptions are rollback-only (enabled=%s)",
-                    rollback_enabled,
-                )
             rows = await backend.get_channels()
             allowed: Dict[str, Dict] = {}
             for row in rows:
@@ -719,10 +692,9 @@ class SongBot(commands.Bot):
             added_preview = sorted(allowed_keys - current_keys)
             removed_preview = sorted(current_keys - allowed_keys)
             logger.info(
-                "CHANNEL_SYNC_SUMMARY considered=%s listened=%s rollback_websocket=%s added=%s removed=%s",
+                "CHANNEL_SYNC_SUMMARY considered=%s listened=%s added=%s removed=%s",
                 len(rows),
                 len(current_keys),
-                rollback_enabled,
                 added_preview,
                 removed_preview,
             )
@@ -735,7 +707,6 @@ class SongBot(commands.Bot):
                 task = self.listeners.pop(key, None)
                 if task:
                     task.cancel()
-                await self._unsubscribe_channel(broadcaster_id)
                 if key in self.joined:
                     await self._announce_left(key)
                     self.joined.discard(key)
@@ -756,25 +727,6 @@ class SongBot(commands.Bot):
             for key in new_keys:
                 row = allowed[key]
                 channel_name = row['channel_name']
-                broadcaster_id = str(row.get('channel_id') or '')
-                try:
-                    await self._subscribe_for_channel(broadcaster_id)
-                except Exception as exc:
-                    await backend.set_bot_status(channel_name, False, str(exc))
-                    await push_console_event(
-                        'error',
-                        f'Failed to subscribe channel {channel_name}: {exc}',
-                        event='join_error',
-                        metadata={'channel': channel_name, 'error': str(exc)},
-                    )
-                    await self._announce_debug_failure(
-                        key,
-                        action='subscribe_channel',
-                        error=exc,
-                        metadata={'channel': channel_name},
-                    )
-                    self.channel_map.pop(key, None)
-                    continue
                 await backend.set_bot_status(channel_name, True)
                 await push_console_event(
                     'info',
@@ -804,128 +756,6 @@ class SongBot(commands.Bot):
                         'queue': initial_queue,
                         'last_event': datetime.utcnow().isoformat(),
                     }
-                await self._subscribe_for_channel(str(row.get('channel_id') or ''))
-
-    def _extract_subscription_id(self, response: object) -> Optional[str]:
-        """[deprecated/unused] Extract websocket subscription IDs from TwitchIO responses.
-
-        Description: retained temporary parser for old websocket recovery flows.
-        Dependencies: TwitchIO response payload shape.
-        Code customers: none in authoritative webhook-conduit mode.
-        Used variables/origin: ``response`` object from historical
-        ``subscribe_websocket`` calls.
-        TODO(removal): delete when websocket rollback harness is retired.
-        """
-
-        if not response:
-            return None
-        if isinstance(response, dict):
-            data = response.get('data')
-            if isinstance(data, list) and data:
-                first = data[0]
-                if isinstance(first, dict):
-                    sub_id = first.get('id')
-                    if sub_id:
-                        return str(sub_id)
-        subscription = getattr(response, 'subscription', None)
-        sub_id = getattr(subscription, 'id', None)
-        if sub_id:
-            return str(sub_id)
-        sub_id = getattr(response, 'id', None)
-        if sub_id:
-            return str(sub_id)
-        return None
-
-    async def _find_existing_subscription_id(self, broadcaster_id: str) -> Optional[str]:
-        """[deprecated/unused] Lookup existing websocket chat subscription ID.
-
-        Description: legacy helper formerly used by subscription recovery loops.
-        Dependencies: TwitchIO websocket/EventSub subscription fetch APIs.
-        Code customers: none after removing websocket reuse/recovery loops.
-        Used variables/origin: ``broadcaster_id`` from backend channel rows and
-        ``self.bot_user_id`` from bot credentials.
-        TODO(removal): remove with websocket fallback end-of-life.
-        """
-
-        for existing_id, details in self.websocket_subscriptions().items():
-            condition = getattr(details, 'condition', {}) or {}
-            sub_type = getattr(details, 'type', None)
-            if (
-                sub_type == eventsub.SubscriptionType.ChannelChatMessage
-                and condition.get('broadcaster_user_id') == broadcaster_id
-                and condition.get('user_id') == self.bot_user_id
-            ):
-                return str(existing_id)
-        try:
-            events = await self.fetch_eventsub_subscriptions(
-                token_for=self.bot_user_id,
-                type=eventsub.SubscriptionType.ChannelChatMessage.value,
-            )
-        except Exception:
-            return None
-        if not events:
-            return None
-        async for subscription in events.subscriptions:
-            condition = getattr(subscription, 'condition', {}) or {}
-            if (
-                condition.get('broadcaster_user_id') == broadcaster_id
-                and condition.get('user_id') == self.bot_user_id
-            ):
-                sub_id = getattr(subscription, 'id', None)
-                if sub_id:
-                    return str(sub_id)
-        return None
-
-    async def _subscribe_for_channel(self, broadcaster_id: str) -> None:
-        """Create websocket chat subscription only for explicit rollback mode.
-
-        Description: authoritative ``webhook_conduit`` mode never depends on
-        websocket ingress; this hook exists solely for emergency rollback.
-        Dependencies: TwitchIO ``subscribe_websocket`` API and
-        ``self._websocket_fallback_enabled`` from ``sync_channels`` policy.
-        Code customers: ``sync_channels`` channel lifecycle during rollback.
-        Used variables/origin: ``broadcaster_id`` from backend channel config
-        and ``self.bot_user_id`` from loaded bot credentials.
-        """
-
-        if not broadcaster_id:
-            raise RuntimeError('Channel missing broadcaster id')
-        if not self._websocket_fallback_enabled:
-            return
-        if broadcaster_id in self._subscription_ids:
-            return
-        payload = eventsub.ChatMessageSubscription(
-            broadcaster_user_id=broadcaster_id,
-            user_id=self.bot_user_id,
-        )
-        response = await self.subscribe_websocket(payload=payload, as_bot=True)
-        sub_id = self._extract_subscription_id(response)
-        if not sub_id:
-            raise RuntimeError('Subscription id unavailable')
-        self._subscription_ids[broadcaster_id] = sub_id
-        logger.info(
-            "Created new websocket subscription %s for broadcaster %s",
-            sub_id,
-            broadcaster_id,
-        )
-
-    async def _unsubscribe_channel(self, broadcaster_id: str) -> None:
-        """Delete a rollback websocket subscription for the given broadcaster.
-
-        Description: best-effort cleanup for legacy websocket fallback only.
-        Dependencies: TwitchIO ``delete_websocket_subscription`` API.
-        Code customers: channel removal and bot shutdown flows.
-        Used variables/origin: ``broadcaster_id`` from channel config and
-        ``self._subscription_ids`` populated by ``_subscribe_for_channel``.
-        """
-
-        sub_id = self._subscription_ids.pop(broadcaster_id, None)
-        if not sub_id:
-            return
-        try:
-            await self.delete_websocket_subscription(sub_id, force=True)
-        except Exception:
-            pass
 
     async def _disable_all_channels(self) -> None:
         listener_tasks = list(self.listeners.values())
@@ -938,7 +768,6 @@ class SongBot(commands.Bot):
             await asyncio.gather(*awaitables, return_exceptions=True)
         self.listeners.clear()
         for key, row in list(self.channel_map.items()):
-            await self._unsubscribe_channel(str(row.get('channel_id') or ''))
             if key in self.joined:
                 await self._announce_left(key)
                 self.joined.discard(key)
@@ -1177,27 +1006,15 @@ class SongBot(commands.Bot):
         reply_to: Optional[str] = None,
         fallback_partial: Optional[object] = None,
     ) -> None:
-        """Send a websocket-runtime chat message using bot-user token contract.
+        """Send a chat message using the bot-user token contract.
 
-        Description: rollback-only websocket egress helper; authoritative
-        webhook/conduit ingress should use backend Send Chat transport instead.
-        Dependencies: TwitchIO ``PartialUser.send_message`` and runtime
-        ``self._websocket_fallback_enabled`` policy flag.
-        Code customers: websocket ingress command handlers and debug/catalog
-        responses emitted during rollback operation.
+        Description: emits Twitch chat responses for bot runtime handlers.
+        Dependencies: TwitchIO ``PartialUser.send_message`` bot identity token.
+        Code customers: command handlers and debug/catalog responses.
         Used variables/origin: ``channel_login`` and ``message`` come from
         command dispatch flows; ``self.bot_user_id`` is persisted bot identity
         used for both ``sender`` and ``token_for`` in TwitchIO sends.
         """
-
-        if not self._websocket_fallback_enabled:
-            await push_console_event(
-                'warning',
-                f'Skipped websocket send for {channel_login}: fallback mode disabled',
-                event='message_skipped',
-                metadata={**(metadata or {}), 'channel': channel_login, 'reason_code': 'websocket_fallback_disabled'},
-            )
-            return
         info = self._channel_info(channel_login)
         partial = None
         channel_label = channel_login
