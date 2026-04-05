@@ -2230,8 +2230,8 @@ remove:
         finally:
             db.close()
 
-    def test_ingress_guard_degradation_can_auto_fallback_websocket_mode(self) -> None:
-        """Auto-fallback to websocket mode when authoritative ingress is degraded."""
+    def test_ingress_guard_degradation_keeps_webhook_authoritative_mode(self) -> None:
+        """Guard degradation should not switch away from webhook-conduit mode."""
 
         _setup_channel()
         db = backend_app.SessionLocal()
@@ -2248,8 +2248,8 @@ remove:
             backend_app._record_ingress_metric("callback_status", key="5xx")
             guard = backend_app._evaluate_ingress_guard(db, backend_app.datetime.utcnow(), apply_fallback=True)
             self.assertTrue(guard["degraded"])
-            self.assertTrue(guard["auto_fallback_applied"])
-            self.assertEqual(backend_app.get_chat_ingress_mode(), "websocket")
+            self.assertFalse(guard["auto_fallback_applied"])
+            self.assertEqual(backend_app.get_chat_ingress_mode(), "webhook_conduit")
         finally:
             db.close()
 
