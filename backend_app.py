@@ -1535,7 +1535,72 @@ def _evaluate_ingress_runtime_invariants(db: Session, *, now: datetime) -> dict[
     }
 
 
-def run_ingress_guard_startup_check() -> None:
+def _startup_connected_channel_summary(db: Session) -> dict[str, Any]:
+    """Build a compact startup snapshot of currently connected channels.
+
+    Dependencies: Reads ``ActiveChannel`` rows with owner relationship state.
+    Code customers: ``emit_startup_ingress_health_log`` startup diagnostics.
+    Used variables/origin: channel identifiers come from ``active_channels`` and
+    owner-token presence from ``twitch_users.access_token``.
+    """
+
+    channels = (
+        db.query(ActiveChannel)
+        .options(joinedload(ActiveChannel.owner))
+        .order_by(ActiveChannel.id.asc())
+        .all()
+    )
+    connected = [
+        channel
+        for channel in channels
+        if bool(channel.join_active) and bool(channel.authorized) and bool(channel.owner and channel.owner.access_token)
+    ]
+    return {
+        "count": len(connected),
+        "channels": [str(channel.channel_name or "").strip() for channel in connected if str(channel.channel_name or "").strip()],
+        "channel_ids": [str(channel.channel_id or "").strip() for channel in connected if str(channel.channel_id or "").strip()],
+    }
+
+
+def _startup_conduit_shard_health_summary(db: Session, guard: dict[str, Any]) -> dict[str, Any]:
+    """Assemble startup conduit + shard health details for operator logs.
+
+    Dependencies: Reads ``TwitchConduitShard`` status plus chat subscription
+    conduit assignments, and merges guard runtime invariant counters.
+    Code customers: ``emit_startup_ingress_health_log`` structured startup log.
+    Used variables/origin: shard state from ``twitch_conduit_shards`` and
+    assignment IDs from enabled conduit ``event_subscriptions`` rows.
+    """
+
+    shard_rows = db.query(TwitchConduitShard).order_by(TwitchConduitShard.id.asc()).all()
+    healthy_shards = sum(1 for shard in shard_rows if str(shard.status or "").strip().lower() == "enabled")
+    assignment_rows = (
+        db.query(EventSubscription.conduit_id, EventSubscription.shard_id)
+        .filter(
+            EventSubscription.type == EVENTSUB_CONDUIT_CHAT_TYPE,
+            EventSubscription.transport == "conduit",
+            EventSubscription.status == "enabled",
+        )
+        .all()
+    )
+    conduit_ids = sorted(
+        {
+            str(conduit_id or "").strip()
+            for conduit_id, _ in assignment_rows
+            if str(conduit_id or "").strip()
+        }
+    )
+    runtime_invariants = guard.get("runtime_invariants", {}) if isinstance(guard, dict) else {}
+    return {
+        "conduit_ids": conduit_ids,
+        "assignment_count": len(assignment_rows),
+        "shards_total": len(shard_rows),
+        "shards_healthy": healthy_shards,
+        "unresolved_assignment_count": int(runtime_invariants.get("unresolved_assignment_count") or 0),
+    }
+
+
+def run_ingress_guard_startup_check() -> dict[str, Any]:
     """Run startup ingress guard checks, including runtime invariant validation.
 
     Dependencies: Uses ``SessionLocal`` and ``_evaluate_ingress_guard``.
@@ -1547,10 +1612,58 @@ def run_ingress_guard_startup_check() -> None:
     db = SessionLocal()
     try:
         if get_chat_ingress_mode() != "webhook_conduit":
-            return
-        _evaluate_ingress_guard(db, datetime.utcnow(), apply_fallback=True)
+            return {"status": "skipped", "reason": "ingress_mode_not_webhook_conduit"}
+        guard = _evaluate_ingress_guard(db, datetime.utcnow(), apply_fallback=True)
+        return {"status": "ok", "guard": guard}
     except Exception:
         logger.exception("Ingress guard startup check failed")
+        return {"status": "error", "reason": "startup_guard_exception"}
+    finally:
+        db.close()
+
+
+def emit_startup_ingress_health_log(guard_startup_result: dict[str, Any]) -> None:
+    """Emit one structured startup health log for ingress/guard/channel state.
+
+    Dependencies: Reads runtime mode/settings, startup guard result, and
+    database-backed channel/conduit state snapshots.
+    Code customers: module startup bootstrap after guard + worker initialization.
+    Used variables/origin: guard output from ``run_ingress_guard_startup_check``
+    and worker alive state from singleton worker thread handles.
+    """
+
+    db = SessionLocal()
+    try:
+        guard = guard_startup_result.get("guard", {}) if isinstance(guard_startup_result, dict) else {}
+        guard_status = "skipped"
+        guard_reasons: list[str] = []
+        if isinstance(guard, dict):
+            guard_status = "degraded" if bool(guard.get("degraded")) else "healthy"
+            guard_reasons = [str(reason) for reason in guard.get("reasons", [])]
+        elif isinstance(guard_startup_result, dict):
+            guard_status = str(guard_startup_result.get("status") or "unknown")
+            guard_reasons = [str(guard_startup_result.get("reason") or "")]
+
+        payload = {
+            "event": "INGRESS_STARTUP_HEALTH",
+            "ingress_mode": get_chat_ingress_mode(),
+            "guard": {
+                "startup_status": str(guard_startup_result.get("status") if isinstance(guard_startup_result, dict) else "unknown"),
+                "status": guard_status,
+                "reasons": [reason for reason in guard_reasons if reason],
+            },
+            "conduit_shards": _startup_conduit_shard_health_summary(db, guard if isinstance(guard, dict) else {}),
+            "connected_channels": _startup_connected_channel_summary(db),
+            "workers": {
+                "bot_token_refresh_worker_alive": bool(_BOT_TOKEN_REFRESH_WORKER and _BOT_TOKEN_REFRESH_WORKER.is_alive()),
+                "ingress_guard_repair_watcher_alive": bool(
+                    _INGRESS_GUARD_REPAIR_WORKER and _INGRESS_GUARD_REPAIR_WORKER.is_alive()
+                ),
+            },
+        }
+        logger.info("INGRESS_STARTUP_HEALTH %s", json.dumps(payload, sort_keys=True, default=str))
+    except Exception:
+        logger.exception("Failed to emit structured ingress startup health log")
     finally:
         db.close()
 
@@ -4632,9 +4745,10 @@ bootstrap_settings_from_env()
 backfill_twitch_send_chat_auth_mode_setting()
 cleanup_conduit_subscription_secret_semantics()
 _validate_startup_symbol_order()
-run_ingress_guard_startup_check()
+startup_guard_result = run_ingress_guard_startup_check()
 start_bot_token_refresh_worker()
 start_ingress_guard_repair_watcher()
+emit_startup_ingress_health_log(startup_guard_result)
 
 # =====================================
 # Schemas

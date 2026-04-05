@@ -101,6 +101,15 @@ unlocks the API for the bot, queue manager, and public web frontend.
   health), then applies least-disruptive repair in order
   `reconcile -> shard_repair -> rebuild`, with cooldown + max-attempt caps to
   prevent infinite repair loops.
+- Startup now emits one structured operator log event
+  `INGRESS_STARTUP_HEALTH` after ingress guard + worker initialization with:
+  - `ingress_mode`,
+  - `guard.startup_status`, `guard.status`, and `guard.reasons`,
+  - `conduit_shards` summary (`conduit_ids`, `assignment_count`,
+    `shards_total`, `shards_healthy`, `unresolved_assignment_count`),
+  - `connected_channels` summary (`count`, `channels`, `channel_ids`),
+  - startup worker alive flags (`bot_token_refresh_worker_alive`,
+    `ingress_guard_repair_watcher_alive`).
 - Startup import now validates ingress-guard symbol availability before running
   the guard so symbol-order regressions fail fast during process boot.
 - Conduit shard metadata now persists `twitch_conduit_shards.transport_secret`
@@ -216,6 +225,10 @@ unlocks the API for the bot, queue manager, and public web frontend.
   - Historical comparison-only webhook command code paths are now deprecated
     and explicitly marked in outcome reason codes until fully removed
     (`random_request` is the remaining websocket-only cleanup candidate).
+  - Bot channel sync now emits compact cycle logs:
+    `CHANNEL_SYNC_SUMMARY considered=<count> listened=<count>
+    rollback_websocket=<bool> added=[...] removed=[...]` so operators can
+    quickly inspect channel lifecycle churn and rollback websocket posture.
 - Shadow mode behavior:
   - With `chat_ingress_shadow_mode=true`, webhook chat ingress runs in
     non-authoritative observe/compare mode (no queue mutations and no reply
