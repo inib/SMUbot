@@ -1,4 +1,5 @@
 import asyncio
+import os
 import sys
 import unittest
 from pathlib import Path
@@ -8,6 +9,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import bot.bot_app as bot_app
+import backend_app
+
+os.makedirs("/data", exist_ok=True)
 
 
 class BotServiceTests(unittest.IsolatedAsyncioTestCase):
@@ -711,6 +715,70 @@ class BotServiceTests(unittest.IsolatedAsyncioTestCase):
 
         sent_calls = [call.args[1] for call in song_bot._send_message.await_args_list]
         self.assertEqual(sent_calls, ["DB Added: A::T", "Added: A - T"])
+
+    async def test_webhook_and_chat_template_rendering_match_for_optional_vars(self) -> None:
+        """Webhook/backend and websocket/chat paths should format templates identically."""
+
+        db = backend_app.SessionLocal()
+        try:
+            db.query(backend_app.ChannelBotMessage).delete()
+            db.query(backend_app.ChannelSettings).delete()
+            db.query(backend_app.ActiveChannel).delete()
+            channel = backend_app.ActiveChannel(channel_id="8811", channel_name="ParityCh")
+            db.add(channel)
+            db.commit()
+            db.refresh(channel)
+            backend_app._seed_channel_bot_messages(db, channel.id)
+            db.commit()
+            row = (
+                db.query(backend_app.ChannelBotMessage)
+                .filter(
+                    backend_app.ChannelBotMessage.channel_id == channel.id,
+                    backend_app.ChannelBotMessage.message_id == "request_added",
+                )
+                .one()
+            )
+            row.template = "Added: {artist}-{title}|u:{username}|s:{settings_prio_bits_per_point}"
+            db.commit()
+
+            reply = backend_app._eventsub_response_contract(
+                "success",
+                template_key="request_added",
+                template_vars={"artist": "A", "title": "T"},
+            )
+            backend_rendered = backend_app._render_eventsub_reply_text(db, channel, reply)
+        finally:
+            db.close()
+
+        song_bot = bot_app.SongBot.__new__(bot_app.SongBot)
+        song_bot.messages = bot_app.DEFAULT_MESSAGES.copy()
+        song_bot.message_catalog = bot_app.DEFAULT_MESSAGE_CATALOG.copy()
+        song_bot.channel_map = {
+            "paritych": {
+                "channel_name": "ParityCh",
+                "settings": {"prio_bits_per_point": 200},
+                "bot_message_level": "debug",
+                "bot_message_templates": {
+                    "request_added": {
+                        "message_id": "request_added",
+                        "template": "Added: {artist}-{title}|u:{username}|s:{settings_prio_bits_per_point}",
+                        "enabled": True,
+                    }
+                },
+            }
+        }
+        song_bot._channel_login = bot_app.SongBot._channel_login.__get__(song_bot, bot_app.SongBot)
+        song_bot._send_message = AsyncMock()
+
+        with patch.object(bot_app, "push_console_event", AsyncMock()):
+            await song_bot._send_catalog_message(
+                "paritych",
+                "request_added",
+                template_vars={"artist": "A", "title": "T"},
+            )
+
+        chat_rendered = song_bot._send_message.await_args_list[0].args[1]
+        self.assertEqual(backend_rendered, chat_rendered)
 
     def test_default_message_catalog_levels_match_intended_groups(self) -> None:
         """Ensure command/background/diagnostic messages retain expected severities."""

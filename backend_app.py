@@ -23,6 +23,14 @@ import requests
 import yaml
 from command_resolution import ROUTED_COMMANDS, load_commands_map, resolve_prefixed_command
 from bot.chat_command_core import resolve_command_handler
+from template_vars import (
+    MESSAGE_ALLOWED_EXTRA_VARS,
+    build_allowed_template_vars,
+    build_settings_template_vars,
+    safe_format_template,
+    validate_template_placeholders,
+    TemplateValidationError,
+)
 
 try:
     from ytmusicapi import YTMusic  # type: ignore
@@ -194,6 +202,10 @@ BOT_MESSAGE_CATALOG: list[dict[str, Any]] = [
     {"id": "token_refreshed", "level": "debug", "group": "lifecycle", "template_key": "token_refreshed", "description": "Token refresh succeeded.", "customizable": True},
     {"id": "action_failed_debug", "level": "debug", "group": "errors", "template_key": "action_failed_debug", "description": "Internal action failure diagnostic.", "customizable": True},
 ]
+for _message_row in BOT_MESSAGE_CATALOG:
+    _message_id = str(_message_row.get("id") or "").strip()
+    _message_row["allowed_vars_extra"] = list(MESSAGE_ALLOWED_EXTRA_VARS.get(_message_id, ()))
+
 BOT_MESSAGE_CATALOG_BY_ID: dict[str, dict[str, Any]] = {
     str(row.get("id") or ""): row for row in BOT_MESSAGE_CATALOG if row.get("id")
 }
@@ -2430,7 +2442,73 @@ def _eventsub_response_contract(
     }
 
 
-def _render_eventsub_reply_text(reply: dict[str, Any]) -> str:
+def _channel_settings_template_context(settings: Optional["ChannelSettings"]) -> dict[str, Any]:
+    """Convert ``ChannelSettings`` rows into a plain mapping for templating.
+
+    Dependencies: reads SQLAlchemy model attributes only.
+    Code customers: template allowlist + render context builders.
+    Used variables/origin: ``settings`` comes from ``get_or_create_settings``
+    in channel-scoped send/save paths.
+    """
+
+    if settings is None:
+        return {}
+    values: dict[str, Any] = {}
+    for column in ChannelSettings.__table__.columns:  # type: ignore[attr-defined]
+        key = str(column.name)
+        if key in {"id", "channel_id"}:
+            continue
+        values[key] = getattr(settings, key, None)
+    return values
+
+
+def _allowed_template_vars_for_message(
+    message_id: str,
+    *,
+    settings: Optional["ChannelSettings"],
+) -> set[str]:
+    """Return message-scoped placeholder allowlist including settings vars.
+
+    Dependencies: merges catalog metadata with shared template var helper.
+    Code customers: template validation endpoints and runtime send formatter.
+    Used variables/origin: ``message_id`` originates from catalog message IDs or
+    reply template keys and ``settings`` comes from channel settings rows.
+    """
+
+    catalog_row = BOT_MESSAGE_CATALOG_BY_ID.get(message_id) or {}
+    extra = catalog_row.get("allowed_vars_extra")
+    settings_values = _channel_settings_template_context(settings)
+    return build_allowed_template_vars(
+        message_id=message_id,
+        settings_values=settings_values,
+        allowed_extra_vars=extra if isinstance(extra, list) else None,
+    )
+
+
+def _resolve_channel_template(message_id: str, *, channel: ActiveChannel, db: Session) -> str:
+    """Resolve per-channel bot template with DB override and default fallback.
+
+    Dependencies: reads ``ChannelBotMessage`` rows and
+    ``_resolve_bot_template_default`` fallback values.
+    Code customers: webhook reply and runtime announcement send paths.
+    Used variables/origin: ``message_id`` is catalog identity from reply
+    contracts; ``channel.id`` scopes template overrides.
+    """
+
+    channel_pk = getattr(channel, "id", None)
+    if channel_pk is None:
+        return _resolve_bot_template_default(message_id)
+    row = (
+        db.query(ChannelBotMessage)
+        .filter(ChannelBotMessage.channel_id == channel_pk, ChannelBotMessage.message_id == message_id)
+        .one_or_none()
+    )
+    if row and row.enabled is not False and isinstance(row.template, str):
+        return row.template
+    return _resolve_bot_template_default(message_id)
+
+
+def _render_eventsub_reply_text(db: Session, channel: ActiveChannel, reply: dict[str, Any]) -> str:
     """Render a webhook command reply contract to final chat text.
 
     Dependencies: Uses ``BOT_MESSAGE_DEFAULT_TEMPLATES`` defaults.
@@ -2442,13 +2520,17 @@ def _render_eventsub_reply_text(reply: dict[str, Any]) -> str:
     template_key = str(reply.get("template_key") or "").strip()
     if not template_key:
         return ""
-    template = BOT_MESSAGE_DEFAULT_TEMPLATES.get(template_key, template_key)
+    template = _resolve_channel_template(template_key, channel=channel, db=db)
     template_vars = reply.get("template_vars") or {}
     if not isinstance(template_vars, dict):
         template_vars = {}
+    settings = get_or_create_settings(db, channel.id)
+    settings_context = build_settings_template_vars(_channel_settings_template_context(settings))
+    merged_vars = {**settings_context, **template_vars}
+    allowed_vars = _allowed_template_vars_for_message(template_key, settings=settings)
     try:
-        return template.format(**template_vars)
-    except Exception:
+        return safe_format_template(template, merged_vars, allowed_vars)
+    except TemplateValidationError:
         return template
 
 
@@ -2522,6 +2604,28 @@ def _seed_channel_bot_messages(db: Session, channel_pk: int) -> None:
                 enabled=True,
             )
         )
+
+
+def _validate_channel_template_or_400(
+    *,
+    template: str,
+    message_id: str,
+    settings: Optional["ChannelSettings"],
+) -> None:
+    """Reject templates containing unknown/disallowed placeholders.
+
+    Dependencies: shared ``validate_template_placeholders`` helper and
+    message-scoped allowlist resolver.
+    Code customers: single and bulk bot message template update endpoints.
+    Used variables/origin: ``template`` and ``message_id`` come from API
+    payload/path parameters; ``settings`` comes from channel settings rows.
+    """
+
+    allowed_vars = _allowed_template_vars_for_message(message_id, settings=settings)
+    try:
+        validate_template_placeholders(template, allowed_vars)
+    except TemplateValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 def _channel_bot_message_payload(rows: Sequence["ChannelBotMessage"]) -> dict[str, dict[str, Any]]:
@@ -2771,7 +2875,7 @@ def _send_eventsub_chat_reply(
     if not _should_send_eventsub_reply(channel, visibility):
         _record_ingress_metric("reply_suppressed")
         return _finish(False, "suppressed_by_level")
-    text = _render_eventsub_reply_text(reply)
+    text = _render_eventsub_reply_text(db, channel, reply)
     if not text:
         _record_ingress_metric("reply_suppressed")
         return _finish(False, "suppressed_by_level")
@@ -8684,7 +8788,13 @@ def update_channel_bot_message(
     )
     if not row:
         raise HTTPException(status_code=404, detail="channel bot message not found")
+    settings = get_or_create_settings(db, channel_pk)
     if payload.template is not None:
+        _validate_channel_template_or_400(
+            template=payload.template,
+            message_id=normalized_message_id,
+            settings=settings,
+        )
         row.template = payload.template
     if payload.enabled is not None:
         row.enabled = bool(payload.enabled)
@@ -8728,6 +8838,7 @@ def bulk_update_channel_bot_messages(
         .all()
     )
     row_by_id = {row.message_id: row for row in rows}
+    settings = get_or_create_settings(db, channel_pk)
     if payload.reset_to_defaults:
         for row in row_by_id.values():
             row.template = _resolve_bot_template_default(row.message_id)
@@ -8741,6 +8852,11 @@ def bulk_update_channel_bot_messages(
         if not row:
             continue
         if update_payload.template is not None:
+            _validate_channel_template_or_400(
+                template=update_payload.template,
+                message_id=normalized_message_id,
+                settings=settings,
+            )
             row.template = update_payload.template
         if update_payload.enabled is not None:
             row.enabled = bool(update_payload.enabled)

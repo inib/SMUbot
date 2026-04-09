@@ -6,6 +6,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from datetime import datetime, timedelta
 from command_resolution import default_commands_map, load_commands_map
+from template_vars import (
+    build_allowed_template_vars,
+    build_settings_template_vars,
+    safe_format_template,
+    TemplateValidationError,
+)
 
 import aiohttp
 from twitchio.ext import commands
@@ -925,6 +931,22 @@ class SongBot(commands.Bot):
                     merged[message_id] = template_value
         return merged
 
+    def _resolve_channel_settings_values(self, channel_login: str) -> Dict[str, object]:
+        """Resolve channel settings mapping used to build ``settings_*`` vars.
+
+        Dependencies: reads cached ``self.channel_map`` channel payloads synced
+        from backend `/channels`.
+        Code customers: catalog safe formatter in ``_send_catalog_message``.
+        Used variables/origin: ``channel_login`` identifies a channel map row;
+        settings values originate from `channel_map[channel].settings`.
+        """
+
+        channel_info = (getattr(self, 'channel_map', {}) or {}).get(self._channel_login(channel_login), {})
+        raw_settings = channel_info.get('settings') if isinstance(channel_info, dict) else {}
+        if not isinstance(raw_settings, dict):
+            return {}
+        return {str(key): value for key, value in raw_settings.items()}
+
     def _resolve_message_catalog_entry(
         self,
         channel_login: str,
@@ -985,9 +1007,19 @@ class SongBot(commands.Bot):
         if not template:
             return
         values = template_vars or {}
+        settings_values = self._resolve_channel_settings_values(channel_login)
+        settings_vars = build_settings_template_vars(settings_values)
+        allowed_vars = build_allowed_template_vars(
+            message_id=message_id,
+            settings_values=settings_values,
+        )
         try:
-            message_text = template.format(**values)
-        except Exception:
+            message_text = safe_format_template(
+                template,
+                {**settings_vars, **values},
+                allowed_vars,
+            )
+        except TemplateValidationError:
             message_text = template
         enriched_meta = {
             **(metadata or {}),
