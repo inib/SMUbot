@@ -51,6 +51,7 @@
           <button id="tab-playlists" class="tab">Playlists</button>
           <button id="tab-users" class="tab">Users</button>
           <button id="tab-settings" class="tab">Settings</button>
+          <button id="tab-messages" class="tab">Messages</button>
           <button id="tab-events" class="tab">streamer.bot</button>
           <button id="tab-overlays" class="tab">Overlays</button>
           <button id="tab-dev" class="tab" hidden>Dev</button>
@@ -194,6 +195,21 @@
             </div>
           </section>
           <div id="settings"></div>
+        </div>
+
+        <div id="messages-view" style="display:none">
+          <div class="messages-header">
+            <div>
+              <h2>Bot Messages</h2>
+              <p class="muted">Edit per-channel reply templates grouped by behavior. Placeholders must match each message contract.</p>
+            </div>
+            <div class="messages-actions">
+              <button id="messages-reset-btn" type="button">Reset all to defaults</button>
+              <button id="messages-save-btn" type="button">Save changes</button>
+            </div>
+          </div>
+          <p id="messages-status" class="muted" role="status">Select a channel to load message templates.</p>
+          <div id="messages-catalog" class="messages-catalog"></div>
         </div>
 
         <div id="events-view" style="display:none">

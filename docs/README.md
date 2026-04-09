@@ -660,6 +660,41 @@ them via `/me/channels`.
   Playlists, Users, and Settings tabs, and only enables horizontal scrolling at
   explicit wide breakpoints with a `max-width: 100%` guard.
 
+## Queue Manager messages tab
+- The Queue Manager now includes a dedicated **Messages** tab (`tab-messages`)
+  and view container (`messages-view`) for per-channel bot reply template
+  editing.
+- Data model and field descriptions shown per row:
+  - `message_id`: stable catalog identifier (for example `request_added`).
+  - `group`: grouping bucket used to render section cards (`commands`,
+    `queue`, `lifecycle`, `rewards`, `errors`).
+  - `level`: default verbosity badge (`normal`, `verbose`, `debug`, `mute`).
+  - `description`: human-readable summary of when the template is used.
+  - `template`: editable channel override string.
+  - `enabled`: channel-level toggle to suppress one message without deleting
+    template text.
+- Validation rules in the editor:
+  - Per-row inline validation compares placeholders in edited templates to
+    placeholders present in that row’s baseline template.
+  - Invalid placeholders and unbalanced braces render an inline error and block
+    saving until corrected.
+- Save/Reset UX:
+  - **Save changes** uses optimistic UI updates and rolls back to the last
+    server-confirmed state on API failure.
+  - **Reset all to defaults** posts `reset_to_defaults=true` and refreshes all
+    rows with backend defaults.
+  - Success/failure states are surfaced via toast notifications and the tab
+    status line.
+- Auth/channel gating:
+  - Editing is disabled when no channel is selected or the selected channel is
+    not OAuth-authorized, matching the existing settings permission posture.
+  - Controls are re-enabled automatically when authorization/channel state is
+    valid.
+- Screenshot:
+  - `![Queue Manager Messages tab screenshot](artifacts/queue-manager-messages-tab.png)`
+  - Note: capture this image in an environment that has the browser container
+    screenshot tool available.
+
 ## Development Tips
 - Install Python dependencies from `requirements.txt` for local development.
 - Run the backend directly:
