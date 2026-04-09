@@ -195,6 +195,14 @@ This document summarizes the REST endpoints exposed by `backend_app.py`.
   - `messages` includes metadata rows with `{ "id", "level", "group", "template_key", "description", "customizable" }`.
   - `customizable` is currently `true` for all default entries and is included so UI clients can evolve to per-message override controls without a breaking API change.
 - **Response**: `{ "levels": [BotMessageLevelDetailOut], "messages": [BotMessageCatalogEntryOut] }`.
+  - `levels[].level`: canonical verbosity key (`mute|normal|verbose|debug`).
+  - `levels[].description`: selector/help text for UI rendering.
+  - `messages[].id`: stable message identifier used by override APIs.
+  - `messages[].group`: grouping key used for sectioned editors.
+  - `messages[].level`: default catalog visibility threshold.
+  - `messages[].template_key`: canonical template lookup key.
+  - `messages[].description`: user-facing behavior summary.
+  - `messages[].customizable`: forward-compatible editing capability flag.
 
 ### `/bot/config/oauth/callback`
 - **Behavior**
@@ -273,6 +281,38 @@ Bot runtime fallback order for final template selection:
 
 If no override exists yet, behavior matches historical `bot/messages.yml`
 defaults.
+
+### `/channels/{channel}/bot/messages`
+- **Authentication**: Requires admin authorization (`require_token`).
+- **Response fields**
+  - `channel`: requested channel alias.
+  - `messages[].message_id`: stable catalog ID.
+  - `messages[].template`: current channel template text.
+  - `messages[].enabled`: per-row channel toggle.
+  - `messages[].created_at` / `messages[].updated_at`: persistence timestamps.
+- **Operational notes**
+  - Missing rows are seeded before read so every catalog message is returned.
+  - Queue Manager reads this endpoint before rendering editable message rows.
+
+### `/channels/{channel}/bot/messages/{message_id}`
+- **Authentication**: Requires admin authorization (`require_token`).
+- **Request body**: `{ "template"?: "<string>", "enabled"?: <bool> }`.
+- **Behavior**
+  - Validates `message_id` against catalog IDs.
+  - Applies partial updates; omitted fields retain existing values.
+  - Returns the updated channel row.
+
+### `/channels/{channel}/bot/messages/bulk`
+- **Authentication**: Requires admin authorization (`require_token`).
+- **Request body**
+  - `messages`: object keyed by `message_id` with `{ template?, enabled? }`.
+  - `reset_to_defaults`: boolean; when true, rows reset first then `messages`
+    updates are applied.
+- **Behavior**
+  - Unknown message IDs return HTTP `404`.
+  - Returns a refreshed full message list after commit.
+  - Queue Manager save uses dirty-row patches; reset uses
+    `{ "messages": {}, "reset_to_defaults": true }`.
 
 Channel settings include queue intake controls:
 

@@ -189,7 +189,7 @@ async function loadSystemMeta() {
   return systemMeta;
 }
 
-const BASE_TAB_KEYS = ['queue', 'playlists', 'users', 'settings', 'events', 'overlays'];
+const BASE_TAB_KEYS = ['queue', 'playlists', 'users', 'settings', 'messages', 'events', 'overlays'];
 
 const botStatusEl = qs('bot-status');
 const previewVideoEl = qs('preview-video');
@@ -233,6 +233,10 @@ const playlistsContainer = qs('playlists');
 const playlistModeInputs = playlistForm ? Array.from(playlistForm.querySelectorAll('input[name="playlist-mode"]')) : [];
 const playlistSections = playlistForm ? Array.from(playlistForm.querySelectorAll('.playlist-form-section')) : [];
 const toastContainer = qs('toast-container');
+const messagesCatalogEl = qs('messages-catalog');
+const messagesStatusEl = qs('messages-status');
+const messagesSaveBtn = qs('messages-save-btn');
+const messagesResetBtn = qs('messages-reset-btn');
 let playlistPickerEl = null;
 let playlistPickerSelect = null;
 let playlistPickerCancelBtn = null;
@@ -247,6 +251,10 @@ let currentPreviewResults = [];
 let previewSearchToken = 0;
 let previewCopyResetTimer = null;
 const previewDefaultMessage = 'Select a request to load YouTube Music matches.';
+let messageCatalogData = null;
+let channelMessageRows = [];
+let messagesDirtyMap = new Map();
+let messagesBusy = false;
 
 const STREAMERBOT_SHORTCUT_SUMMARY = 'Queue lookups return { request, song, user } payloads; stats endpoints return integers; admin toggles echo updated request metadata.';
 
@@ -1092,12 +1100,16 @@ function showTab(name) {
       tabBtn.classList.toggle('active', t === name);
     }
   });
+  if (name === 'messages') {
+    fetchMessagesView();
+  }
 }
 
 qs('tab-queue').onclick = () => showTab('queue');
 qs('tab-playlists').onclick = () => showTab('playlists');
 qs('tab-users').onclick = () => showTab('users');
 qs('tab-settings').onclick = () => showTab('settings');
+qs('tab-messages').onclick = () => showTab('messages');
 qs('tab-events').onclick = () => showTab('events');
 qs('tab-overlays').onclick = () => showTab('overlays');
 const tabDevBtn = qs('tab-dev');
@@ -3747,6 +3759,400 @@ function bindChannelKeyControls() {
   resetChannelKeyCard();
 }
 
+/**
+ * Update the message editor action-state and top-line status text.
+ * Dependencies: reads message editor state flags plus message action/status DOM nodes.
+ * Code customers: message editor load/save/reset flows.
+ * Used variables/origin: consumes `messagesBusy`, `messagesDirtyMap`, `channelName`, and `channelScopeInfo`.
+ */
+function updateMessagesActionState() {
+  const canEdit = !!channelName && channelScopeInfo?.authorized === true;
+  const hasDirty = messagesDirtyMap.size > 0;
+  if (messagesSaveBtn) {
+    messagesSaveBtn.disabled = !canEdit || !hasDirty || messagesBusy;
+  }
+  if (messagesResetBtn) {
+    messagesResetBtn.disabled = !canEdit || messagesBusy;
+  }
+  if (!messagesStatusEl) { return; }
+  if (!channelName) {
+    messagesStatusEl.textContent = 'Select a channel to load message templates.';
+    return;
+  }
+  if (channelScopeInfo?.authorized !== true) {
+    messagesStatusEl.textContent = 'Editing is disabled until this channel finishes OAuth authorization.';
+    return;
+  }
+  if (messagesBusy) {
+    messagesStatusEl.textContent = 'Syncing bot messages…';
+    return;
+  }
+  messagesStatusEl.textContent = hasDirty
+    ? `${messagesDirtyMap.size} unsaved message change${messagesDirtyMap.size === 1 ? '' : 's'}.`
+    : 'All message templates are up to date.';
+}
+
+/**
+ * Fetch bot message catalog metadata from the backend.
+ * Dependencies: requires backend API origin and admin/session authorization accepted by `require_token`.
+ * Code customers: message editor bootstrap and refresh flows.
+ * Used variables/origin: reads stable group/level/description metadata from `GET /bot/messages/catalog`.
+ */
+async function fetchBotMessagesCatalog() {
+  const resp = await fetch(`${API}/bot/messages/catalog`, { credentials: 'include' });
+  if (!resp.ok) {
+    throw new Error(`catalog request failed (${resp.status})`);
+  }
+  return resp.json();
+}
+
+/**
+ * Fetch per-channel message template rows from the backend.
+ * Dependencies: requires active `channelName`, API origin, and authenticated request context.
+ * Code customers: message editor render and reset verification flows.
+ * Used variables/origin: reads persisted template/enabled values from `GET /channels/{channel}/bot/messages`.
+ */
+async function fetchChannelBotMessages() {
+  if (!channelName) { return { channel: '', messages: [] }; }
+  const encoded = encodeURIComponent(channelName);
+  const resp = await fetch(`${API}/channels/${encoded}/bot/messages`, { credentials: 'include' });
+  if (!resp.ok) {
+    throw new Error(`channel message request failed (${resp.status})`);
+  }
+  return resp.json();
+}
+
+/**
+ * Persist a bulk message patch for the active channel.
+ * Dependencies: requires `channelName` and accepts message payload compatible with backend bulk schema.
+ * Code customers: save and reset handlers for the message editor.
+ * Used variables/origin: forwards `messages` map and reset flag to `POST /channels/{channel}/bot/messages/bulk`.
+ */
+async function saveChannelBotMessagesBulk(payload) {
+  if (!channelName) {
+    throw new Error('No channel selected.');
+  }
+  const encoded = encodeURIComponent(channelName);
+  const resp = await fetch(`${API}/channels/${encoded}/bot/messages/bulk`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify(payload),
+  });
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(text || `message save failed (${resp.status})`);
+  }
+  return resp.json();
+}
+
+/**
+ * Extract placeholder names from a Python-style `{placeholder}` template string.
+ * Dependencies: pure parser utility, no remote calls.
+ * Code customers: per-row validation for message template inputs.
+ * Used variables/origin: parses user-edited template text from input values.
+ */
+function extractTemplatePlaceholders(template) {
+  const placeholders = [];
+  const regex = /\{([a-zA-Z_][a-zA-Z0-9_]*)\}/g;
+  let match = regex.exec(template || '');
+  while (match) {
+    placeholders.push(match[1]);
+    match = regex.exec(template || '');
+  }
+  return placeholders;
+}
+
+/**
+ * Validate one edited template against row-specific placeholder rules.
+ * Dependencies: relies on catalog and current row defaults to infer allowed placeholders.
+ * Code customers: inline validation in message editor render and save gating.
+ * Used variables/origin: compares placeholders from current input with placeholders found in the row's persisted baseline template.
+ */
+function validateMessageTemplateRow(rowState) {
+  const template = String(rowState?.template || '');
+  const openCount = (template.match(/\{/g) || []).length;
+  const closeCount = (template.match(/\}/g) || []).length;
+  if (openCount !== closeCount) {
+    return 'Unbalanced template braces. Use `{name}` placeholders.';
+  }
+  const used = new Set(extractTemplatePlaceholders(template));
+  const allowed = new Set(extractTemplatePlaceholders(rowState?.originalTemplate || ''));
+  const invalid = Array.from(used).filter(name => !allowed.has(name));
+  if (invalid.length) {
+    return `Unknown placeholders: ${invalid.map(name => `{${name}}`).join(', ')}.`;
+  }
+  return '';
+}
+
+/**
+ * Build a grouped map from catalog rows using `group` metadata.
+ * Dependencies: consumes backend catalog payload shape.
+ * Code customers: message editor renderer to build grouped cards.
+ * Used variables/origin: groups `catalog.messages` entries by `group` field.
+ */
+function groupCatalogMessages(catalog) {
+  const grouped = new Map();
+  const rows = Array.isArray(catalog?.messages) ? catalog.messages : [];
+  rows.forEach(row => {
+    const group = (row?.group || 'other').toString();
+    if (!grouped.has(group)) {
+      grouped.set(group, []);
+    }
+    grouped.get(group).push(row);
+  });
+  return grouped;
+}
+
+/**
+ * Render the full messages tab with grouped editable rows and inline validation.
+ * Dependencies: requires loaded `messageCatalogData`, `channelMessageRows`, and container DOM nodes.
+ * Code customers: fetchMessagesView(), optimistic rollback paths, and channel switching.
+ * Used variables/origin: combines catalog metadata (`group/level/description`) with per-channel template state.
+ */
+function renderMessagesView() {
+  if (!messagesCatalogEl) { return; }
+  messagesCatalogEl.innerHTML = '';
+  if (!messageCatalogData || !Array.isArray(channelMessageRows) || !channelMessageRows.length) {
+    updateMessagesActionState();
+    return;
+  }
+  const byId = new Map(channelMessageRows.map(row => [row.message_id, row]));
+  const groups = groupCatalogMessages(messageCatalogData);
+  groups.forEach((rows, groupName) => {
+    const groupCard = document.createElement('section');
+    groupCard.className = 'messages-group';
+    const title = document.createElement('h3');
+    title.className = 'messages-group-title';
+    title.textContent = groupName;
+    groupCard.appendChild(title);
+    rows.forEach(meta => {
+      const id = String(meta?.id || '');
+      const savedRow = byId.get(id);
+      if (!savedRow) { return; }
+      const localDirty = messagesDirtyMap.get(id);
+      const rowState = {
+        messageId: id,
+        template: localDirty?.template ?? savedRow.template ?? '',
+        enabled: localDirty?.enabled ?? savedRow.enabled ?? true,
+        originalTemplate: savedRow.template ?? '',
+      };
+      const error = validateMessageTemplateRow(rowState);
+      const wrapper = document.createElement('article');
+      wrapper.className = error ? 'message-row invalid' : 'message-row';
+      const header = document.createElement('div');
+      header.className = 'message-row-header';
+      const heading = document.createElement('h4');
+      heading.className = 'message-row-title';
+      heading.textContent = id;
+      const metaWrap = document.createElement('div');
+      metaWrap.className = 'message-row-meta';
+      const level = document.createElement('span');
+      level.className = 'message-level';
+      level.textContent = meta?.level || 'normal';
+      const enabledLabel = document.createElement('label');
+      enabledLabel.className = 'message-help';
+      const enabledInput = document.createElement('input');
+      enabledInput.type = 'checkbox';
+      enabledInput.checked = rowState.enabled === true;
+      enabledInput.disabled = messagesBusy || !channelName || channelScopeInfo?.authorized !== true;
+      enabledInput.addEventListener('change', () => {
+        const baselineEnabled = savedRow.enabled === true;
+        const baselineTemplate = savedRow.template ?? '';
+        const nextEnabled = enabledInput.checked;
+        const nextTemplate = input.value;
+        if (nextEnabled === baselineEnabled && nextTemplate === baselineTemplate) {
+          messagesDirtyMap.delete(id);
+        } else {
+          messagesDirtyMap.set(id, { template: nextTemplate, enabled: nextEnabled });
+        }
+        renderMessagesView();
+      });
+      enabledLabel.append(enabledInput, document.createTextNode(' enabled'));
+      metaWrap.append(level, enabledLabel);
+      header.append(heading, metaWrap);
+      const desc = document.createElement('div');
+      desc.className = 'message-help';
+      desc.textContent = meta?.description || 'No description provided.';
+      const input = document.createElement('input');
+      input.className = error ? 'message-template-input invalid' : 'message-template-input';
+      input.type = 'text';
+      input.value = rowState.template;
+      input.disabled = messagesBusy || !channelName || channelScopeInfo?.authorized !== true;
+      input.placeholder = meta?.template_key ? `Default key: ${meta.template_key}` : '';
+      input.addEventListener('input', () => {
+        const baselineTemplate = savedRow.template ?? '';
+        const baselineEnabled = savedRow.enabled === true;
+        const nextTemplate = input.value;
+        const nextEnabled = enabledInput.checked;
+        if (nextTemplate === baselineTemplate && nextEnabled === baselineEnabled) {
+          messagesDirtyMap.delete(id);
+        } else {
+          messagesDirtyMap.set(id, { template: nextTemplate, enabled: nextEnabled });
+        }
+        const nextError = validateMessageTemplateRow({
+          messageId: id,
+          template: nextTemplate,
+          enabled: nextEnabled,
+          originalTemplate: baselineTemplate,
+        });
+        errorEl.textContent = nextError;
+        input.classList.toggle('invalid', !!nextError);
+        wrapper.classList.toggle('invalid', !!nextError);
+        updateMessagesActionState();
+      });
+      const placeholders = extractTemplatePlaceholders(savedRow.template || '');
+      const help = document.createElement('div');
+      help.className = 'message-help';
+      help.textContent = placeholders.length
+        ? `Allowed placeholders: ${placeholders.map(name => `{${name}}`).join(', ')}`
+        : 'This message does not use placeholders.';
+      const errorEl = document.createElement('div');
+      errorEl.className = 'message-error';
+      errorEl.textContent = error;
+      wrapper.append(header, desc, input, help, errorEl);
+      groupCard.appendChild(wrapper);
+    });
+    messagesCatalogEl.appendChild(groupCard);
+  });
+  updateMessagesActionState();
+}
+
+/**
+ * Load message catalog + channel row data and render the messages editor tab.
+ * Dependencies: requires active channel selection and both message endpoints.
+ * Code customers: messages tab routing and channel switching.
+ * Used variables/origin: refreshes `messageCatalogData`, `channelMessageRows`, and clears local dirty state.
+ */
+async function fetchMessagesView() {
+  if (!messagesCatalogEl) { return; }
+  if (!channelName) {
+    messageCatalogData = null;
+    channelMessageRows = [];
+    messagesDirtyMap.clear();
+    renderMessagesView();
+    return;
+  }
+  messagesBusy = true;
+  updateMessagesActionState();
+  try {
+    const [catalog, channelRowsPayload] = await Promise.all([
+      messageCatalogData ? Promise.resolve(messageCatalogData) : fetchBotMessagesCatalog(),
+      fetchChannelBotMessages(),
+    ]);
+    messageCatalogData = catalog;
+    channelMessageRows = Array.isArray(channelRowsPayload?.messages) ? channelRowsPayload.messages : [];
+    messagesDirtyMap.clear();
+    renderMessagesView();
+  } catch (err) {
+    console.error('Failed to load bot messages view', err);
+    if (messagesStatusEl) {
+      messagesStatusEl.textContent = 'Unable to load message templates right now.';
+    }
+    showToast('Unable to load bot message templates.', 'error');
+  } finally {
+    messagesBusy = false;
+    updateMessagesActionState();
+  }
+}
+
+/**
+ * Save all edited message rows with optimistic UI and rollback on failure.
+ * Dependencies: uses local dirty map, validation helper, and bulk backend save endpoint.
+ * Code customers: Save button in messages tab.
+ * Used variables/origin: commits pending entries from `messagesDirtyMap` to `/channels/{channel}/bot/messages/bulk`.
+ */
+async function saveMessagesChanges() {
+  if (!channelName || messagesDirtyMap.size === 0 || messagesBusy) { return; }
+  const pendingEntries = Array.from(messagesDirtyMap.entries());
+  for (const [messageId, patch] of pendingEntries) {
+    const saved = channelMessageRows.find(row => row.message_id === messageId);
+    const rowError = validateMessageTemplateRow({
+      messageId,
+      template: patch.template,
+      enabled: patch.enabled,
+      originalTemplate: saved?.template || '',
+    });
+    if (rowError) {
+      showToast(`Fix validation errors before saving (${messageId}).`, 'error');
+      renderMessagesView();
+      return;
+    }
+  }
+  const snapshotRows = channelMessageRows.map(row => ({ ...row }));
+  pendingEntries.forEach(([messageId, patch]) => {
+    const target = channelMessageRows.find(row => row.message_id === messageId);
+    if (target) {
+      target.template = patch.template;
+      target.enabled = patch.enabled === true;
+    }
+  });
+  messagesBusy = true;
+  updateMessagesActionState();
+  renderMessagesView();
+  try {
+    const payload = {
+      messages: Object.fromEntries(pendingEntries.map(([id, patch]) => [id, { template: patch.template, enabled: patch.enabled === true }])),
+      reset_to_defaults: false,
+    };
+    const savedPayload = await saveChannelBotMessagesBulk(payload);
+    channelMessageRows = Array.isArray(savedPayload?.messages) ? savedPayload.messages : channelMessageRows;
+    messagesDirtyMap.clear();
+    showToast('Bot message templates saved.', 'success');
+  } catch (err) {
+    console.error('Failed to save message templates', err);
+    channelMessageRows = snapshotRows;
+    showToast('Save failed. Changes were rolled back.', 'error');
+  } finally {
+    messagesBusy = false;
+    renderMessagesView();
+  }
+}
+
+/**
+ * Reset all message templates to backend defaults for the active channel.
+ * Dependencies: requires confirmation dialog and bulk backend save endpoint.
+ * Code customers: Reset button in messages tab.
+ * Used variables/origin: sends `{ reset_to_defaults: true }` and refreshes editor rows.
+ */
+async function resetMessagesToDefaults() {
+  if (!channelName || messagesBusy) { return; }
+  const ok = window.confirm('Reset all bot message templates to defaults for this channel?');
+  if (!ok) { return; }
+  const snapshotRows = channelMessageRows.map(row => ({ ...row }));
+  messagesBusy = true;
+  updateMessagesActionState();
+  try {
+    const savedPayload = await saveChannelBotMessagesBulk({ reset_to_defaults: true, messages: {} });
+    channelMessageRows = Array.isArray(savedPayload?.messages) ? savedPayload.messages : [];
+    messagesDirtyMap.clear();
+    showToast('Bot message templates reset to defaults.', 'success');
+  } catch (err) {
+    console.error('Failed to reset message templates', err);
+    channelMessageRows = snapshotRows;
+    showToast('Reset failed. Existing templates were kept.', 'error');
+  } finally {
+    messagesBusy = false;
+    renderMessagesView();
+  }
+}
+
+/**
+ * Wire save/reset controls for the messages editor tab.
+ * Dependencies: expects message action buttons to exist in the DOM.
+ * Code customers: global UI bootstrap.
+ * Used variables/origin: delegates button clicks to save/reset helpers.
+ */
+function bindMessagesControls() {
+  if (messagesSaveBtn) {
+    messagesSaveBtn.addEventListener('click', saveMessagesChanges);
+  }
+  if (messagesResetBtn) {
+    messagesResetBtn.addEventListener('click', resetMessagesToDefaults);
+  }
+  updateMessagesActionState();
+}
+
 // ===== Overlay builder =====
 const overlayKindSelect = qs('overlay-kind');
 const overlayLayoutSelect = qs('overlay-layout');
@@ -4001,6 +4407,7 @@ function initOverlayBuilder() {
 }
 
 bindChannelKeyControls();
+bindMessagesControls();
 bindStreamerbotControls();
 initOverlayBuilder();
 renderStreamerbotShortcuts();
@@ -4197,6 +4604,8 @@ async function loadChannelScopes() {
 
 function selectChannel(ch) {
   channelName = ch;
+  messagesDirtyMap.clear();
+  channelMessageRows = [];
   buildQuickControls(null);
   qs('ch-badge').textContent = `channel: ${channelName}`;
   updateBotStatusBadge(getChannelInfo(channelName));
@@ -4216,7 +4625,9 @@ function selectChannel(ch) {
   fetchQueue();
   fetchPlaylists();
   fetchUsers();
-  loadChannelScopes().then(() => fetchSettings()).catch(() => fetchSettings());
+  loadChannelScopes()
+    .then(() => Promise.all([fetchSettings(), fetchMessagesView()]))
+    .catch(() => Promise.all([fetchSettings(), fetchMessagesView()]));
   updateOverlayBuilder();
   clearEventFeed();
   connectQueueStream();

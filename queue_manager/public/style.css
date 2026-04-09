@@ -338,6 +338,25 @@ a:hover{text-decoration:underline}
 .setting-input:focus,.setting-textarea:focus{outline:2px solid var(--accent);outline-offset:2px}
 .setting-textarea{min-height:90px;resize:vertical}
 .setting-select{min-width:220px}
+.messages-header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap}
+.messages-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.messages-actions button{padding:.45rem .8rem;border-radius:10px;border:1px solid #24283b;background:#1a1d29;color:var(--text);cursor:pointer;font-weight:600}
+.messages-actions button:hover:not(:disabled){background:#24283b}
+.messages-actions button:disabled{opacity:.5;cursor:not-allowed}
+.messages-catalog{display:flex;flex-direction:column;gap:14px;margin-top:12px}
+.messages-group{border:1px solid #24283b;border-radius:12px;background:#121423;padding:12px;display:flex;flex-direction:column;gap:10px}
+.messages-group-title{margin:0;font-size:14px;text-transform:capitalize}
+.message-row{border:1px solid #24283b;border-radius:10px;background:#0f1117;padding:10px;display:flex;flex-direction:column;gap:8px}
+.message-row.invalid{border-color:var(--danger)}
+.message-row-header{display:flex;gap:8px;justify-content:space-between;align-items:center;flex-wrap:wrap}
+.message-row-title{margin:0;font-size:13px}
+.message-row-meta{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.message-level{font-size:11px;border:1px solid #24283b;border-radius:999px;padding:2px 8px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted)}
+.message-template-input{width:100%;padding:.5rem .6rem;border-radius:10px;border:1px solid #24283b;background:#0b0d13;color:var(--text);font-family:monospace;font-size:12px}
+.message-template-input:focus{outline:2px solid var(--accent);outline-offset:2px}
+.message-template-input.invalid{border-color:var(--danger)}
+.message-help{font-size:12px;color:var(--muted)}
+.message-error{font-size:12px;color:var(--danger);min-height:16px}
 
 .channel-key-card{display:flex;flex-direction:column;gap:10px;margin-top:10px;padding:14px;border-radius:12px;border:1px solid #24283b;background:#121423}
 .channel-key-header{display:flex;gap:18px;align-items:flex-start;justify-content:space-between;flex-wrap:wrap}
