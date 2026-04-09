@@ -83,6 +83,72 @@ class BotConfigApiTests(unittest.TestCase):
         self.assertEqual(data["scopes"], backend_app.get_bot_app_scopes())
         self.assertFalse(data["token_present"])
 
+    def test_add_channel_seeds_channel_bot_messages(self) -> None:
+        """Channel creation should seed per-message template rows for every catalog entry."""
+
+        response = self.client.post(
+            "/channels",
+            headers={"X-Admin-Token": backend_app.ADMIN_TOKEN},
+            json={"channel_name": "Seeded", "channel_id": "7001", "join_active": 1},
+        )
+        self.assertEqual(response.status_code, 200)
+
+        messages_response = self.client.get(
+            "/channels/Seeded/bot/messages",
+            headers={"X-Admin-Token": backend_app.ADMIN_TOKEN},
+        )
+        self.assertEqual(messages_response.status_code, 200)
+        payload = messages_response.json()
+        messages = payload["messages"]
+        self.assertEqual(len(messages), len(backend_app.BOT_MESSAGE_CATALOG))
+        by_id = {row["message_id"]: row for row in messages}
+        self.assertEqual(
+            by_id["request_added"]["template"],
+            backend_app.BOT_MESSAGE_DEFAULT_TEMPLATES["request_added"],
+        )
+        self.assertTrue(by_id["request_added"]["enabled"])
+
+    def test_channel_bot_message_update_and_bulk_reset(self) -> None:
+        """Single-item updates and bulk reset should mutate persisted templates."""
+
+        create_response = self.client.post(
+            "/channels",
+            headers={"X-Admin-Token": backend_app.ADMIN_TOKEN},
+            json={"channel_name": "TemplateChannel", "channel_id": "7002", "join_active": 1},
+        )
+        self.assertEqual(create_response.status_code, 200)
+
+        update_response = self.client.put(
+            "/channels/TemplateChannel/bot/messages/request_added",
+            headers={"X-Admin-Token": backend_app.ADMIN_TOKEN},
+            json={"template": "Custom added: {artist} - {title}", "enabled": False},
+        )
+        self.assertEqual(update_response.status_code, 200)
+        self.assertEqual(update_response.json()["template"], "Custom added: {artist} - {title}")
+        self.assertFalse(update_response.json()["enabled"])
+
+        channels_response = self.client.get("/channels")
+        self.assertEqual(channels_response.status_code, 200)
+        channel_payload = channels_response.json()[0]
+        self.assertEqual(
+            channel_payload["bot_message_templates"]["request_added"]["template"],
+            "Custom added: {artist} - {title}",
+        )
+        self.assertFalse(channel_payload["bot_message_templates"]["request_added"]["enabled"])
+
+        reset_response = self.client.post(
+            "/channels/TemplateChannel/bot/messages/bulk",
+            headers={"X-Admin-Token": backend_app.ADMIN_TOKEN},
+            json={"reset_to_defaults": True},
+        )
+        self.assertEqual(reset_response.status_code, 200)
+        by_id = {row["message_id"]: row for row in reset_response.json()["messages"]}
+        self.assertEqual(
+            by_id["request_added"]["template"],
+            backend_app.BOT_MESSAGE_DEFAULT_TEMPLATES["request_added"],
+        )
+        self.assertTrue(by_id["request_added"]["enabled"])
+
     def test_runtime_announcement_uses_send_chat_pipeline(self) -> None:
         """Runtime announcements should reuse the authoritative Send Chat path."""
 

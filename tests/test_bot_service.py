@@ -674,6 +674,44 @@ class BotServiceTests(unittest.IsolatedAsyncioTestCase):
         sent_calls = [call.args[1] for call in song_bot._send_message.await_args_list]
         self.assertEqual(sent_calls, ["Added: Artist - Title", "Added: Artist - Title"])
 
+    async def test_channel_template_resolution_prefers_channel_db_then_defaults(self) -> None:
+        """Catalog rendering should use channel DB template overrides before global defaults."""
+
+        song_bot = bot_app.SongBot.__new__(bot_app.SongBot)
+        song_bot.messages = bot_app.DEFAULT_MESSAGES.copy()
+        song_bot.message_catalog = bot_app.DEFAULT_MESSAGE_CATALOG.copy()
+        song_bot.channel_map = {
+            "chan": {
+                "channel_name": "Chan",
+                "bot_message_level": "debug",
+                "bot_message_templates": {
+                    "request_added": {
+                        "message_id": "request_added",
+                        "template": "DB Added: {artist}::{title}",
+                        "enabled": True,
+                    }
+                },
+            },
+            "plain": {"channel_name": "Plain", "bot_message_level": "debug", "bot_message_templates": {}},
+        }
+        song_bot._channel_login = bot_app.SongBot._channel_login.__get__(song_bot, bot_app.SongBot)
+        song_bot._send_message = AsyncMock()
+
+        with patch.object(bot_app, "push_console_event", AsyncMock()):
+            await song_bot._send_catalog_message(
+                "chan",
+                "request_added",
+                template_vars={"artist": "A", "title": "T"},
+            )
+            await song_bot._send_catalog_message(
+                "plain",
+                "request_added",
+                template_vars={"artist": "A", "title": "T"},
+            )
+
+        sent_calls = [call.args[1] for call in song_bot._send_message.await_args_list]
+        self.assertEqual(sent_calls, ["DB Added: A::T", "Added: A - T"])
+
     def test_default_message_catalog_levels_match_intended_groups(self) -> None:
         """Ensure command/background/diagnostic messages retain expected severities."""
         catalog = bot_app.DEFAULT_MESSAGE_CATALOG
