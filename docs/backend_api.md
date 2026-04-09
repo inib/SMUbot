@@ -299,6 +299,10 @@ defaults.
 - **Request body**: `{ "template"?: "<string>", "enabled"?: <bool> }`.
 - **Behavior**
   - Validates `message_id` against catalog IDs.
+  - Validates template placeholders against a message-scoped allowlist:
+    generic placeholders + `settings_*` channel settings vars + trigger-specific
+    placeholders for that `message_id`.
+  - Rejects unknown/disallowed placeholders with HTTP `400`.
   - Applies partial updates; omitted fields retain existing values.
   - Returns the updated channel row.
 
@@ -310,9 +314,38 @@ defaults.
     updates are applied.
 - **Behavior**
   - Unknown message IDs return HTTP `404`.
+  - Unknown/disallowed placeholders return HTTP `400`.
   - Returns a refreshed full message list after commit.
   - Queue Manager save uses dirty-row patches; reset uses
     `{ "messages": {}, "reset_to_defaults": true }`.
+
+### Bot template variable matrix by `message_id`
+
+All message templates support:
+
+- Generic variables: `{artist}`, `{title}`, `{username}`, `{user}`, `{channel}`,
+  `{points}`, `{currency_plural}`, `{currency_singular}`, `{word}`, `{error}`.
+- All channel settings vars as `settings_*`, for example
+  `{settings_prio_bits_per_point}`, `{settings_bot_message_level}`,
+  `{settings_queue_closed}`.
+- Missing optional variables render as an empty string (`""`) instead of
+  raising format errors.
+
+Trigger/message-specific placeholders:
+
+| `message_id` | Extra placeholders |
+|---|---|
+| `random_not_found` | `{keyword}` |
+| `playlist_request_added` | `{playlist}` |
+| `playlist_not_found` | `{identifier}` |
+| `playlist_song_missing` | `{identifier}`, `{index}` |
+| `prioritize_success` | `{request_id}` |
+| `remove_success` | `{request_id}` |
+| `played_next` | `{next_artist}`, `{next_title}`, `{next_user}` |
+| `award_gift_sub` | `{count}` |
+| `award_bits` | `{amount}` |
+| `queue_position_changed` | `{request_id}`, `{old_position}`, `{new_position}` |
+| `action_failed_debug` | `{action}` |
 
 Channel settings include queue intake controls:
 
