@@ -230,6 +230,7 @@ BOT_MESSAGE_DEFAULT_TEMPLATES: dict[str, str] = {
     "action_failed_debug": "Debug failure in {action}: {error}",
 }
 BOT_MESSAGE_LEVEL_RANK: dict[str, int] = {"mute": 0, "normal": 1, "verbose": 2, "debug": 3}
+BOT_MESSAGES_YAML_PATH = FilePath(__file__).resolve().parent / "bot" / "messages.yml"
 TWITCH_SEND_CHAT_MESSAGE_MAX_LENGTH = 500
 TWITCH_SEND_CHAT_AUTH_MODE_APP = "app_token"
 TWITCH_SEND_CHAT_AUTH_MODE_BOT_USER = "bot_user_token"
@@ -507,6 +508,69 @@ def ensure_eventsub_conduit_schema() -> None:
                     """
                 )
             )
+
+
+def ensure_channel_bot_messages_schema() -> None:
+    """Ensure per-channel bot message template table exists and is seeded.
+
+    Dependencies: executes additive SQL migrations through ``engine.begin`` and
+    performs seed writes via ``SessionLocal`` using ``_seed_channel_bot_messages``.
+    Code customers: startup bootstrap and legacy database compatibility paths.
+    Used variables/origin: schema targets ``channel_bot_messages`` keyed by
+    ``channel_id`` + ``message_id`` for catalog-driven template overrides.
+    """
+
+    with engine.begin() as conn:
+        inspector = inspect(conn)
+        table_names = set(inspector.get_table_names())
+        if "channel_bot_messages" not in table_names:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE channel_bot_messages (
+                        id INTEGER PRIMARY KEY,
+                        channel_id INTEGER NOT NULL REFERENCES active_channels(id) ON DELETE CASCADE,
+                        message_id VARCHAR NOT NULL,
+                        template TEXT NOT NULL,
+                        enabled BOOLEAN DEFAULT 1,
+                        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    )
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_channel_bot_message "
+                    "ON channel_bot_messages(channel_id, message_id)"
+                )
+            )
+        else:
+            columns = {col["name"] for col in inspector.get_columns("channel_bot_messages")}
+            if "enabled" not in columns:
+                conn.execute(text("ALTER TABLE channel_bot_messages ADD COLUMN enabled BOOLEAN DEFAULT 1"))
+            if "created_at" not in columns:
+                conn.execute(text("ALTER TABLE channel_bot_messages ADD COLUMN created_at DATETIME"))
+                conn.execute(text("UPDATE channel_bot_messages SET created_at = CURRENT_TIMESTAMP WHERE created_at IS NULL"))
+            if "updated_at" not in columns:
+                conn.execute(text("ALTER TABLE channel_bot_messages ADD COLUMN updated_at DATETIME"))
+                conn.execute(text("UPDATE channel_bot_messages SET updated_at = CURRENT_TIMESTAMP WHERE updated_at IS NULL"))
+            conn.execute(
+                text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_channel_bot_message "
+                    "ON channel_bot_messages(channel_id, message_id)"
+                )
+            )
+            conn.execute(text("UPDATE channel_bot_messages SET enabled = 1 WHERE enabled IS NULL"))
+
+    db = SessionLocal()
+    try:
+        channel_ids = [row.id for row in db.query(ActiveChannel.id).all()]
+        for channel_pk in channel_ids:
+            _seed_channel_bot_messages(db, channel_pk)
+        db.commit()
+    finally:
+        db.close()
 
 
 def backfill_missing_channel_keys() -> None:
@@ -2386,6 +2450,99 @@ def _render_eventsub_reply_text(reply: dict[str, Any]) -> str:
         return template.format(**template_vars)
     except Exception:
         return template
+
+
+@lru_cache(maxsize=1)
+def _load_bot_messages_yml_defaults() -> dict[str, str]:
+    """Load optional bot/messages.yml defaults used for DB seed compatibility.
+
+    Dependencies: reads ``BOT_MESSAGES_YAML_PATH`` and parses YAML using
+    ``yaml.safe_load``.
+    Code customers: channel bot message seed helpers and template fallback
+    resolution.
+    Used variables/origin: source file values come from repository-managed
+    ``bot/messages.yml`` and may omit newer catalog keys.
+    """
+
+    if not BOT_MESSAGES_YAML_PATH.exists():
+        return {}
+    try:
+        raw = yaml.safe_load(BOT_MESSAGES_YAML_PATH.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return {}
+    result: dict[str, str] = {}
+    if isinstance(raw, dict):
+        for key, value in raw.items():
+            if isinstance(key, str) and isinstance(value, str):
+                result[key] = value
+    return result
+
+
+def _resolve_bot_template_default(message_id: str) -> str:
+    """Resolve canonical default template for a bot ``message_id``.
+
+    Dependencies: consults in-memory ``BOT_MESSAGE_DEFAULT_TEMPLATES`` and
+    optional ``bot/messages.yml`` fallback data.
+    Code customers: channel seed/create flows and bot message reset endpoint.
+    Used variables/origin: ``message_id`` comes from catalog rows and endpoint
+    path parameters.
+    """
+
+    yaml_defaults = _load_bot_messages_yml_defaults()
+    return (
+        BOT_MESSAGE_DEFAULT_TEMPLATES.get(message_id)
+        or yaml_defaults.get(message_id)
+        or message_id
+    )
+
+
+def _seed_channel_bot_messages(db: Session, channel_pk: int) -> None:
+    """Ensure a channel has one seeded template row for every catalog entry.
+
+    Dependencies: reads ``BOT_MESSAGE_CATALOG`` and writes
+    ``ChannelBotMessage`` rows with the provided SQLAlchemy ``Session``.
+    Code customers: channel creation and startup backfill/bootstrap paths.
+    Used variables/origin: ``channel_pk`` is the ``ActiveChannel.id`` primary
+    key resolved by channel provisioning APIs.
+    """
+
+    existing_ids = {
+        row.message_id
+        for row in db.query(ChannelBotMessage.message_id).filter(ChannelBotMessage.channel_id == channel_pk).all()
+    }
+    for message_row in BOT_MESSAGE_CATALOG:
+        message_id = str(message_row.get("id") or "").strip()
+        if not message_id or message_id in existing_ids:
+            continue
+        db.add(
+            ChannelBotMessage(
+                channel_id=channel_pk,
+                message_id=message_id,
+                template=_resolve_bot_template_default(message_id),
+                enabled=True,
+            )
+        )
+
+
+def _channel_bot_message_payload(rows: Sequence["ChannelBotMessage"]) -> dict[str, dict[str, Any]]:
+    """Serialize channel bot message rows for API responses and bot sync.
+
+    Dependencies: pure serialization helper.
+    Code customers: ``list_channels`` and channel bot message endpoints.
+    Used variables/origin: ``rows`` are ORM model instances loaded for a
+    specific channel.
+    """
+
+    payload: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        payload[row.message_id] = {
+            "message_id": row.message_id,
+            "template": row.template,
+            "enabled": bool(row.enabled) if row.enabled is not None else True,
+            "created_at": row.created_at,
+            "updated_at": row.updated_at,
+        }
+    return payload
 
 
 def _should_send_eventsub_reply(channel: ActiveChannel, visibility: str) -> bool:
@@ -4461,6 +4618,11 @@ class ActiveChannel(Base):
         uselist=False,
         cascade="all, delete-orphan",
     )
+    bot_messages = relationship(
+        "ChannelBotMessage",
+        back_populates="channel",
+        cascade="all, delete-orphan",
+    )
     playlists = relationship("Playlist", back_populates="channel", cascade="all, delete-orphan")
 
     @property
@@ -4488,6 +4650,23 @@ class ChannelBotState(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
     channel = relationship("ActiveChannel", back_populates="bot_state")
+
+
+class ChannelBotMessage(Base):
+    __tablename__ = "channel_bot_messages"
+    id = Column(Integer, primary_key=True)
+    channel_id = Column(Integer, ForeignKey("active_channels.id", ondelete="CASCADE"), nullable=False)
+    message_id = Column(String, nullable=False)
+    template = Column(Text, nullable=False)
+    enabled = Column(Boolean, nullable=True, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    channel = relationship("ActiveChannel", back_populates="bot_messages")
+
+    __table_args__ = (
+        UniqueConstraint("channel_id", "message_id", name="uq_channel_bot_message"),
+    )
 
 class ChannelSettings(Base):
     __tablename__ = "channel_settings"
@@ -4858,6 +5037,7 @@ def _validate_startup_symbol_order() -> None:
 ensure_channel_settings_schema()
 _ensure_playlist_schema()
 ensure_eventsub_conduit_schema()
+ensure_channel_bot_messages_schema()
 bootstrap_settings_from_env()
 backfill_twitch_send_chat_auth_mode_setting()
 cleanup_conduit_subscription_secret_semantics()
@@ -4884,6 +5064,7 @@ class ChannelOut(BaseModel):
     bot_active: bool
     bot_last_error: Optional[str] = None
     bot_message_level: Literal["mute", "normal", "verbose", "debug"] = "normal"
+    bot_message_templates: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
 
     class Config:
         from_attributes = True
@@ -5032,6 +5213,29 @@ class BotMessageCatalogEntryOut(BaseModel):
 class BotMessageCatalogOut(BaseModel):
     levels: List[BotMessageLevelDetailOut]
     messages: List[BotMessageCatalogEntryOut]
+
+
+class ChannelBotMessageOut(BaseModel):
+    message_id: str
+    template: str
+    enabled: bool = True
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+
+class ChannelBotMessagesOut(BaseModel):
+    channel: str
+    messages: List[ChannelBotMessageOut]
+
+
+class ChannelBotMessageUpdateIn(BaseModel):
+    template: Optional[str] = None
+    enabled: Optional[bool] = None
+
+
+class ChannelBotMessagesBulkUpdateIn(BaseModel):
+    messages: Dict[str, ChannelBotMessageUpdateIn] = Field(default_factory=dict)
+    reset_to_defaults: bool = False
 
 
 class BotTokenUpdateIn(BaseModel):
@@ -8306,7 +8510,10 @@ def list_channels(db: Session = Depends(get_db)):
         if not channel.bot_state:
             channel.bot_state = get_or_create_bot_state(db, channel.id)
         settings = get_or_create_settings(db, channel.id)
+        _seed_channel_bot_messages(db, channel.id)
         channel.bot_message_level = settings.bot_message_level or "normal"
+        channel.bot_message_templates = _channel_bot_message_payload(channel.bot_messages)
+    db.commit()
     return channels
 
 
@@ -8392,12 +8599,172 @@ def add_channel(payload: ChannelIn, db: Session = Depends(get_db)):
     db.flush()
     get_or_create_settings(db, ch.id)
     get_or_create_bot_state(db, ch.id)
+    _seed_channel_bot_messages(db, ch.id)
     _create_default_favorites_playlist(db, ch.id)
     db.commit()
     db.refresh(ch)
+    ch.bot_message_templates = _channel_bot_message_payload(ch.bot_messages)
     channel_pk = ch.id
     publish_queue_changed(channel_pk)
     return ch
+
+
+@app.get(
+    "/channels/{channel}/bot/messages",
+    response_model=ChannelBotMessagesOut,
+    dependencies=[Depends(require_token)],
+)
+def get_channel_bot_messages(channel: str, db: Session = Depends(get_db)):
+    """Return channel-scoped bot message templates persisted in the database.
+
+    Dependencies: resolves channel identity via ``get_channel_pk`` and ensures
+    seed rows via ``_seed_channel_bot_messages`` before querying
+    ``ChannelBotMessage``.
+    Code customers: admin UI and bot sync/debug workflows.
+    Used variables/origin: ``channel`` path parameter supports channel name,
+    channel ID, or numeric primary key aliases.
+    """
+
+    channel_pk = get_channel_pk(channel, db)
+    _seed_channel_bot_messages(db, channel_pk)
+    db.commit()
+    rows = (
+        db.query(ChannelBotMessage)
+        .filter(ChannelBotMessage.channel_id == channel_pk)
+        .order_by(ChannelBotMessage.message_id.asc())
+        .all()
+    )
+    return ChannelBotMessagesOut(
+        channel=channel,
+        messages=[
+            ChannelBotMessageOut(
+                message_id=row.message_id,
+                template=row.template,
+                enabled=bool(row.enabled) if row.enabled is not None else True,
+                created_at=row.created_at,
+                updated_at=row.updated_at,
+            )
+            for row in rows
+        ],
+    )
+
+
+@app.put(
+    "/channels/{channel}/bot/messages/{message_id}",
+    response_model=ChannelBotMessageOut,
+    dependencies=[Depends(require_token)],
+)
+def update_channel_bot_message(
+    channel: str,
+    message_id: str,
+    payload: ChannelBotMessageUpdateIn,
+    db: Session = Depends(get_db),
+):
+    """Update a single channel bot message template/enabled override row.
+
+    Dependencies: validates message identifiers against
+    ``BOT_MESSAGE_CATALOG_BY_ID`` and mutates ``ChannelBotMessage`` records.
+    Code customers: admin UI message editor and API automation.
+    Used variables/origin: ``payload.template`` and ``payload.enabled`` come
+    from request JSON; omitted fields preserve existing values.
+    """
+
+    normalized_message_id = message_id.strip()
+    if normalized_message_id not in BOT_MESSAGE_CATALOG_BY_ID:
+        raise HTTPException(status_code=404, detail="unknown bot message id")
+    channel_pk = get_channel_pk(channel, db)
+    _seed_channel_bot_messages(db, channel_pk)
+    row = (
+        db.query(ChannelBotMessage)
+        .filter(
+            ChannelBotMessage.channel_id == channel_pk,
+            ChannelBotMessage.message_id == normalized_message_id,
+        )
+        .one_or_none()
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="channel bot message not found")
+    if payload.template is not None:
+        row.template = payload.template
+    if payload.enabled is not None:
+        row.enabled = bool(payload.enabled)
+    row.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(row)
+    return ChannelBotMessageOut(
+        message_id=row.message_id,
+        template=row.template,
+        enabled=bool(row.enabled) if row.enabled is not None else True,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+@app.post(
+    "/channels/{channel}/bot/messages/bulk",
+    response_model=ChannelBotMessagesOut,
+    dependencies=[Depends(require_token)],
+)
+def bulk_update_channel_bot_messages(
+    channel: str,
+    payload: ChannelBotMessagesBulkUpdateIn,
+    db: Session = Depends(get_db),
+):
+    """Bulk update channel bot messages or reset templates to defaults.
+
+    Dependencies: iterates catalog-validated identifiers and writes
+    ``ChannelBotMessage`` rows, using ``_resolve_bot_template_default`` for
+    reset operations.
+    Code customers: admin bulk-save/reset UX flows.
+    Used variables/origin: ``payload.messages`` keyed by message ID with
+    partial template/enabled updates and ``payload.reset_to_defaults`` flag.
+    """
+
+    channel_pk = get_channel_pk(channel, db)
+    _seed_channel_bot_messages(db, channel_pk)
+    rows = (
+        db.query(ChannelBotMessage)
+        .filter(ChannelBotMessage.channel_id == channel_pk)
+        .all()
+    )
+    row_by_id = {row.message_id: row for row in rows}
+    if payload.reset_to_defaults:
+        for row in row_by_id.values():
+            row.template = _resolve_bot_template_default(row.message_id)
+            row.enabled = True
+            row.updated_at = datetime.utcnow()
+    for update_message_id, update_payload in payload.messages.items():
+        normalized_message_id = update_message_id.strip()
+        if normalized_message_id not in BOT_MESSAGE_CATALOG_BY_ID:
+            raise HTTPException(status_code=404, detail=f"unknown bot message id: {normalized_message_id}")
+        row = row_by_id.get(normalized_message_id)
+        if not row:
+            continue
+        if update_payload.template is not None:
+            row.template = update_payload.template
+        if update_payload.enabled is not None:
+            row.enabled = bool(update_payload.enabled)
+        row.updated_at = datetime.utcnow()
+    db.commit()
+    refreshed_rows = (
+        db.query(ChannelBotMessage)
+        .filter(ChannelBotMessage.channel_id == channel_pk)
+        .order_by(ChannelBotMessage.message_id.asc())
+        .all()
+    )
+    return ChannelBotMessagesOut(
+        channel=channel,
+        messages=[
+            ChannelBotMessageOut(
+                message_id=row.message_id,
+                template=row.template,
+                enabled=bool(row.enabled) if row.enabled is not None else True,
+                created_at=row.created_at,
+                updated_at=row.updated_at,
+            )
+            for row in refreshed_rows
+        ],
+    )
 
 def _set_channel_conduit_subscription_state(
     db: Session,

@@ -234,6 +234,9 @@ This document summarizes the REST endpoints exposed by `backend_app.py`.
 | GET | `/channels` | List all configured channels. |
 | POST | `/channels` | Add a new channel (requires admin token) and initialize seeded Favorites. |
 | PUT | `/channels/{channel}` | Update whether the bot should join a channel (admin). |
+| GET | `/channels/{channel}/bot/messages` | Fetch per-channel bot message templates (`channel_id + message_id` rows). |
+| PUT | `/channels/{channel}/bot/messages/{message_id}` | Update one per-channel bot message template and/or enabled flag. |
+| POST | `/channels/{channel}/bot/messages/bulk` | Bulk update per-channel templates or reset all to defaults. |
 | GET | `/channels/{channel}/settings` | Retrieve channel configuration. |
 | PUT | `/channels/{channel}/settings` | Update channel configuration (admin). |
 
@@ -242,10 +245,34 @@ existing record so omitted fields keep their persisted values. Frontend callers
 should prefer sending the full current state when possible or rely on the
 backend merge behavior to avoid unintentionally resetting values to defaults.
 
+`GET /channels` includes `bot_message_templates` per channel so bot workers can
+sync resolved template text and enabled flags without additional round-trips.
+
 `POST /channels` also ensures a manual `Favorites` playlist exists and seeds
 missing defaults idempotently (`Night Drive`, `Strobe`, and
 `LONG DISTANCE CALLING - Voices`), so repeated onboarding does not duplicate
-tracks.
+tracks. Channel creation also seeds `channel_bot_messages` rows for every
+catalog `message_id`.
+
+Per-channel bot message storage model:
+
+- Table: `channel_bot_messages`.
+- Key: unique (`channel_id`, `message_id`).
+- Columns: `template` (required), `enabled` (optional boolean, default `true`),
+  `created_at`, `updated_at`.
+- Seed source order for initial rows:
+  1. `BOT_MESSAGE_DEFAULT_TEMPLATES` in `backend_app.py`.
+  2. `bot/messages.yml` fallback values when a key is missing in the Python
+     default map.
+
+Bot runtime fallback order for final template selection:
+
+1. Per-channel DB row (`channel_bot_messages.template`) when enabled.
+2. Seeded DB default row for that channel/message.
+3. Bot process `DEFAULT_MESSAGES` hardcoded fallback.
+
+If no override exists yet, behavior matches historical `bot/messages.yml`
+defaults.
 
 Channel settings include queue intake controls:
 

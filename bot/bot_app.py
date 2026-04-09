@@ -389,6 +389,7 @@ class BotMessageCatalogEntry:
     level: BotMessageLevel
     description: str
     group: Optional[str] = None
+    enabled: bool = True
 
 
 DEFAULT_MESSAGE_CATALOG: Dict[str, BotMessageCatalogEntry] = {
@@ -894,6 +895,36 @@ class SongBot(commands.Bot):
                 raw_level = settings.get('bot_message_level')
         return self._coerce_message_level(raw_level)
 
+    def _resolve_channel_message_templates(self, channel_login: str) -> Dict[str, str]:
+        """Resolve channel-aware message template map with DB/template fallback.
+
+        Dependencies: combines ``DEFAULT_MESSAGES``, startup-loaded
+        ``self.messages`` values, and ``bot_message_templates`` metadata from
+        ``self.channel_map``.
+        Code customers: command context construction and catalog message
+        rendering.
+        Used variables/origin: ``channel_login`` originates from incoming chat
+        events or channel loop iterators.
+        """
+
+        merged: Dict[str, str] = DEFAULT_MESSAGES.copy()
+        loaded_messages = getattr(self, 'messages', DEFAULT_MESSAGES) or DEFAULT_MESSAGES
+        merged.update(loaded_messages)
+        channel_info = (getattr(self, 'channel_map', {}) or {}).get(self._channel_login(channel_login), {})
+        template_rows = channel_info.get('bot_message_templates') if isinstance(channel_info, dict) else {}
+        if isinstance(template_rows, dict):
+            for message_id, row in template_rows.items():
+                if not isinstance(message_id, str) or not isinstance(row, dict):
+                    continue
+                enabled = row.get('enabled')
+                if enabled is False:
+                    merged[message_id] = ''
+                    continue
+                template_value = row.get('template')
+                if isinstance(template_value, str):
+                    merged[message_id] = template_value
+        return merged
+
     def _resolve_message_catalog_entry(
         self,
         channel_login: str,
@@ -920,11 +951,18 @@ class SongBot(commands.Bot):
             override = {}
         template_key = str(override.get('template_key') or entry.template_key)
         level_value = self._coerce_message_level(override.get('level', entry.level))
+        template_rows = channel_info.get('bot_message_templates') if isinstance(channel_info, dict) else {}
+        enabled = True
+        if isinstance(template_rows, dict):
+            row = template_rows.get(message_id)
+            if isinstance(row, dict) and row.get('enabled') is False:
+                enabled = False
         return BotMessageCatalogEntry(
             template_key=template_key,
             level=level_value,
             description=entry.description,
             group=entry.group,
+            enabled=enabled,
         )
 
     async def _send_catalog_message(
@@ -940,7 +978,9 @@ class SongBot(commands.Bot):
         """Send a logical message by catalog ID with templating and level policy."""
 
         entry = self._resolve_message_catalog_entry(channel_login, message_id)
-        message_templates = getattr(self, 'messages', DEFAULT_MESSAGES) or DEFAULT_MESSAGES
+        if not entry.enabled:
+            return
+        message_templates = self._resolve_channel_message_templates(channel_login)
         template = message_templates.get(entry.template_key)
         if not template:
             return
@@ -981,7 +1021,7 @@ class SongBot(commands.Bot):
         delegates delivery to `_send_message`; always emits backend console logs
         through `push_console_event` for observability. Code customers: all bot
         command and event handlers. Used variables/origin: message content comes
-        from `message_or_key` (literal text or `self.messages` key), while
+        from `message_or_key` (literal text or resolved per-channel template key), while
         `level` is declared at each call site. Visibility rule: `MUTE`
         channels always suppress chat, otherwise messages are allowed when the
         resolved message level is less than or equal to the configured channel
@@ -991,7 +1031,8 @@ class SongBot(commands.Bot):
         resolved_level = self._coerce_message_level(level)
         threshold = self._resolve_channel_message_threshold(channel_login)
         allow_chat = threshold != BotMessageLevel.MUTE and resolved_level <= threshold
-        message_text = self.messages.get(message_or_key, '') if message_key else message_or_key
+        channel_templates = self._resolve_channel_message_templates(channel_login)
+        message_text = channel_templates.get(message_or_key, '') if message_key else message_or_key
         if not message_text:
             return
         policy_meta = {
@@ -1246,7 +1287,7 @@ class SongBot(commands.Bot):
             fallback_partial=fallback_partial,
         )
 
-    def _build_chat_command_context(self) -> ChatCommandContext:
+    def _build_chat_command_context(self, channel_login: Optional[str] = None) -> ChatCommandContext:
         """Build command-core dependency adapters from the current bot state.
 
         Dependencies: runtime command config, message templates, backend client,
@@ -1255,9 +1296,14 @@ class SongBot(commands.Bot):
         current `SongBot` instance attributes.
         """
 
+        resolved_messages = (
+            self._resolve_channel_message_templates(channel_login)
+            if channel_login
+            else (getattr(self, 'messages', DEFAULT_MESSAGES) or DEFAULT_MESSAGES)
+        )
         return ChatCommandContext(
             backend=backend,
-            messages=getattr(self, 'messages', DEFAULT_MESSAGES),
+            messages=resolved_messages,
             commands_map=getattr(self, 'commands_map', {k: ([v] if not isinstance(v, list) else v) for k, v in DEFAULT_COMMANDS.items()}),
             currency_plural=getattr(self, 'currency_plural', 'points'),
             channel_map=getattr(self, 'channel_map', {}),
@@ -1289,7 +1335,7 @@ class SongBot(commands.Bot):
         if parsed.canonical == 'archive':
             await self.handle_archive(message)
             return
-        await dispatch_chat_command(chat_input, parsed, self._build_chat_command_context())
+        await dispatch_chat_command(chat_input, parsed, self._build_chat_command_context(chat_input.channel_login))
 
     async def handle_request(self, msg, arg: str) -> None:
         """Compatibility wrapper executing request logic via normalized core.
@@ -1300,7 +1346,7 @@ class SongBot(commands.Bot):
         """
 
         chat_input = self._normalize_twitch_chat_input(msg)
-        await execute_request(chat_input, arg, self._build_chat_command_context())
+        await execute_request(chat_input, arg, self._build_chat_command_context(chat_input.channel_login))
 
     async def handle_random_request(self, msg, arg: str) -> None:
         """Compatibility wrapper executing random logic via normalized core.
@@ -1310,7 +1356,7 @@ class SongBot(commands.Bot):
         """
 
         chat_input = self._normalize_twitch_chat_input(msg)
-        await execute_random_request(chat_input, arg, self._build_chat_command_context())
+        await execute_random_request(chat_input, arg, self._build_chat_command_context(chat_input.channel_login))
 
     async def handle_playlist_request(self, msg, arg: str) -> None:
         """Compatibility wrapper executing playlist logic via normalized core.
@@ -1321,7 +1367,7 @@ class SongBot(commands.Bot):
         """
 
         chat_input = self._normalize_twitch_chat_input(msg)
-        await execute_playlist_request(chat_input, arg, self._build_chat_command_context())
+        await execute_playlist_request(chat_input, arg, self._build_chat_command_context(chat_input.channel_login))
 
     async def handle_prioritize(self, msg, arg: str) -> None:
         """Compatibility wrapper executing prioritize logic via shared core.
@@ -1332,7 +1378,7 @@ class SongBot(commands.Bot):
         """
 
         chat_input = self._normalize_twitch_chat_input(msg)
-        await execute_prioritize(chat_input, arg, self._build_chat_command_context())
+        await execute_prioritize(chat_input, arg, self._build_chat_command_context(chat_input.channel_login))
 
     async def handle_points(self, msg) -> None:
         """Compatibility wrapper executing points logic via normalized core.
@@ -1343,7 +1389,7 @@ class SongBot(commands.Bot):
         """
 
         chat_input = self._normalize_twitch_chat_input(msg)
-        await execute_points(chat_input, '', self._build_chat_command_context())
+        await execute_points(chat_input, '', self._build_chat_command_context(chat_input.channel_login))
 
     async def handle_remove(self, msg) -> None:
         """Compatibility wrapper executing remove logic via normalized core.
@@ -1354,26 +1400,24 @@ class SongBot(commands.Bot):
         """
 
         chat_input = self._normalize_twitch_chat_input(msg)
-        await execute_remove(chat_input, '', self._build_chat_command_context())
+        await execute_remove(chat_input, '', self._build_chat_command_context(chat_input.channel_login))
 
     async def handle_archive(self, msg) -> None:
+        login = self._channel_login(msg.broadcaster.name)
         if not (msg.chatter.moderator or msg.chatter.broadcaster):
-            await self._send_bot_message(
-                self._channel_login(msg.broadcaster.name),
-                self.messages['archive_denied'],
-                level=BotMessageLevel.NORMAL,
+            await self._send_catalog_message(
+                login,
+                'archive_denied',
                 metadata={'channel': msg.broadcaster.name, 'command': 'archive'},
                 reply_to=msg.id,
                 fallback_partial=msg.broadcaster,
             )
             return
-        login = self._channel_login(msg.broadcaster.name)
         row = self.channel_map.get(login)
         if not row:
-            await self._send_bot_message(
+            await self._send_catalog_message(
                 login,
-                self.messages['channel_not_registered'],
-                level=BotMessageLevel.NORMAL,
+                'channel_not_registered',
                 metadata={'channel': msg.broadcaster.name, 'command': 'archive'},
                 reply_to=msg.id,
                 fallback_partial=msg.broadcaster,
@@ -1383,10 +1427,9 @@ class SongBot(commands.Bot):
         try:
             await backend.archive_stream(channel)
             await self.process_backend_update(channel)
-            await self._send_bot_message(
+            await self._send_catalog_message(
                 login,
-                self.messages['archive_success'],
-                level=BotMessageLevel.NORMAL,
+                'archive_success',
                 metadata={'channel': channel, 'command': 'archive'},
                 reply_to=msg.id,
                 fallback_partial=msg.broadcaster,
@@ -1397,10 +1440,10 @@ class SongBot(commands.Bot):
                 f'Failed to archive queue for {msg.chatter.name}: {exc}',
                 metadata={'channel': channel, 'command': 'archive'},
             )
-            await self._send_bot_message(
+            await self._send_catalog_message(
                 login,
-                self.messages['failed'].format(error=exc),
-                level=BotMessageLevel.NORMAL,
+                'failed',
+                template_vars={'error': exc},
                 metadata={'channel': channel, 'command': 'archive'},
                 reply_to=msg.id,
                 fallback_partial=msg.broadcaster,
@@ -1899,13 +1942,14 @@ class BotService:
             if new_prio and not was_prio:
                 song = await backend.get_song(ch_name, req['song_id'])
                 user = await backend.get_user(ch_name, req['user_id'])
-                await self._send_bot_message(
+                await self._send_catalog_message(
                     chan,
-                    self.messages['bump_free'].format(
-                        artist=song.get('artist', '?'),
-                        title=song.get('title', '?'),
-                        user=user.get('username', '?'),
-                    ),
+                    'bump_free',
+                    template_vars={
+                        'artist': song.get('artist', '?'),
+                        'title': song.get('title', '?'),
+                        'user': user.get('username', '?'),
+                    },
                     metadata={'channel': ch_name, 'event': 'bump'},
                 )
 
@@ -1938,19 +1982,18 @@ class BotService:
             if delta == 1
             else f"these {delta} {self.currency_plural}"
         )
-        template = self.messages.get(f"award_{etype}")
-        if template:
-            await self._send_bot_message(
-                chan,
-                template.format(
-                    username=user.get('username', ''),
-                    word=word,
-                    points=user.get('prio_points', 0),
-                    currency_plural=self.currency_plural,
-                    **extra,
-                ),
-                metadata={'channel': ch_name, 'event': etype},
-            )
+        await self._send_catalog_message(
+            chan,
+            f"award_{etype}",
+            template_vars={
+                'username': user.get('username', ''),
+                'word': word,
+                'points': user.get('prio_points', 0),
+                'currency_plural': self.currency_plural,
+                **extra,
+            },
+            metadata={'channel': ch_name, 'event': etype},
+        )
 
 # ---- entry ----
 async def main():

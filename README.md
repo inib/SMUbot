@@ -11,3 +11,15 @@ See the [docs](docs/README.md) for a full project overview and setup instruction
 - The Users view now ships with a debounced search box that filters usernames client-side while still passing the term to the backend source.
 - Pagination is limited to 25 names per page with accessible Previous/Next controls and a live page indicator.
 - Channel owners and the special playlist automation requester (`__playlist__`) are excluded from both the rendered list and the API totals by default.
+
+## Per-channel bot message templates
+- Bot message templates are now stored per channel in the backend database (`channel_bot_messages` keyed by `channel_id + message_id`).
+- New API endpoints:
+  - `GET /channels/{channel}/bot/messages`
+  - `PUT /channels/{channel}/bot/messages/{message_id}`
+  - `POST /channels/{channel}/bot/messages/bulk` (bulk update/reset)
+- Channel creation seeds template rows from backend defaults with `bot/messages.yml` compatibility fallback.
+- Runtime fallback order is:
+  1. Channel DB override.
+  2. Channel seeded DB default.
+  3. Bot `DEFAULT_MESSAGES` constant.
