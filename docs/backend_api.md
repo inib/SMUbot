@@ -347,6 +347,10 @@ Trigger/message-specific placeholders:
 | `queue_position_changed` | `{request_id}`, `{old_position}`, `{new_position}` |
 | `action_failed_debug` | `{action}` |
 
+Implementation note: backend and bot runtimes both import the shared
+`template_vars.py` helper module for allowlist construction and safe formatting;
+container images must include this file.
+
 Channel settings include queue intake controls:
 
 - `queue_closed` toggles whether any new requests are accepted.
