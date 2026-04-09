@@ -149,6 +149,59 @@ class BotConfigApiTests(unittest.TestCase):
         )
         self.assertTrue(by_id["request_added"]["enabled"])
 
+    def test_channel_bot_message_update_accepts_settings_vars(self) -> None:
+        """Settings-derived placeholders should be accepted when saving templates."""
+
+        create_response = self.client.post(
+            "/channels",
+            headers={"X-Admin-Token": backend_app.ADMIN_TOKEN},
+            json={"channel_name": "SettingsVars", "channel_id": "7010", "join_active": 1},
+        )
+        self.assertEqual(create_response.status_code, 200)
+
+        update_response = self.client.put(
+            "/channels/SettingsVars/bot/messages/request_added",
+            headers={"X-Admin-Token": backend_app.ADMIN_TOKEN},
+            json={"template": "bits/point={settings_prio_bits_per_point} Added {artist}-{title}"},
+        )
+        self.assertEqual(update_response.status_code, 200)
+
+    def test_channel_bot_message_update_rejects_unknown_placeholder(self) -> None:
+        """Unknown placeholders should fail validation on save."""
+
+        create_response = self.client.post(
+            "/channels",
+            headers={"X-Admin-Token": backend_app.ADMIN_TOKEN},
+            json={"channel_name": "RejectUnknown", "channel_id": "7011", "join_active": 1},
+        )
+        self.assertEqual(create_response.status_code, 200)
+
+        update_response = self.client.put(
+            "/channels/RejectUnknown/bot/messages/request_added",
+            headers={"X-Admin-Token": backend_app.ADMIN_TOKEN},
+            json={"template": "bad {definitely_unknown_variable}"},
+        )
+        self.assertEqual(update_response.status_code, 400)
+        self.assertIn("unknown placeholders", update_response.json().get("detail", ""))
+
+    def test_channel_bot_message_update_rejects_cross_trigger_placeholder(self) -> None:
+        """Reward-only placeholders must be rejected for unrelated message IDs."""
+
+        create_response = self.client.post(
+            "/channels",
+            headers={"X-Admin-Token": backend_app.ADMIN_TOKEN},
+            json={"channel_name": "CrossTrigger", "channel_id": "7012", "join_active": 1},
+        )
+        self.assertEqual(create_response.status_code, 200)
+
+        update_response = self.client.put(
+            "/channels/CrossTrigger/bot/messages/award_follow",
+            headers={"X-Admin-Token": backend_app.ADMIN_TOKEN},
+            json={"template": "thanks {username} for {amount} bits"},
+        )
+        self.assertEqual(update_response.status_code, 400)
+        self.assertIn("unknown placeholders", update_response.json().get("detail", ""))
+
     def test_runtime_announcement_uses_send_chat_pipeline(self) -> None:
         """Runtime announcements should reuse the authoritative Send Chat path."""
 

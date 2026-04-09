@@ -5,6 +5,7 @@ COPY bot/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 COPY bot/*.py ./
 COPY command_resolution.py ./command_resolution.py
+COPY template_vars.py ./template_vars.py
 COPY bot/commands.yml ./commands.yml
 COPY bot/messages.yml ./messages.yml
 
